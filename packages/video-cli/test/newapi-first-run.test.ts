@@ -80,6 +80,23 @@ test("an already configured NewAPI endpoint needs no prompt", async () => {
   assert.deepEqual(result.credentials, []);
 });
 
+test("configured NewAPI always requires apiKey and requires OSS slots only for complete relay config", async () => {
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const base = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+    ...starter.endpoints["newapi.personal"], config: { baseUrl: "https://configured.example/v1" },
+  } } };
+  const withoutRelay = await configureNewApiRuntimeBeforeUp({ ...contextWithAnswers([]), profile: base, interactive: false });
+  assert.deepEqual(withoutRelay.requiredCredentials, [{ endpoint: "newapi.personal", slots: ["apiKey"] }]);
+  const incompleteRelay = { ...base, endpoints: { ...base.endpoints, "newapi.personal": {
+    ...base.endpoints["newapi.personal"], config: { ...base.endpoints["newapi.personal"].config,
+      relayEndpoint: "https://oss.example", relayBucket: "bucket" },
+  } } };
+  const incomplete = await configureNewApiRuntimeBeforeUp({
+    ...contextWithAnswers([]), profile: incompleteRelay, interactive: false,
+  });
+  assert.deepEqual(incomplete.requiredCredentials, [{ endpoint: "newapi.personal", slots: ["apiKey"] }]);
+});
+
 test("OSS setup reprompts invalid choice and returns three credential writes", async () => {
   const progress: string[] = [];
   const result = await configureNewApiRuntimeBeforeUp({
@@ -168,7 +185,7 @@ test("declining OSS removes stale relay config while preserving unrelated NewAPI
     assert.equal(Object.hasOwn(config, field), false, `${field} must be removed`);
   }
   assert.equal(parseNewApiEndpointConfig(config).relay, undefined);
-  assert.deepEqual(result.requiredCredentials, [{ endpoint: "newapi.personal", slot: "apiKey" }]);
+  assert.deepEqual(result.requiredCredentials, [{ endpoint: "newapi.personal", slots: ["apiKey"] }]);
   assert.deepEqual(result.credentials.map(({ slot }) => slot), ["apiKey"]);
   assert.doesNotMatch(JSON.stringify(result.profile) + progress.join(""), /api-secret/u);
 });
@@ -188,6 +205,10 @@ test("a failed second credential write resumes only missing secrets on the next 
     ...videoCliDistribution,
     async openRuntimeHost() { return {
       async openCredentials() { return {
+        async describeCredentials() { return slots.map((slot) => ({
+          endpoint: "newapi.personal", slot, label: slot, kind: "secret" as const,
+          ref: { store: "platform", key: slot }, writable: true,
+        })); },
         async credentials() { return slots.map((slot) => ({
           endpoint: "newapi.personal", slot, label: slot, kind: "secret" as const,
           ref: { store: "platform", key: slot }, writable: true, configured: stored.has(slot),
@@ -254,6 +275,8 @@ test("a missing read-only env key stops before prepare with stable guidance", as
   const distribution = { ...videoCliDistribution,
     async openRuntimeHost() { return {
       async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
+          ref: { store: "env", key: "MY_NEWAPI_KEY" }, writable: false }]; },
         async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
           ref: { store: "env", key: "MY_NEWAPI_KEY" }, writable: false, configured: false }]; },
         async putCredential() { writes += 1; throw new Error("must not write env"); },
@@ -270,6 +293,135 @@ test("a missing read-only env key stops before prepare with stable guidance", as
   assert.equal(prepared, false);
   assert.equal(writes, 0);
   assert.deepEqual(JSON.parse(await readFile(profilePath, "utf8")), profile);
+});
+
+test("missing credential recovery asks only for a configured Profile's missing OSS secret", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-newapi-missing-oss-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profilePath = join(root, "runtime.json");
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const profile = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+    ...starter.endpoints["newapi.personal"], config: {
+      baseUrl: "https://gateway.example/v1", apiKey: { store: "platform", key: "api" },
+      relayEndpoint: "https://oss.example", relayBucket: "bucket",
+      relayAccessKeyId: { store: "platform", key: "ak" },
+      relayAccessKeySecret: { store: "platform", key: "sk" },
+    },
+  } } };
+  await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+  const stored = new Map([["apiKey", "existing-api-secret"], ["relayAccessKeyId", "existing-ak-secret"]]);
+  const slots = ["apiKey", "relayAccessKeyId", "relayAccessKeySecret"];
+  const promptedSlots: string[] = [];
+  const output: string[] = [];
+  const openedEndpoints: string[] = [];
+  const describedEndpoints: string[] = [];
+  let prepared = 0;
+  let workerStarts = 0;
+  const distribution = { ...videoCliDistribution,
+    async openRuntimeHost() { return {
+      async openCredentials(endpoint: string) {
+        openedEndpoints.push(endpoint);
+        return {
+          async describeCredentials() { describedEndpoints.push(endpoint); return slots.map((slot) => ({ endpoint, slot, label: slot,
+            kind: "secret" as const, ref: { store: "platform", key: slot }, writable: true })); },
+          async credentials() { return slots.map((slot) => ({ endpoint, slot, label: slot,
+            kind: "secret" as const, ref: { store: "platform", key: slot }, writable: true, configured: stored.has(slot) })); },
+          async putCredential(_endpoint: string, slot: string, secret: string) { stored.set(slot, secret); },
+          async close() {},
+        };
+      },
+      async prepare() { prepared += 1; assert.equal(stored.get("relayAccessKeySecret"), "replacement-secret"); return []; },
+      async createRuntime() { return { async close() {} }; },
+      async controller() { return {
+        programs: { async up() { return { programs: [] }; } },
+        worker: { async up() { workerStarts += 1; return { state: "running" }; } },
+      }; },
+    }; },
+  } as unknown as typeof videoCliDistribution;
+  await runCli(["runtime", "up", profilePath, "--workspace", root], {
+    write: (value: string) => { output.push(value); },
+    writeProgress: (value: string) => { output.push(value); },
+    readSecret: async (prompt: string) => { promptedSlots.push(prompt.slice(0, -2)); return "replacement-secret"; },
+    terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
+  }, distribution);
+  assert.deepEqual(promptedSlots, ["relayAccessKeySecret"]);
+  assert.deepEqual([...new Set(openedEndpoints)], ["newapi.personal"]);
+  assert.deepEqual(describedEndpoints, ["newapi.personal"]);
+  assert.equal(prepared, 1);
+  assert.equal(workerStarts, 1);
+  assert.doesNotMatch(output.join("") + await readFile(profilePath, "utf8"), /replacement-secret/u);
+});
+
+test("missing credential cancellation or empty input prevents prepare and Worker startup", async (t) => {
+  for (const answer of [undefined, "   "]) {
+    const root = await mkdtemp(join(tmpdir(), "hypit-newapi-cancel-"));
+    t.after(async () => await rm(root, { recursive: true, force: true }));
+    const profilePath = join(root, "runtime.json");
+    const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+    const profile = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+      ...starter.endpoints["newapi.personal"], config: { baseUrl: "https://gateway.example/v1",
+        apiKey: { store: "platform", key: "api" } },
+    } } };
+    await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+    let prepared = 0;
+    let workerStarts = 0;
+    const distribution = { ...videoCliDistribution,
+      async openRuntimeHost() { return {
+        async openCredentials() { return {
+          async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+            kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true }]; },
+          async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+            kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true, configured: false }]; },
+          async putCredential() { throw new Error("cancelled input must not be written"); },
+          async close() {},
+        }; },
+        async prepare() { prepared += 1; return []; },
+        async controller() { return { programs: { async up() { return { programs: [] }; } },
+          worker: { async up() { workerStarts += 1; return { state: "running" }; } } }; },
+      }; },
+    } as unknown as typeof videoCliDistribution;
+    await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
+      write() {}, readSecret: async () => answer as string,
+      terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
+    }, distribution), /API key.*(?:cancelled|empty)/u);
+    assert.equal(prepared, 0);
+    assert.equal(workerStarts, 0);
+    assert.deepEqual(JSON.parse(await readFile(profilePath, "utf8")), profile);
+  }
+});
+
+test("a missing read-only non-env credential has stable source guidance", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-newapi-read-only-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profilePath = join(root, "runtime.json");
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const profile = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+    ...starter.endpoints["newapi.personal"], config: { baseUrl: "https://gateway.example/v1",
+      apiKey: { store: "vault", key: "private-key" } },
+  } } };
+  await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+  let prepared = 0;
+  let workerStarts = 0;
+  const distribution = { ...videoCliDistribution,
+    async openRuntimeHost() { return {
+      async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+          kind: "secret" as const, ref: { store: "vault", key: "private-key" }, writable: false }]; },
+        async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+          kind: "secret" as const, ref: { store: "vault", key: "private-key" }, writable: false, configured: false }]; },
+        async putCredential() { throw new Error("read-only credential must not be written"); },
+        async close() { throw new Error("store close failed"); },
+      }; },
+      async prepare() { prepared += 1; return []; },
+      async controller() { return { programs: { async up() { return { programs: [] }; } },
+        worker: { async up() { workerStarts += 1; return { state: "running" }; } } }; },
+    }; },
+  } as unknown as typeof videoCliDistribution;
+  await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
+    write() {},
+  }, distribution), /API key is missing from its read-only credential source/u);
+  assert.equal(prepared, 0);
+  assert.equal(workerStarts, 0);
 });
 
 test("an incomplete env Profile never attempts to write its read-only key", async (t) => {
@@ -290,6 +442,8 @@ test("an incomplete env Profile never attempts to write its read-only key", asyn
   const distribution = { ...videoCliDistribution,
     async openRuntimeHost() { return {
       async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
+          ref: { store: "env", key: "MY_NEWAPI_KEY" }, writable: false }]; },
         async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
           ref: { store: "env", key: "MY_NEWAPI_KEY" }, writable: false, configured: false }]; },
         async putCredential() { writes += 1; throw new Error("read-only credential"); },
@@ -334,6 +488,8 @@ test("up does not prepare until a credential write is observable", async (t) => 
   const distribution = { ...videoCliDistribution,
     async openRuntimeHost() { return {
       async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
+          ref: { store: "platform", key: "newapi.personal.api-key" }, writable: true }]; },
         async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key", kind: "secret" as const,
           ref: { store: "platform", key: "newapi.personal.api-key" }, writable: true, configured: false }]; },
         async putCredential() { return; },
@@ -355,4 +511,81 @@ test("up does not prepare until a credential write is observable", async (t) => 
     },
   );
   assert.equal(prepared, false);
+});
+
+test("credential status errors after storage never reveal the supplied secret", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-newapi-status-error-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profilePath = join(root, "runtime.json");
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const profile = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+    ...starter.endpoints["newapi.personal"], config: { baseUrl: "https://gateway.example/v1",
+      apiKey: { store: "platform", key: "api" } },
+  } } };
+  await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+  let stored = "";
+  let prepared = 0;
+  const distribution = { ...videoCliDistribution,
+    async openRuntimeHost() { return {
+      async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+          kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true }]; },
+        async credentials() {
+          if (stored) throw new Error(`store status failed for ${stored}`);
+          return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+            kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true, configured: false }];
+        },
+        async putCredential(_endpoint: string, _slot: string, secret: string) { stored = secret; },
+        async close() {},
+      }; },
+      async prepare() { prepared += 1; return []; },
+      async controller() { throw new Error("controller opened before credential audit"); },
+    }; },
+  } as unknown as typeof videoCliDistribution;
+  await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
+    write() {}, readSecret: async () => "replacement-secret",
+    terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
+  }, distribution), (error: Error) => {
+    assert.doesNotMatch(error.message, /replacement-secret/u);
+    return true;
+  });
+  assert.equal(prepared, 0);
+  assert.doesNotMatch(await readFile(profilePath, "utf8"), /replacement-secret/u);
+});
+
+test("credential control close errors after storage never reveal the supplied secret", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-newapi-close-error-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profilePath = join(root, "runtime.json");
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const profile = { ...starter, endpoints: { ...starter.endpoints, "newapi.personal": {
+    ...starter.endpoints["newapi.personal"], config: { baseUrl: "https://gateway.example/v1",
+      apiKey: { store: "platform", key: "api" } },
+  } } };
+  await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+  let stored = "";
+  let prepared = 0;
+  const distribution = { ...videoCliDistribution,
+    async openRuntimeHost() { return {
+      async openCredentials() { return {
+        async describeCredentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+          kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true }]; },
+        async credentials() { return [{ endpoint: "newapi.personal", slot: "apiKey", label: "API key",
+          kind: "secret" as const, ref: { store: "platform", key: "api" }, writable: true, configured: !!stored }]; },
+        async putCredential(_endpoint: string, _slot: string, secret: string) { stored = secret; },
+        async close() { if (stored) throw new Error(`store close failed for ${stored}`); },
+      }; },
+      async prepare() { prepared += 1; return []; },
+      async controller() { throw new Error("controller opened before credential audit"); },
+    }; },
+  } as unknown as typeof videoCliDistribution;
+  await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
+    write() {}, readSecret: async () => "replacement-secret",
+    terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
+  }, distribution), (error: Error) => {
+    assert.doesNotMatch(error.message, /replacement-secret/u);
+    return true;
+  });
+  assert.equal(prepared, 0);
+  assert.doesNotMatch(await readFile(profilePath, "utf8"), /replacement-secret/u);
 });

@@ -60,12 +60,18 @@ function replaceEndpointConfig(profile: CanonicalValue, config: CanonicalValue):
   };
 }
 
-function requiredCredentials(config: CanonicalValue): readonly { readonly endpoint: string; readonly slot: string }[] {
+function requiredCredentials(config: CanonicalValue): readonly { readonly endpoint: string; readonly slots: readonly string[] }[] {
   const item = objectValue(config);
-  const slots = item?.relayEndpoint === undefined
-    ? ["apiKey"]
-    : ["apiKey", "relayAccessKeyId", "relayAccessKeySecret"];
-  return slots.map((slot) => ({ endpoint: endpointName, slot }));
+  const hasRef = (value: CanonicalValue | undefined) => {
+    const ref = objectValue(value);
+    return typeof ref?.store === "string" && ref.store.length > 0
+      && typeof ref.key === "string" && ref.key.length > 0;
+  };
+  const completeRelay = typeof item?.relayEndpoint === "string" && item.relayEndpoint.trim().length > 0
+    && typeof item.relayBucket === "string" && item.relayBucket.trim().length > 0
+    && hasRef(item.relayAccessKeyId) && hasRef(item.relayAccessKeySecret);
+  return [{ endpoint: endpointName, slots: !completeRelay
+    ? ["apiKey"] : ["apiKey", "relayAccessKeyId", "relayAccessKeySecret"] }];
 }
 
 function preserveCredentialRefs(profile: CanonicalValue, existing: CanonicalValue, completed: CanonicalValue): CanonicalValue {

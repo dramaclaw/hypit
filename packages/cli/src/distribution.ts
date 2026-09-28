@@ -29,7 +29,7 @@ export type CliRuntimeProfileSetupResult = {
   readonly changed: boolean;
   readonly credentials: readonly CliRuntimeCredentialWrite[];
   /** Credential slots that must resolve before Runtime preparation. */
-  readonly requiredCredentials?: readonly { readonly endpoint: string; readonly slot: string }[];
+  readonly requiredCredentials?: readonly { readonly endpoint: string; readonly slots: readonly string[] }[];
 };
 
 export type CliRuntimeProfileSetupContext = {
