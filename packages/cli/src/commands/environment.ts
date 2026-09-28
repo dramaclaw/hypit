@@ -347,7 +347,7 @@ export async function runEnvironmentCommand(input: {
         : await distribution.configureRuntimeProfileBeforeUp({
           profilePath: profile,
           profile: JSON.parse(await readFile(profile, "utf8")) as CanonicalValue,
-          interactive: !args.presentation.json && io.terminal?.isTTY === true,
+          interactive: !args.presentation.json && io.terminal?.isTTY === true && io.inputIsTTY === true,
           ...(io.readText === undefined ? {} : { readText: io.readText }),
           ...(io.readSecret === undefined ? {} : { readSecret: io.readSecret }),
           writeProgress: io.writeProgress ?? io.write,
@@ -406,7 +406,7 @@ export async function runEnvironmentCommand(input: {
               if (item.ref.store === "env") throw new Error(`set ${item.ref.key} in the environment`);
               throw new Error(`${item.label} is missing from its read-only credential source`);
             }
-            if (!io.terminal?.isTTY || io.readSecret === undefined || args.presentation.json) {
+            if (!io.terminal?.isTTY || io.inputIsTTY !== true || io.readSecret === undefined || args.presentation.json) {
               throw new Error(`${item.label} is missing; run runtime up in an interactive terminal to configure it`);
             }
             const secret = (await io.readSecret(`${item.label}: `))?.trim();

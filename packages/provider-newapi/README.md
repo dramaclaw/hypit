@@ -67,3 +67,20 @@ hypit runtime up
 Provider 只在请求实际包含参考素材时上传 OSS，路径为 `relay/hypit/YYYYMMDD/<uuid>.<扩展名>`，并把临时签名 URL 交给 NewAPI。纯文本请求不会创建 OSS 客户端，也不会上传任何内容。未配置 OSS 却使用参考素材时，请求会在调用付费生成接口之前失败，并给出明确错误。
 
 视频生成通过 `POST /video/generations` 提交并轮询 `GET /video/generations/{taskId}`；图片根据是否有参考图调用 `/images/generations` 或 `/images/edits`。下载后的图片、视频都会进入当前 Hypit Build 的 ResourceStore。错误信息中的 HTTP(S) URL 会被脱敏，避免签名地址进入日志。
+
+## 模型约束与错误恢复
+
+Seedream 5 Lite 的 Provider 契约采用网关固定开启的内容安全策略：只支持 `nsfwCheck=true`，
+`false` 在能力选择和请求准备阶段返回 unsupported。网关目录没有可配置的安全检查字段，
+因此请求不发送 `nsfw_check`，也不提供关闭安全检查的选项。
+
+四个图片模型的尺寸规则保存在 Provider 路由内。Seedream basic/high 对应 2K/3K，至少
+3,686,400 像素；其他图片模型支持 1K/2K/4K，至少 655,360 像素。尺寸保持所选比例并按
+16 像素对齐，总像素不超过 8,294,400，边长不超过 3840。不支持的比例、分辨率或 Seedream
+ultra 会在请求前拒绝。PNG/JPEG 的 base64 结果按文件签名保存正确的媒体类型。
+
+HTTP 429 和 5xx 不会使已提交的视频任务立刻失败：轮询遵守 `Retry-After` 后继续，直到任务
+完成或达到操作超时。图片和视频异常都会清除本次请求的凭据与 URL，不保留可打印的原始 cause。
+
+首次启动向导要求 stdin、stdout 都是交互终端且未使用 JSON 模式。地址会在读取密钥前校验，
+无效时只重新询问地址。配置完成后展示不含密钥的网关与 OSS 启用状态摘要。

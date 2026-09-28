@@ -52,6 +52,54 @@ test("non-interactive up lists missing NewAPI configuration", async () => {
   );
 });
 
+test("invalid URL is retried before reading any secret and summary is safe", async () => {
+  const prompts: string[] = [];
+  const output: string[] = [];
+  const urls = ["http://remote.example/private?token=url-secret", "https://gateway.example/v1"];
+  let secretsRead = 0;
+  const result = await configureNewApiRuntimeBeforeUp({ ...contextWithAnswers([]),
+    readText: async (prompt) => {
+      prompts.push(prompt);
+      if (prompt.startsWith("NewAPI")) { assert.equal(secretsRead, 0); return urls.shift()!; }
+      return "no";
+    },
+    readSecret: async () => { secretsRead += 1; return "private-api-secret"; },
+    writeProgress: (value) => { output.push(value); },
+  });
+  assert.equal(result.changed, true);
+  assert.equal(secretsRead, 1);
+  assert.deepEqual(prompts, ["NewAPI address: ", "NewAPI address: ", "Configure OSS relay for generated media? [y/n]: "]);
+  assert.match(output.join(""), /NewAPI.*OSS.*disabled/su);
+  assert.doesNotMatch(output.join(""), /private-api-secret|url-secret/u);
+});
+
+test("summary redacts a credential even when it matches the gateway host", async () => {
+  const progress: string[] = [];
+  await configureNewApiRuntimeBeforeUp({ ...contextWithAnswers(["https://private-key.example/v1", "private-key", "no"]),
+    writeProgress: (value) => { progress.push(value); },
+  });
+  assert.doesNotMatch(progress.join(""), /private-key/u);
+});
+
+test("stdout TTY with redirected stdin never reads answers or prepares runtime", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-newapi-pipe-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profilePath = join(root, "runtime.json");
+  await writeFile(profilePath, JSON.stringify(videoCliDistribution.initialRuntimeProfile));
+  let reads = 0;
+  let opened = 0;
+  const io = { write() {}, inputIsTTY: false,
+    readText: async () => { reads += 1; throw new Error("must not read redirected stdin"); },
+    readSecret: async () => { reads += 1; throw new Error("must not read redirected stdin"); },
+    terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
+  };
+  const distribution = { ...videoCliDistribution,
+    async openRuntimeHost() { opened += 1; throw new Error("must not open runtime"); },
+  };
+  await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], io, distribution), /baseUrl.*missing/u);
+  assert.equal(reads, 0); assert.equal(opened, 0);
+});
+
 test("an existing Profile without NewAPI is left untouched", async () => {
   const profile = { format: "hypit.runtime-local@1", endpoints: { "hypihub.default": { use: "@hypit/provider-hypihub" } } };
   const result = await configureNewApiRuntimeBeforeUp({
@@ -116,7 +164,7 @@ test("OSS setup reprompts invalid choice and returns three credential writes", a
   assert.equal(config.relayEndpoint, "https://oss.example");
   assert.equal(config.relayBucket, "bucket");
   assert.doesNotMatch(JSON.stringify(result.profile) + progress.join(""), /newapi-secret|oss-ak-secret|oss-sk-secret/u);
-  assert.deepEqual(progress, []);
+  assert.match(progress.join(""), /NewAPI.*OSS.*enabled/su);
 });
 
 test("a custom writable store keeps its API and OSS credential refs", async () => {
@@ -235,6 +283,7 @@ test("a failed second credential write resumes only missing secrets on the next 
     write: (value: string) => { output.push(value); },
     readText: async (prompt: string) => { prompted.push(prompt); return answers.shift() ?? ""; },
     readSecret: async (prompt: string) => { prompted.push(prompt); return answers.shift() ?? ""; },
+    inputIsTTY: true,
     terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
   };
   await assert.rejects(
@@ -342,6 +391,7 @@ test("missing credential recovery asks only for a configured Profile's missing O
     write: (value: string) => { output.push(value); },
     writeProgress: (value: string) => { output.push(value); },
     readSecret: async (prompt: string) => { promptedSlots.push(prompt.slice(0, -2)); return "replacement-secret"; },
+    inputIsTTY: true,
     terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
   }, distribution);
   assert.deepEqual(promptedSlots, ["relayAccessKeySecret"]);
@@ -382,6 +432,7 @@ test("missing credential cancellation or empty input prevents prepare and Worker
     } as unknown as typeof videoCliDistribution;
     await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
       write() {}, readSecret: async () => answer as string,
+      inputIsTTY: true,
       terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
     }, distribution), /API key.*(?:cancelled|empty)/u);
     assert.equal(prepared, 0);
@@ -459,6 +510,7 @@ test("an incomplete env Profile never attempts to write its read-only key", asyn
       write() {},
       readText: async () => answers.shift() ?? "",
       readSecret: async () => answers.shift() ?? "",
+      inputIsTTY: true,
       terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
     }, distribution),
     (error: Error) => {
@@ -502,6 +554,7 @@ test("up does not prepare until a credential write is observable", async (t) => 
   await assert.rejects(
     () => runCli(["runtime", "up", profilePath, "--workspace", root], {
       write() {}, readSecret: async () => "private-test-key",
+      inputIsTTY: true,
       terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
     }, distribution),
     (error: Error) => {
@@ -544,6 +597,7 @@ test("credential status errors after storage never reveal the supplied secret", 
   } as unknown as typeof videoCliDistribution;
   await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
     write() {}, readSecret: async () => "replacement-secret",
+    inputIsTTY: true,
     terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
   }, distribution), (error: Error) => {
     assert.doesNotMatch(error.message, /replacement-secret/u);
@@ -581,6 +635,7 @@ test("credential control close errors after storage never reveal the supplied se
   } as unknown as typeof videoCliDistribution;
   await assert.rejects(() => runCli(["runtime", "up", profilePath, "--workspace", root], {
     write() {}, readSecret: async () => "replacement-secret",
+    inputIsTTY: true,
     terminal: { isTTY: true, color: false, unicode: true, columns: 100 },
   }, distribution), (error: Error) => {
     assert.doesNotMatch(error.message, /replacement-secret/u);

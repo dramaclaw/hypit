@@ -1,4 +1,4 @@
-import { completeNewApiSetup, inspectNewApiSetup } from "@dramaclaw/provider-newapi";
+import { completeNewApiSetup, inspectNewApiSetup, validateNewApiSetupUrl } from "@dramaclaw/provider-newapi";
 import type { CliRuntimeProfileSetupContext, CliRuntimeProfileSetupResult } from "@hypit/cli";
 import type { CanonicalValue } from "@hypit/protocol";
 
@@ -113,12 +113,24 @@ export async function configureNewApiRuntimeBeforeUp(
   if (!context.interactive || context.readText === undefined || context.readSecret === undefined) {
     throw new Error(`NewAPI is the default for this Runtime, but ${inspection.missing.join(", ")} is missing; run runtime up in an interactive terminal to configure it`);
   }
+  let baseUrl: string;
+  for (;;) {
+    const answer = await context.readText("NewAPI address: ");
+    try { baseUrl = validateNewApiSetupUrl(answer); break; }
+    catch { context.writeProgress("NewAPI address must be a valid HTTPS or loopback HTTP URL. Please try again.\n"); }
+  }
   const completed = completeNewApiSetup({
-    baseUrl: await requiredLine(context, "NewAPI address: "),
+    baseUrl,
     apiKey: await requiredSecret(context, "NewAPI API key: "),
     relay: await relayAnswers(context),
   });
   const config = preserveCredentialRefs(context.profile, endpoint.config ?? null, completed.config);
+  // Deliberately omit URL userinfo, path and query, and all credential values.
+  let summary = `NewAPI configured for ${new URL(baseUrl).origin}; OSS relay ${objectValue(config)?.relayEndpoint === undefined ? "disabled" : "enabled"}. Credentials will be saved in the selected credential store.\n`;
+  for (const { secret } of [...completed.credentials].sort((a, b) => b.secret.length - a.secret.length)) {
+    summary = summary.replaceAll(secret, "[redacted]");
+  }
+  context.writeProgress(summary);
   return {
     profile: replaceEndpointConfig(context.profile, config),
     changed: true,

@@ -35,9 +35,11 @@ export function inspectNewApiSetup(config: CanonicalValue): NewApiSetupInspectio
   return { configured: baseUrl.length > 0, missing: baseUrl.length > 0 ? [] : ["baseUrl"] };
 }
 
-function validateNewApiSetupUrl(value: string): string {
+export function validateNewApiSetupUrl(value: string): string {
   const trimmed = value.trim().replace(/\/+$/u, "");
-  const url = new URL(trimmed);
+  let url: URL;
+  try { url = new URL(trimmed); }
+  catch { throw new Error("DramaClaw NewAPI baseUrl must be a valid HTTPS or loopback HTTP URL"); }
   const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("DramaClaw NewAPI baseUrl must use HTTPS or loopback HTTP");

@@ -14,6 +14,8 @@ export type CliTerminal = {
 
 export type CliIo = {
   readonly write: (text: string) => void;
+  /** True only when the input channel supports interactive terminal prompts. */
+  readonly inputIsTTY?: boolean;
   /** Human progress that may use stderr while `write` remains a stable machine-output channel. */
   readonly writeProgress?: (text: string) => void;
   /** Concrete command shells expose process status without coupling the engine to Node globals. */
