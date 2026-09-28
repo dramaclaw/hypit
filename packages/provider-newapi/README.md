@@ -14,58 +14,55 @@
 | `@hypit/seedance@1#seedance-2.5` | `seedance-2.5` | 视频 |
 | `@hypit/minimax-h3@1#minimax-h3` | `MiniMax-H3` | 视频 |
 
-## 只使用 NewAPI
+## 首次使用
 
-纯文本生成图片或视频只需要 NewAPI 地址和 API Key，不需要 OSS：
+在视频项目中运行：
 
-```json
-{
-  "format": "hypit.runtime-local@1",
-  "dataRoot": ".hypit/execution",
-  "credentials": {
-    "platform": { "use": "@hypit/credential-store-platform" }
-  },
-  "endpoints": {
-    "newapi.team": {
-      "use": "@dramaclaw/provider-newapi",
-      "pool": "newapi.team",
-      "config": {
-        "baseUrl": "https://你的-newapi-地址/v1",
-        "apiKey": { "store": "platform", "key": "newapi.team.api-key" },
-        "defaultConcurrency": 2,
-        "pollIntervalMs": 10000
-      }
-    }
-  },
-  "bindings": {
-    "@hypit/gpt-image@1#gpt-image-2": "newapi.team",
-    "@hypit/nano-banana@1#nano-banana-2": "newapi.team",
-    "@hypit/nano-banana@1#nano-banana-pro": "newapi.team",
-    "@hypit/seedream@1#seedream-5-lite": "newapi.team",
-    "@hypit/seedance@1#seedance-2": "newapi.team",
-    "@hypit/seedance@1#seedance-2-fast": "newapi.team",
-    "@hypit/seedance@1#seedance-2-mini": "newapi.team",
-    "@hypit/seedance@1#seedance-2.5": "newapi.team",
-    "@hypit/minimax-h3@1#minimax-h3": "newapi.team"
-  }
-}
+```bash
+hypit runtime init
+hypit runtime up
 ```
 
-`baseUrl` 必须使用 HTTPS；本机服务可以使用 `http://127.0.0.1` 或 `http://localhost`。真实 Key 不要写进 JSON，配置中只保存 `CredentialRef`，然后用 Hypit 的凭据登录命令把 Key 存入 `platform` 凭据库。
+`runtime init` 在尚无 Profile 时创建并选择可编辑的 `hypit.runtime.json`；已有 Profile 会保留。
+此命令不会登录或启动服务。起始 Profile 保留
+HypiHub，并将上表九项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
+API Key，再询问是否配置 OSS 中转。仅用文字生成图片或视频时可以选择不配置 OSS。
 
-## 使用参考素材时配置 OSS
+地址写入 Profile 的 `baseUrl`，必须使用 HTTPS；本机服务可以使用 loopback HTTP。API Key
+写入 Profile 选定的 CredentialStore，Profile 中只保留 `CredentialRef`，不保存密钥原文。
+默认选择名为 `platform` 的 Store；如果自行改选其他可写 Store，配置流程沿用该选择。
 
-NewAPI 必须能够下载参考图、首尾帧、参考视频或参考音频。此时再追加下面四项 OSS 配置；四项必须一起提供：
+非交互终端中，若起始 Profile 缺少 `baseUrl`，`runtime up` 会报出缺少的字段并提示在交互终端配置。
+已有地址但缺少所需凭据时，非交互运行也会报错并提示交互配置；只读凭据来源会提示改在该来源中设置。
+
+## 以后再配置 OSS
+
+使用参考图、首尾帧、参考视频或参考音频时，NewAPI 必须能够下载这些素材。编辑已选择的
+`hypit.runtime.json`，在 `endpoints["newapi.personal"].config` 中一起添加中转地址、桶名和两个
+凭据引用（如下为字段示意，值须换成自己的非密钥配置）：
 
 ```json
 {
-  "relayEndpoint": "oss-cn-chengdu.aliyuncs.com",
-  "relayBucket": "你的中转桶",
-  "relayAccessKeyId": { "store": "platform", "key": "newapi.team.oss-ak" },
-  "relayAccessKeySecret": { "store": "platform", "key": "newapi.team.oss-sk" },
+  "relayEndpoint": "<OSS Endpoint>",
+  "relayBucket": "<OSS Bucket>",
+  "relayAccessKeyId": { "store": "platform", "key": "newapi.personal.oss-ak" },
+  "relayAccessKeySecret": { "store": "platform", "key": "newapi.personal.oss-sk" },
   "relayTtlSeconds": 3600
 }
 ```
+
+如果 Profile 已选择其他 CredentialStore，把两个引用的 `store` 改为该 Store 的名称。
+然后分别通过安全输入把两个密钥写入选定 Store：
+
+```bash
+hypit auth login newapi.personal --slot relayAccessKeyId
+hypit auth login newapi.personal --slot relayAccessKeySecret
+hypit runtime up
+```
+
+不要把 OSS AccessKey 或 NewAPI API Key 原文写进 JSON。四项 OSS 必填配置
+（`relayEndpoint`、`relayBucket` 和两个凭据引用）必须一起提供。再次 `runtime up` 会检查所需凭据，
+不会因已有 `baseUrl` 而重新启动首次配置问答。
 
 Provider 只在请求实际包含参考素材时上传 OSS，路径为 `relay/hypit/YYYYMMDD/<uuid>.<扩展名>`，并把临时签名 URL 交给 NewAPI。纯文本请求不会创建 OSS 客户端，也不会上传任何内容。未配置 OSS 却使用参考素材时，请求会在调用付费生成接口之前失败，并给出明确错误。
 
