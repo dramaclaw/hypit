@@ -11,6 +11,9 @@ importers:
       '@puppeteer/browsers':
         specifier: 3.2.2
         version: 3.2.2
+      ali-oss:
+        specifier: ^6.23.0
+        version: 6.23.0
       cjs-module-lexer:
         specifier: 2.2.1
         version: 2.2.1

@@ -20,6 +20,13 @@ test("one Distribution resolves its internal and public package spellings", () =
   assert.equal(resolveDistributionPackageImport(process.cwd(), "example-package"), undefined);
 });
 
+test("an installed Distribution resolves its bundled NewAPI provider by package name", () => {
+  assert.equal(
+    resolveDistributionPackageImport(process.cwd(), "@dramaclaw/provider-newapi"),
+    resolve(process.cwd(), "packages/provider-newapi/src/index.ts"),
+  );
+});
+
 test("an external Author Package imports the active Distribution public API", async () => {
   installDistributionPackageResolution([process.cwd()]);
   const author = await import(String("@hypit/hypit/author-kit")) as { readonly sealGraphFragment?: unknown };
