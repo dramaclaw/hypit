@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { newApiDefaultBindings } from "@dramaclaw/provider-newapi";
+import { newApiDefaultBindings, parseNewApiEndpointConfig } from "@dramaclaw/provider-newapi";
 import { runCli } from "@hypit/cli";
 import type { CliRuntimeProfileSetupContext } from "@hypit/cli";
 import { videoCliDistribution } from "../src/distribution.js";
@@ -138,6 +138,39 @@ test("a Profile selecting only file credentials creates its missing ref in that 
   });
   assert.deepEqual((result.profile as Profile).endpoints["newapi.personal"].config.apiKey,
     { store: "file", key: "newapi.personal.api-key" });
+});
+
+test("declining OSS removes stale relay config while preserving unrelated NewAPI choices", async () => {
+  const starter = videoCliDistribution.initialRuntimeProfile as Profile;
+  const apiKey = { store: "file", key: "my.newapi.key" };
+  const profile = { ...starter,
+    credentials: { file: { use: "@hypit/credential-store-file", config: { path: "./private" } } },
+    endpoints: { ...starter.endpoints, "newapi.personal": {
+      ...starter.endpoints["newapi.personal"],
+      config: {
+        baseUrl: "", apiKey, pollIntervalMs: 2500, defaultConcurrency: 2,
+        relayEndpoint: "https://old-oss.example", relayBucket: "old-bucket",
+        relayAccessKeyId: { store: "file", key: "old.ak" },
+        relayAccessKeySecret: { store: "file", key: "old.sk" }, relayTtlSeconds: 7200,
+      },
+    } },
+  };
+  const progress: string[] = [];
+  const result = await configureNewApiRuntimeBeforeUp({
+    ...contextWithAnswers(["https://gateway.example/v1", "api-secret", "no"]), profile,
+    writeProgress: (value) => { progress.push(value); },
+  });
+  const config = (result.profile as Profile).endpoints["newapi.personal"].config;
+  assert.deepEqual(config.apiKey, apiKey);
+  assert.equal(config.pollIntervalMs, 2500);
+  assert.equal(config.defaultConcurrency, 2);
+  for (const field of ["relayEndpoint", "relayBucket", "relayAccessKeyId", "relayAccessKeySecret", "relayTtlSeconds"]) {
+    assert.equal(Object.hasOwn(config, field), false, `${field} must be removed`);
+  }
+  assert.equal(parseNewApiEndpointConfig(config).relay, undefined);
+  assert.deepEqual(result.requiredCredentials, [{ endpoint: "newapi.personal", slot: "apiKey" }]);
+  assert.deepEqual(result.credentials.map(({ slot }) => slot), ["apiKey"]);
+  assert.doesNotMatch(JSON.stringify(result.profile) + progress.join(""), /api-secret/u);
 });
 
 test("a failed second credential write resumes only missing secrets on the next up", async (t) => {

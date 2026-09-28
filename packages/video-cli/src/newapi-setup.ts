@@ -81,6 +81,11 @@ function preserveCredentialRefs(profile: CanonicalValue, existing: CanonicalValu
     if (next[slot] === undefined) continue;
     merged[slot] = current[slot] ?? { ...objectValue(next[slot])!, store };
   }
+  if (next.relayEndpoint === undefined) {
+    for (const field of ["relayEndpoint", "relayBucket", "relayAccessKeyId", "relayAccessKeySecret", "relayTtlSeconds"]) {
+      delete merged[field];
+    }
+  }
   return merged;
 }
 
