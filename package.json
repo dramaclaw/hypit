@@ -186,6 +186,7 @@
     "node": ">=22.15.0"
   },
   "devDependencies": {
+    "@dramaclaw/provider-newapi": "workspace:*",
     "@hypit/artifact": "workspace:*",
     "@hypit/audio-track": "workspace:*",
     "@hypit/audio-track-studio": "workspace:*",
