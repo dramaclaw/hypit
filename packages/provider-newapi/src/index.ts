@@ -7,3 +7,5 @@ export { createNewApiProvider, newApiProviderModuleRef } from "./provider.js";
 export type { CreateNewApiProviderOptions } from "./provider.js";
 export { newApiRouteForCapability, newApiRoutes } from "./routes.js";
 export type { NewApiPreparedRequest, NewApiRoute } from "./routes.js";
+export { completeNewApiSetup, inspectNewApiSetup, newApiDefaultBindings } from "./setup.js";
+export type { NewApiSetupCredential, NewApiSetupInput, NewApiSetupInspection } from "./setup.js";
