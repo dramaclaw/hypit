@@ -762,6 +762,9 @@ importers:
       '@hypit/elaborator':
         specifier: workspace:*
         version: link:../elaborator
+      '@hypit/file-io-node':
+        specifier: workspace:*
+        version: link:../file-io-node
       '@hypit/package-loader-node':
         specifier: workspace:*
         version: link:../package-loader-node

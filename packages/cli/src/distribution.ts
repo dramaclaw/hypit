@@ -18,6 +18,27 @@ export type CliCompilerOptions = {
   readonly packageContributions: readonly NodePackageContribution[];
 };
 
+export type CliRuntimeCredentialWrite = {
+  readonly endpoint: string;
+  readonly slot: string;
+  readonly secret: string;
+};
+
+export type CliRuntimeProfileSetupResult = {
+  readonly profile: CanonicalValue;
+  readonly changed: boolean;
+  readonly credentials: readonly CliRuntimeCredentialWrite[];
+};
+
+export type CliRuntimeProfileSetupContext = {
+  readonly profilePath: string;
+  readonly profile: CanonicalValue;
+  readonly interactive: boolean;
+  readonly readText?: (prompt: string) => Promise<string>;
+  readonly readSecret?: (prompt: string) => Promise<string>;
+  readonly writeProgress: (text: string) => void;
+};
+
 /**
  * Explicit application assembly for the generic command engine.
  *
@@ -31,6 +52,8 @@ export type CliDistribution = {
   readonly bootstrapPackages: readonly LoadedPackage[];
   /** Product-owned starter Profile. The generic CLI only writes this explicit value. */
   readonly initialRuntimeProfile?: CanonicalValue;
+  /** Configure the selected Profile and queue credential writes before Runtime startup. */
+  configureRuntimeProfileBeforeUp?(context: CliRuntimeProfileSetupContext): Promise<CliRuntimeProfileSetupResult>;
   createCompiler(options: CliCompilerOptions): NodeCompiler;
   /**
    * Read the self-described Run Source and its Author Source closure, then return

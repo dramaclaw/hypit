@@ -20,6 +20,8 @@ export type CliIo = {
   readonly setExitCode?: (code: number) => void;
   /** Interactive secret input supplied by the concrete CLI shell; never echoed or logged. */
   readonly readSecret?: (prompt: string) => Promise<string>;
+  /** Interactive plain-text input supplied by the concrete CLI shell. */
+  readonly readText?: (prompt: string) => Promise<string>;
   readonly terminal?: CliTerminal;
 };
 
