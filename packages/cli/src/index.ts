@@ -26,5 +26,7 @@ export type { OperationalMachineView } from "./machine-view.js";
 export type {
   CliCompilerOptions,
   CliDistribution,
+  CliRuntimeProfileSetupContext,
+  CliRuntimeProfileSetupResult,
 } from "./distribution.js";
 export type * from "./runtime-port.js";

@@ -3646,6 +3646,9 @@ importers:
 
   packages/video-cli:
     dependencies:
+      '@dramaclaw/provider-newapi':
+        specifier: workspace:*
+        version: link:../provider-newapi
       '@hypit/browser-capture':
         specifier: workspace:*
         version: link:../browser-capture

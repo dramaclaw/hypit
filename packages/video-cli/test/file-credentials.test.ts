@@ -27,6 +27,7 @@ test("an explicitly selected file Store supports CLI login, repair and logout wi
     ...profile.endpoints["hypihub.default"].config,
     apiKey: { store: "file", key: "test.oauth" },
   } } };
+  delete profile.bindings;
   await writeFile(profilePath, JSON.stringify(profile));
   const auth = (action: string, ...args: string[]) => run("auth", action, "hypihub.default", "--runtime", profilePath, ...args);
   assert.equal(JSON.parse((await auth("status")).stdout).credentials[0].configured, false);
