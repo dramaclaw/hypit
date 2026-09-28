@@ -10,20 +10,32 @@
 ## 本次修改范围
 
 - 新增工作区包 `@dramaclaw/provider-newapi`。
-- 支持已经在黑咖啡视频项目中验证过的两个模型映射：
-  - Hypit 图片模型 `@hypit/gpt-image@1#gpt-image-2` 对应 NewAPI 模型 `LingShan-G2`。
-  - Hypit 视频模型 `@hypit/seedance@1#seedance-2-mini` 对应 NewAPI 模型 `seedance-2.0-mini`。
+- 支持 DramaClaw 与 Hypit 当前已有精确模型定义的交集，共 9 个模型映射：
+
+| Hypit 能力 | NewAPI 模型 |
+| --- | --- |
+| `@hypit/gpt-image@1#gpt-image-2` | `LingShan-G2` |
+| `@hypit/nano-banana@1#nano-banana-2` | `LingShan-NB-2` |
+| `@hypit/nano-banana@1#nano-banana-pro` | `LingShan-NB-Pro` |
+| `@hypit/seedream@1#seedream-5-lite` | `seedream-5.0-lite` |
+| `@hypit/seedance@1#seedance-2` | `seedance-2.0` |
+| `@hypit/seedance@1#seedance-2-fast` | `seedance-2.0-fast` |
+| `@hypit/seedance@1#seedance-2-mini` | `seedance-2.0-mini` |
+| `@hypit/seedance@1#seedance-2.5` | `seedance-2.5` |
+| `@hypit/minimax-h3@1#minimax-h3` | `MiniMax-H3` |
 - 支持图片生成和参考图编辑。
 - 支持视频任务提交、状态查询和结果下载。
 - 兼容 NewAPI 返回的任务状态和字段，包括 `not_start`、`in_progress`、`result_url`、`fail_reason`，以及人物素材触发的人工审核状态。
 - NewAPI Key 和 OSS 密钥继续使用 Hypit 的 `CredentialRef` 保存，不把真实密钥提交到 Git。
 - 增加一份不含真实密钥的团队配置示例和使用说明。
 
-本次不实现 NewAPI 语音转写，也不替换 WhisperX。要替换 WhisperX，需要先验证 NewAPI 的语音模型是否能返回逐词时间戳，再单独设计和实现。
+本次不新增 Hypit 模型定义，因此不接入 Seedream 4.5、Seedream 5 Pro、Seedance 1.0/1.5、HappyHorse 和 Wan 3.0 Video。本次也不接入文本、Embedding、TTS 或音乐模型，不实现 NewAPI 语音转写，也不替换 WhisperX。
 
 ## 实现方式
 
 Provider 会向 Hypit 注册一个可配置的 NewAPI Endpoint。
+
+9 个模型使用各自已有的 Hypit 精确能力定义。Provider 为每项能力声明对应的 NewAPI 模型名、请求字段和实际限制；不会用一个模型冒充另一个模型，也不会允许任意字符串绕过 Hypit 的能力校验。
 
 启动 Endpoint 时只强制要求：
 
@@ -67,7 +79,7 @@ Provider 会把这些本地素材上传到 OSS，生成临时签名 URL，再把
 
 并发数、视频轮询间隔和请求超时时间继续允许配置。
 
-第一版把 NewAPI 模型名固定为已经验证过的 `LingShan-G2` 和 `seedance-2.0-mini`，暂时不对团队开放未经验证的任意模型配置。
+第一版把 NewAPI 模型名固定为上表中的 9 个映射，暂时不允许用任意模型字符串绕过 Hypit 的精确能力定义。
 
 ## 请求流程
 
@@ -108,6 +120,8 @@ Provider 会把这些本地素材上传到 OSS，生成临时签名 URL，再把
 5. 没有配置 OSS 时，包含参考素材的请求会返回清晰错误。
 6. 配置 OSS 后，图片参考素材和视频首帧可以转换为签名 URL 并提交给 NewAPI。
 7. 视频任务状态、人工审核、结果收集和错误脱敏行为保持正常。
+8. 9 个模型能力全部出现在 Endpoint Offer 中，并各自使用正确的 NewAPI 模型名。
+9. 每个模型的分辨率、画幅比例、时长和参考素材限制与 Hypit 定义及 DramaClaw 目录的共同范围一致。
 
 先运行 Provider 自身的测试和 TypeScript 检查，再运行仓库中相关的回归测试。
 
