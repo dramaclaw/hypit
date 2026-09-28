@@ -1,6 +1,8 @@
 import {
   compileWireRequest,
   generationTypes,
+  sealGeneratedImageSet,
+  sealGeneratedVideoSet,
   selectWireModelForRequest,
 } from "@hypit/generation";
 import type {
@@ -9,7 +11,8 @@ import type {
   GenerationWireMapping,
 } from "@hypit/generation";
 import type { EndpointRequest, EndpointSupport } from "@hypit/endpoint-kit";
-import type { CapabilityRef, CanonicalValue, TypeRef } from "@hypit/protocol";
+import { canonicalize } from "@hypit/protocol";
+import type { BlobRef, CapabilityRef, CanonicalValue, StoredValue, TypeRef } from "@hypit/protocol";
 
 import { newApiMappings } from "./mapping.js";
 
@@ -24,6 +27,7 @@ export type NewApiRoute = GenerationWireMapping & {
   readonly returns: TypeRef;
   readonly supports: (request: EndpointRequest) => EndpointSupport;
   readonly prepare: (constraints: CanonicalValue) => NewApiPreparedRequest;
+  readonly packageResult: (artifacts: readonly BlobRef[]) => StoredValue;
 };
 
 const IMAGE_RATIOS: Readonly<Record<string, readonly string[]>> = {
@@ -98,6 +102,12 @@ export const newApiRoutes: readonly NewApiRoute[] = newApiMappings.map((mapping)
         (await compileWireRequest(mapping, request, resolve)).input as Record<string, unknown>),
     };
   },
+  packageResult: (artifacts) => ({
+    kind: "inline",
+    value: canonicalize(mapping.result === "image"
+      ? sealGeneratedImageSet({ images: artifacts })
+      : sealGeneratedVideoSet({ videos: artifacts })),
+  }),
 }));
 
 const routesByCapability = new Map(newApiRoutes.map((route) => [route.key, route]));

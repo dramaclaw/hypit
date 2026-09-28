@@ -4,6 +4,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
+  "hypit": { "activation": "./src/activation.ts" },
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@hypit/endpoint-kit": "workspace:*",
@@ -14,6 +15,7 @@
     "ali-oss": "^6.23.0"
   },
   "devDependencies": {
+    "@hypit/driver-node": "workspace:*",
     "@hypit/gpt-image": "workspace:*",
     "@hypit/minimax-h3": "workspace:*",
     "@hypit/nano-banana": "workspace:*",

@@ -2546,6 +2546,9 @@ importers:
         specifier: ^6.23.0
         version: 6.23.0
     devDependencies:
+      '@hypit/driver-node':
+        specifier: workspace:*
+        version: link:../driver-node
       '@hypit/gpt-image':
         specifier: workspace:*
         version: link:../gpt-image

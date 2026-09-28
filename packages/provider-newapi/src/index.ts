@@ -3,5 +3,7 @@ export type { NewApiEndpointConfig, NewApiRelayConfig } from "./config.js";
 export { newApiMappings } from "./mapping.js";
 export { createOssPublisher } from "./relay.js";
 export type { AssetPublisher, OssClientFactory, PublishInput } from "./relay.js";
+export { createNewApiProvider, newApiProviderModuleRef } from "./provider.js";
+export type { CreateNewApiProviderOptions } from "./provider.js";
 export { newApiRouteForCapability, newApiRoutes } from "./routes.js";
 export type { NewApiPreparedRequest, NewApiRoute } from "./routes.js";
