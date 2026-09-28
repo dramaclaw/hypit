@@ -16,7 +16,7 @@ type OssClientOptions = {
 };
 
 type OssClient = {
-  readonly put: (name: string, bytes: Uint8Array, options: { readonly headers: { readonly "content-type": string } }) => Promise<unknown>;
+  readonly put: (name: string, bytes: Buffer, options: { readonly headers: { readonly "content-type": string } }) => Promise<unknown>;
   readonly signatureUrl: (name: string, options: { readonly expires: number }) => string;
 };
 
@@ -46,7 +46,7 @@ function extension(mediaType: string): string {
   } as Readonly<Record<string, string>>)[mediaType] ?? "bin";
 }
 
-const defaultClientFactory: OssClientFactory = (options) => new OSS(options) as unknown as OssClient;
+const defaultClientFactory: OssClientFactory = (options) => new OSS(options);
 
 export function createOssPublisher(
   config: NewApiRelayConfig,
@@ -62,7 +62,7 @@ export function createOssPublisher(
     });
     const day = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const objectName = `relay/hypit/${day}/${crypto.randomUUID()}.${extension(mediaType)}`;
-    await client.put(objectName, bytes, { headers: { "content-type": mediaType } });
+    await client.put(objectName, Buffer.from(bytes), { headers: { "content-type": mediaType } });
     return client.signatureUrl(objectName, { expires: config.ttlSeconds });
   };
 }

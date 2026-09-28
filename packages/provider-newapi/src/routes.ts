@@ -37,6 +37,36 @@ const IMAGE_RATIOS: Readonly<Record<string, readonly string[]>> = {
   "seedream-5.0-lite": ["1:1", "16:9", "9:16", "3:2", "3:4", "21:9", "2:3", "4:3"],
 };
 
+// Snapshot of the DramaClaw image catalog and its image-size request contract.
+// Keep constraints here, with the exact model routes; no external repository is needed at runtime.
+const IMAGE_GEOMETRY = Object.fromEntries(Object.keys(IMAGE_RATIOS).map((model) => [model, {
+  resolutions: model === "seedream-5.0-lite" ? ["2K", "3K"] : ["1K", "2K", "4K"],
+  minPixels: model === "seedream-5.0-lite" ? 3_686_400 : 655_360,
+  maxPixels: 8_294_400, maxEdge: 3840, alignment: 16,
+}]));
+
+function imageDimensions(model: string, resolution: string, ratio: string) {
+  const limits = IMAGE_GEOMETRY[model]!;
+  const [rw, rh] = ratio.split(":").map(Number);
+  const longEdge = ({ "1K": 1024, "2K": 2048, "3K": 3072, "4K": 3840 } as Record<string, number>)[resolution]!;
+  let width = longEdge * rw! / Math.max(rw!, rh!);
+  let height = longEdge * rh! / Math.max(rw!, rh!);
+  const pixels = Math.min(limits.maxPixels, Math.max(limits.minPixels, width * height));
+  const scale = Math.sqrt(pixels / (width * height));
+  width *= scale; height *= scale;
+  const ceil = (value: number) => Math.ceil(value / limits.alignment) * limits.alignment;
+  const floor = (value: number) => Math.floor(value / limits.alignment) * limits.alignment;
+  if (ceil(width) * ceil(height) > limits.maxPixels) {
+    width = floor(width); height = floor(height);
+  } else {
+    width = ceil(width); height = ceil(height);
+  }
+  if (width * height < limits.minPixels || Math.max(width, height) > limits.maxEdge) {
+    throw new Error(`DramaClaw NewAPI ${model} does not support ${resolution} at ${ratio}`);
+  }
+  return { width, height };
+}
+
 function scalar(request: GenerationRequest, port: string): string | number | boolean | undefined {
   const value = request.ports[port]?.[0];
   return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : undefined;
@@ -51,6 +81,17 @@ function rejection(mapping: GenerationWireMapping, request: GenerationRequest): 
   if (mapping.capability.name === "seedream-5-lite" && scalar(request, "quality") === "ultra") {
     return "DramaClaw NewAPI seedream-5.0-lite supports 2K basic or 3K high, not 4K ultra";
   }
+  // Provider contract: this gateway fixes content safety on and exposes no opt-out field.
+  if (mapping.capability.name === "seedream-5-lite" && scalar(request, "nsfwCheck") !== true) {
+    return "DramaClaw NewAPI seedream-5.0-lite content safety checks cannot be disabled";
+  }
+  if (mapping.result === "image") {
+    const resolution = model === "seedream-5.0-lite"
+      ? scalar(request, "quality") === "basic" ? "2K" : "3K" : String(scalar(request, "resolution"));
+    if (!IMAGE_GEOMETRY[model]!.resolutions.includes(resolution)) {
+      return `DramaClaw NewAPI ${model} does not support resolution ${resolution}`;
+    }
+  }
   if (mapping.capability.module.name === "@hypit/seedance") {
     if (mapping.capability.name !== "seedance-2.5" && ratio === "adaptive") {
       return `DramaClaw NewAPI ${model} does not advertise adaptive aspect ratio`;
@@ -62,11 +103,15 @@ function rejection(mapping: GenerationWireMapping, request: GenerationRequest): 
   return undefined;
 }
 
-function normalize(mapping: GenerationWireMapping, input: Record<string, unknown>): Record<string, unknown> {
+function normalize(mapping: GenerationWireMapping, model: string, input: Record<string, unknown>): Record<string, unknown> {
   if (mapping.capability.name === "seedream-5-lite") {
     input.resolution = input.quality === "basic" ? "2K" : "3K";
     delete input.quality;
+    // Only true reaches normalization; the fixed gateway policy needs no request field.
     delete input.nsfw_check;
+  }
+  if (mapping.result === "image") {
+    Object.assign(input, imageDimensions(model, String(input.resolution), String(input.aspect_ratio)));
   }
   if (mapping.capability.module.name === "@hypit/seedance") {
     if (input.aspect_ratio === "adaptive") input.aspect_ratio = "auto";
@@ -98,7 +143,7 @@ export const newApiRoutes: readonly NewApiRoute[] = newApiMappings.map((mapping)
     return {
       model,
       result: mapping.result,
-      compile: async (resolve) => normalize(mapping,
+      compile: async (resolve) => normalize(mapping, model,
         (await compileWireRequest(mapping, request, resolve)).input as Record<string, unknown>),
     };
   },

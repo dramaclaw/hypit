@@ -1,10 +1,12 @@
 import { requestDeadline } from "@hypit/runtime-kit";
 import {
   EndpointResponseError,
+  EndpointHttpError,
   EndpointServiceError,
   EndpointTransportError,
   defineEndpointPackage,
   pollAgainOrFail,
+  retryAfterMs,
   transport,
   wakeAfter,
 } from "@hypit/endpoint-kit";
@@ -82,25 +84,36 @@ function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function publicText(value: string): string {
+function publicText(value: string, credentials: Credentials = {}): string {
+  for (const secret of Object.values(credentials).map((item) => item.secret)
+    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0)
+    .sort((a, b) => b.length - a.length)) {
+    value = value.replaceAll(secret, "[redacted]");
+  }
   return value.replace(/https?:\/\/\S+/giu, "[redacted-url]").slice(0, 500);
 }
 
 function publicError(value: unknown): string | undefined {
-  if (typeof value === "string" && value.length > 0) return publicText(value);
+  if (typeof value === "string" && value.length > 0) return value;
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const item = value as Record<string, unknown>;
   const direct = item.message ?? item.detail ?? item.fail_reason ?? (typeof item.error === "string" ? item.error : undefined);
-  if (typeof direct === "string" && direct.length > 0) return publicText(direct);
+  if (typeof direct === "string" && direct.length > 0) return direct;
   return item.error === undefined ? undefined : publicError(item.error);
 }
 
-function failure(error: unknown): EndpointOutcome {
+function safeError(error: unknown, credentials: Credentials): EndpointServiceError {
+  return new EndpointServiceError(error instanceof EndpointServiceError ? error.code : "DRAMACLAW_NEWAPI_ERROR",
+    publicText(failureMessage(error), credentials));
+}
+
+function failure(error: unknown, credentials: Credentials): EndpointOutcome {
+  const sanitized = safeError(error, credentials);
   return {
     status: "failed",
     failure: {
-      code: error instanceof EndpointServiceError ? error.code : "DRAMACLAW_NEWAPI_ERROR",
-      message: publicText(failureMessage(error)),
+      code: sanitized.code,
+      message: sanitized.message,
     },
   };
 }
@@ -127,18 +140,6 @@ function resultUrl(value: Record<string, unknown>): string | undefined {
     ? output as Record<string, unknown> : undefined;
   const url = body.url ?? body.video_url ?? body.result_url ?? video?.url ?? outputObject?.url ?? output;
   return typeof url === "string" && url.length > 0 ? url : undefined;
-}
-
-function imageDimensions(resolution: string, ratio: string): { readonly width: number; readonly height: number } | undefined {
-  const match = /^(\d+):(\d+)$/u.exec(ratio);
-  const longEdge = ({ "1K": 1024, "2K": 2048, "3K": 3072, "4K": 3840 } as Record<string, number>)[resolution.toUpperCase()];
-  if (match === null || longEdge === undefined) return undefined;
-  const rw = Number(match[1]);
-  const rh = Number(match[2]);
-  const rounded = (value: number) => Math.max(16, Math.ceil(value / 16) * 16);
-  return rw >= rh
-    ? { width: longEdge, height: rounded(longEdge * rh / rw) }
-    : { width: rounded(longEdge * rw / rh), height: longEdge };
 }
 
 function videoDimensions(resolution: string, ratio: string): { readonly width: number; readonly height: number } | undefined {
@@ -178,11 +179,13 @@ class NewApiClient {
       const responseText = await transport(deadline.wait(response.text()));
       let body: unknown;
       try { body = responseText.length === 0 ? {} : JSON.parse(responseText); }
-      catch { throw new EndpointResponseError(`DramaClaw NewAPI returned invalid JSON (${response.status})`); }
+      catch {
+        if (response.ok) throw new EndpointResponseError(`DramaClaw NewAPI returned invalid JSON (${response.status})`);
+      }
       if (!response.ok) {
         const detail = publicError(body) ?? `HTTP ${response.status}`;
-        throw new EndpointServiceError("DRAMACLAW_NEWAPI_HTTP_ERROR",
-          `DramaClaw NewAPI ${init.method ?? "GET"} ${path} failed: ${detail}`);
+        throw new EndpointHttpError("DRAMACLAW_NEWAPI_HTTP_ERROR",
+          `DramaClaw NewAPI ${init.method ?? "GET"} ${path} failed: ${detail}`, response.status, retryAfterMs(response.headers));
       }
       return object(body, "DramaClaw NewAPI response");
     } finally {
@@ -235,14 +238,14 @@ async function prepare(route: NewApiRoute, context: EndpointInvocationContext, p
 function imageBody(request: NewApiPreparedRequest, input: Record<string, unknown>) {
   const ratio = String(input.aspect_ratio);
   const resolution = String(input.resolution);
-  const dimensions = imageDimensions(resolution, ratio);
   return {
     model: request.model,
     prompt: input.prompt,
     n: 1,
     response_format: "b64_json",
     watermark: false,
-    ...(dimensions ?? {}),
+    width: input.width,
+    height: input.height,
     metadata: { ratio, resolution: resolution.toLowerCase() },
     ...(input.image === undefined ? {} : { image: input.image }),
     ...(input.output_format === undefined ? {} : { output_format: input.output_format }),
@@ -284,12 +287,20 @@ async function storeImageResults(client: NewApiClient, response: Record<string, 
   for (const [index, value] of entries.entries()) {
     const item = object(value, `DramaClaw NewAPI image result ${index + 1}`);
     const asset = typeof item.b64_json === "string" && item.b64_json.length > 0
-      ? { bytes: new Uint8Array(Buffer.from(item.b64_json, "base64")), mediaType: "image/png" }
+      ? decodedImage(item.b64_json)
       : await client.asset(String(item.url), "image/png");
     assert(asset.mediaType.startsWith("image/"), "DramaClaw NewAPI image result is not an image");
     blobs.push(await context.resources.put(asset.bytes, asset.mediaType));
   }
   return blobs;
+}
+
+function decodedImage(base64: string): { bytes: Uint8Array; mediaType: string } {
+  const bytes = Buffer.from(base64, "base64");
+  const mediaType = bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) ? "image/png"
+    : bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex")) ? "image/jpeg" : undefined;
+  assert(mediaType !== undefined, "DramaClaw NewAPI base64 image has an unsupported signature");
+  return { bytes, mediaType };
 }
 
 function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined, pollIntervalMs: number, operationTimeoutMs: number): AsyncEndpoint {
@@ -310,7 +321,7 @@ function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined
         await context.checkpoint?.({ handle: canonicalize(handle), receipt });
         return { ...wakeAfter(canonicalize(handle), pollIntervalMs, Date.now(), { phase: "submitted" }), receipt };
       } catch (error) {
-        return failure(error);
+        return failure(error, context.credentials);
       }
     },
     async poll(context) {
@@ -331,7 +342,7 @@ function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined
         }
         if (["failed", "failure", "error", "expired", "cancelled", "canceled"].includes(status)) {
           const detail = publicError(body);
-          return { status: "failed", receipt, failure: { code: "DRAMACLAW_NEWAPI_VIDEO_FAILED", message: `DramaClaw NewAPI task ${handle.taskId} failed${detail === undefined ? "" : `: ${detail}`}` } };
+          return { status: "failed", receipt, failure: { code: "DRAMACLAW_NEWAPI_VIDEO_FAILED", message: publicText(`DramaClaw NewAPI task ${handle.taskId} failed${detail === undefined ? "" : `: ${detail}`}`, context.credentials) } };
         }
         assert(["completed", "succeeded", "success", "done"].includes(status),
           `DramaClaw NewAPI task ${handle.taskId} returned unknown status ${status || "(empty)"}`);
@@ -339,7 +350,7 @@ function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined
         assert(url !== undefined, "DramaClaw NewAPI completed video response has no result URL");
         return { status: "ready", handle: canonicalize({ ...handle, url }), receipt };
       } catch (error) {
-        return pollAgainOrFail(error, { handle: context.handle, pollIntervalMs, failure });
+        return pollAgainOrFail(error, { handle: context.handle, pollIntervalMs, failure: (error) => failure(error, context.credentials) });
       }
     },
     async collect(context) {
@@ -352,7 +363,7 @@ function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined
         const artifact = await context.resources.put(asset.bytes, asset.mediaType);
         return { status: "completed", result: { value: route.packageResult([artifact]) }, receipt: { id: handle.taskId } };
       } catch (error) {
-        return failure(error);
+        return failure(error, context.credentials);
       }
     },
   };
@@ -368,14 +379,18 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
   const publish = options.publish ?? (options.relay === undefined ? undefined : createOssPublisher(options.relay));
   const asyncEndpoint = videoEndpoint(client, publish, options.pollIntervalMs ?? 10_000, operationTimeoutMs);
   const imageEndpoint: ImmediateEndpointHandler = async (context) => {
-    const route = newApiRouteForCapability(context.need.capability);
-    assert(route !== undefined && route.result === "image", "DramaClaw NewAPI does not implement this exact image capability");
-    const { request, input } = await prepare(route, context, publish);
-    const response = await client.json(input.image === undefined ? "/images/generations" : "/images/edits", context.credentials, {
-      method: "POST",
-      body: JSON.stringify(imageBody(request, input)),
-    });
-    return { value: route.packageResult(await storeImageResults(client, response, context)) };
+    try {
+      const route = newApiRouteForCapability(context.need.capability);
+      assert(route !== undefined && route.result === "image", "DramaClaw NewAPI does not implement this exact image capability");
+      const { request, input } = await prepare(route, context, publish);
+      const response = await client.json(input.image === undefined ? "/images/generations" : "/images/edits", context.credentials, {
+        method: "POST",
+        body: JSON.stringify(imageBody(request, input)),
+      });
+      return { value: route.packageResult(await storeImageResults(client, response, context)) };
+    } catch (error) {
+      throw safeError(error, context.credentials);
+    }
   };
   return defineEndpointPackage({
     module: newApiProviderModuleRef,
