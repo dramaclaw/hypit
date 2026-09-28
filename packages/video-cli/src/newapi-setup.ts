@@ -60,6 +60,30 @@ function replaceEndpointConfig(profile: CanonicalValue, config: CanonicalValue):
   };
 }
 
+function requiredCredentials(config: CanonicalValue): readonly { readonly endpoint: string; readonly slot: string }[] {
+  const item = objectValue(config);
+  const slots = item?.relayEndpoint === undefined
+    ? ["apiKey"]
+    : ["apiKey", "relayAccessKeyId", "relayAccessKeySecret"];
+  return slots.map((slot) => ({ endpoint: endpointName, slot }));
+}
+
+function preserveCredentialRefs(profile: CanonicalValue, existing: CanonicalValue, completed: CanonicalValue): CanonicalValue {
+  const current = objectValue(existing) ?? {};
+  const next = objectValue(completed)!;
+  const keyRef = objectValue(current.apiKey);
+  const selectedStores = Object.keys(objectValue(objectValue(profile)?.credentials) ?? {});
+  const store = typeof keyRef?.store === "string" ? keyRef.store
+    : selectedStores.length === 1 ? selectedStores[0] : undefined;
+  if (store === undefined) throw new Error("NewAPI API credential store is ambiguous; select an apiKey CredentialRef in the Runtime Profile");
+  const merged: Record<string, CanonicalValue> = { ...current, ...next };
+  for (const slot of ["apiKey", "relayAccessKeyId", "relayAccessKeySecret"] as const) {
+    if (next[slot] === undefined) continue;
+    merged[slot] = current[slot] ?? { ...objectValue(next[slot])!, store };
+  }
+  return merged;
+}
+
 /** Configure the selected video's NewAPI Endpoint before its first Runtime startup. */
 export async function configureNewApiRuntimeBeforeUp(
   context: CliRuntimeProfileSetupContext,
@@ -72,7 +96,8 @@ export async function configureNewApiRuntimeBeforeUp(
   }
   const inspection = inspectNewApiSetup(endpoint.config ?? null);
   if (inspection.configured) {
-    return { profile: context.profile, changed: false, credentials: [] };
+    return { profile: context.profile, changed: false, credentials: [],
+      requiredCredentials: requiredCredentials(endpoint.config ?? null) };
   }
   if (!context.interactive || context.readText === undefined || context.readSecret === undefined) {
     throw new Error(`NewAPI is the default for this Runtime, but ${inspection.missing.join(", ")} is missing; run runtime up in an interactive terminal to configure it`);
@@ -82,9 +107,11 @@ export async function configureNewApiRuntimeBeforeUp(
     apiKey: await requiredSecret(context, "NewAPI API key: "),
     relay: await relayAnswers(context),
   });
+  const config = preserveCredentialRefs(context.profile, endpoint.config ?? null, completed.config);
   return {
-    profile: replaceEndpointConfig(context.profile, completed.config),
+    profile: replaceEndpointConfig(context.profile, config),
     changed: true,
     credentials: completed.credentials.map((item) => ({ endpoint: endpointName, ...item })),
+    requiredCredentials: requiredCredentials(config),
   };
 }
