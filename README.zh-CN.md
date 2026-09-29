@@ -72,6 +72,8 @@ HypiHub 是我们推荐的托管模型服务，也可以使用你自己的 API �
 [Agent 工作环境与入口合作方](./docs/zh/guide/agents.md) ·
 [模型与部署服务](./docs/zh/guide/service-partners.md)
 
+团队内部测试还可使用 [中文桌面安装包](./docs/zh/guide/desktop-installer.md)：macOS Apple Silicon DMG 或 Windows x64 EXE。安装后在向导中填写自己的 NewAPI 与 OSS 配置；Windows 包目前在 macOS 交叉构建，尚未完成 Windows 实机验证。
+
 ## 示例
 
 ### UGC
