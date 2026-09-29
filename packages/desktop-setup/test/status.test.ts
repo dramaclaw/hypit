@@ -57,6 +57,22 @@ test("status rejects missing, malformed, empty, and partial NewAPI profiles even
   }
 });
 
+test("status distinguishes a pristine install from incomplete local artifacts", async (t) => {
+  const f = await fixture(t);
+  const pristine = await readDesktopStatus(f);
+  assert.equal(pristine.configured, false);
+  assert.deepEqual(pristine.diagnostics, []);
+
+  for (const target of [f.paths.profile, f.paths.skill, f.paths.skillBackup, f.paths.launcher, f.paths.managedState]) {
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, "broken");
+    const partial = await readDesktopStatus(f);
+    assert.equal(partial.configured, false, target);
+    assert.deepEqual(partial.diagnostics.map((item) => [item.code, item.status]), [["profile", "fail"], ["skill", "fail"], ["launcher", "fail"]], target);
+    await rm(target);
+  }
+});
+
 test("completion requires a valid profile, intact managed Skill, launcher and managed state", async (t) => {
   const f = await fixture(t);
   await writeFile(f.paths.profile, JSON.stringify(profile()));

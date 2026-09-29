@@ -137,6 +137,32 @@ test("late initial status cannot discard early edits or submitted secrets", asyn
   dispose();
 });
 
+test("startup stays on welcome for pristine status and opens recovery for partial status", async () => {
+  for (const [status, expected] of [
+    [{ ...result, configured: false, diagnostics: [] }, "welcome"],
+    [{ ...result, configured: false, diagnostics: [{ code: "profile", label: "Runtime Profile", status: "fail" }] }, "settings"],
+  ] as const) {
+    const { document } = parseHTML("<main id='app'></main>");
+    const root = document.getElementById("app")! as unknown as HTMLElement;
+    const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: status }),
+      submit: async () => ({ ok: true, value: result }), rerunDiagnostics: async () => ({ ok: true, value: result }),
+      openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }),
+      onProgress: () => () => {} }, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(root.querySelector("ol [aria-current='step']")?.textContent, expected === "welcome" ? "欢迎" : "NewAPI 与 OSS");
+    if (expected === "welcome") {
+      assert.match(root.textContent!, /开始配置/);
+      assert.equal(root.querySelectorAll("input[required]").length, 0);
+      root.querySelector<HTMLButtonElement>("section.panel button")!.click();
+      assert.equal(root.querySelectorAll("input[required]").length, 6);
+    } else {
+      assert.match(root.textContent!, /安装尚未完成.*Runtime Profile.*失败/su);
+      assert.equal(root.querySelectorAll("input[required]").length, 6);
+    }
+    dispose();
+  }
+});
+
 test("incomplete installation renders setup with explicit failed integration diagnostics", () => {
   const { document } = parseHTML("<main id='app'></main>");
   const root = document.getElementById("app")! as unknown as HTMLElement;

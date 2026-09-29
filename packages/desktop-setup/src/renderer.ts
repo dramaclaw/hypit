@@ -249,7 +249,9 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
     // A startup snapshot predates every user interaction; it must never erase a draft
     // or replace the outcome of an operation that has already finished.
     if (disposed || busy || interactionGeneration !== 0) return;
-    if (reply.ok) { state = wizardReducer(state, { type: "success", result: reply.value }); render(); }
+    if (reply.ok && (reply.value.configured || reply.value.diagnostics.length > 0)) {
+      state = wizardReducer(state, { type: "success", result: reply.value }); render();
+    }
     else if (!reply.ok) { state = wizardReducer(state, { type: "failure", error: reply.error }); render(); }
   }).catch(() => { if (!disposed && !busy && interactionGeneration === 0) { state = wizardReducer(state, { type: "failure", error: failure }); render(); } });
   return () => { disposed = true; unsubscribe(); state = initialWizardState(); root.replaceChildren(); };

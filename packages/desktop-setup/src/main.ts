@@ -8,7 +8,7 @@ import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./c
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
-import { isManagedSkillInstalled } from "./skill-install.js";
+import { exists, isManagedSkillInstalled } from "./skill-install.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { commitDesktopSetup } from "./setup-core.js";
@@ -168,13 +168,16 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
       return true;
     } catch { return false; }
   };
-  const [profile, skill, launcher] = await Promise.all([profileValid(), isManagedSkillInstalled(paths), isManagedLauncherInstalled(options)]);
+  const [profile, skill, launcher, evidence] = await Promise.all([
+    profileValid(), isManagedSkillInstalled(paths), isManagedLauncherInstalled(options),
+    Promise.all([paths.profile, paths.skill, paths.skillBackup, paths.launcher, paths.managedState].map(exists)),
+  ]);
   return { configured: profile && skill && launcher, modelCount: 0, relayVerified: false,
-    profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: [
+    profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
       { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.skill },
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
-    ] };
+    ] : [] };
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
