@@ -71,7 +71,8 @@ test("rejects runtime lock entries without integrity or with local resolutions",
 test("installs only locked tarballs without consulting drifting registry metadata", async (t) => {
   const f = await fixture({ "package.json": JSON.stringify({ name: "@hypit/hypit", version: "7.8.9", dependencies: { "locked-runtime": "^1.0.0" } }) });
   t.after(() => rm(f.root, { recursive: true, force: true }));
-  await put(f.root, "registry/package/package.json", JSON.stringify({ name: "locked-runtime", version: "1.0.0", scripts: { postinstall: "exit 99" } }));
+  await put(f.root, "registry/package/package.json", JSON.stringify({ name: "locked-runtime", version: "1.0.0", bin: { "locked-runtime": "cli.js" }, scripts: { postinstall: "exit 99" } }));
+  await put(f.root, "registry/package/cli.js", "#!/usr/bin/env node\nconsole.log('locked');\n");
   await createTar({ file: join(f.root, "locked.tgz"), cwd: join(f.root, "registry"), gzip: true, portable: true }, ["package"]);
   const bytes = await readFile(join(f.root, "locked.tgz"));
   const requests: string[] = [];
@@ -89,7 +90,7 @@ test("installs only locked tarballs without consulting drifting registry metadat
   await put(f.source, "packages/desktop-setup/runtime-lock/package.json", JSON.stringify(input));
   await put(f.source, "packages/desktop-setup/runtime-lock/package-lock.json", JSON.stringify({ name: input.name, version: input.version, lockfileVersion: 3, packages: {
     "": input,
-    "node_modules/locked-runtime": { version: "1.0.0", resolved: `${registry}/locked-runtime-1.0.0.tgz`, integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}` },
+    "node_modules/locked-runtime": { version: "1.0.0", bin: { "locked-runtime": "cli.js" }, resolved: `${registry}/locked-runtime-1.0.0.tgz`, integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}` },
   } }));
   const previous = process.env.npm_config_registry;
   process.env.npm_config_registry = registry;
@@ -102,6 +103,10 @@ test("installs only locked tarballs without consulting drifting registry metadat
   assert.ok(requests.includes("/locked-runtime-1.0.0.tgz"));
   assert.ok(requests.every(path => path === "/locked-runtime-1.0.0.tgz"), requests.join(", "));
   assert.deepEqual(await manifest(f.out), await manifest(join(f.root, "again")));
+  const windows = join(f.root, "windows");
+  await prepareResources({ ...f, out: windows, platform: "win32", arch: "x64" });
+  await assert.rejects(access(join(windows, "runtime/node_modules/.bin/locked-runtime")), "NSIS must not dereference Unix npm executable links into broken scripts");
+  assert.ok(await readFile(join(windows, "runtime/node_modules/locked-runtime/cli.js")));
 });
 
 test("rejects Distribution tarball symlinks before extraction", async (t) => {

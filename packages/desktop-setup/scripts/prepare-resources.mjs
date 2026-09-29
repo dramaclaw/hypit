@@ -104,7 +104,11 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await writeFile(join(runtime, "package-lock.json"), runtimeLock.lockBytes);
     // npm ci consumes only the committed resolution and checks each integrity.
     // Include optional packages and select the target OS/CPU rather than host.
-    await exec(process.execPath, [await npmCliPath(), "ci", "--prefix", runtime, "--omit=dev", "--include=optional", "--ignore-scripts", "--no-audit", "--no-fund", `--os=${platform}`, `--cpu=${arch}`], { cwd: runtime, maxBuffer: 8 * 1024 * 1024 });
+    // A macOS host otherwise creates Unix .bin links even for --os=win32.
+    // NSIS dereferences them, changing the manifest and breaking relative imports.
+    // Hypit's managed launcher invokes its bundled entry directly; Windows does
+    // not need these host-specific npm shell commands.
+    await exec(process.execPath, [await npmCliPath(), "ci", "--prefix", runtime, "--omit=dev", "--include=optional", "--ignore-scripts", "--no-audit", "--no-fund", `--os=${platform}`, `--cpu=${arch}`, ...(platform === "win32" ? ["--bin-links=false"] : [])], { cwd: runtime, maxBuffer: 8 * 1024 * 1024 });
     await rm(join(runtime, "package.json"));
     await rm(join(runtime, "package-lock.json"));
     await mkdir(dirname(join(stage, distributionPath)), { recursive: true });

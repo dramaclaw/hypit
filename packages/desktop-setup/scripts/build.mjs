@@ -8,6 +8,8 @@ const outdir = `${root}dist`;
 const credentialModuleUrl = String.raw`require("node:url").pathToFileURL(require("node:path").join(__dirname.replace(/([/\\])app\.asar([/\\])/, "$1app.asar.unpacked$2"), "credential-store", "src", "windows.js")).href`;
 await mkdir(outdir, { recursive: true });
 await build({ absWorkingDir: root, entryPoints: ["src/main.ts"], outfile: `${outdir}/main.cjs`, bundle: true, platform: "node", format: "cjs", target: "node22",
+  // Native/external modules come from the target-locked runtime resources.
+  banner: { js: 'if (process.resourcesPath) module.paths.unshift(require("node:path").join(process.resourcesPath, "runtime", "node_modules"));' },
   supported: { "dynamic-import": false },
   external: ["electron", "koffi", "ali-oss", "yaml"],
   plugins: [{ name: "credential-script-location", setup(context) {
