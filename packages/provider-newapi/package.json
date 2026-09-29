@@ -5,7 +5,10 @@
   "private": true,
   "type": "module",
   "hypit": { "activation": "./src/activation.ts" },
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./connection-test": "./src/connection-test.ts"
+  },
   "dependencies": {
     "@hypit/artifact": "workspace:*",
     "@hypit/cosyvoice": "workspace:*",

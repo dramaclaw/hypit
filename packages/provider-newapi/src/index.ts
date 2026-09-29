@@ -9,3 +9,5 @@ export { newApiRouteForCapability, newApiRoutes } from "./routes.js";
 export type { NewApiPreparedRequest, NewApiRoute } from "./routes.js";
 export { completeNewApiSetup, inspectNewApiSetup, newApiDefaultBindings, validateNewApiSetupUrl } from "./setup.js";
 export type { NewApiSetupCredential, NewApiSetupInput, NewApiSetupInspection } from "./setup.js";
+export { testNewApiSetupConnection } from "./connection-test.js";
+export type { NewApiConnectionTestDependencies, NewApiConnectionTestResult, OssSetupTestClient } from "./connection-test.js";
