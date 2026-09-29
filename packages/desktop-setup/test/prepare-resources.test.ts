@@ -168,6 +168,24 @@ test("rejects canonically equivalent macOS archive names before extraction", asy
   await assert.rejects(access(f.out));
 });
 
+test("rejects macOS host filename collisions while staging a Windows target", async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  await replaceTarball(f.hypitTgz, [
+    { path: "package/", type: "Directory" },
+    { path: "package/package.json", contents: JSON.stringify({ name: "@hypit/hypit", version: "7.8.9" }) },
+    { path: "package/Caf\u00e9.txt", contents: "one" },
+    { path: "package/Cafe\u0301.txt", contents: "two" },
+  ]);
+  const { prepareResources, validateTarball } = await loadScript("prepare-resources.mjs");
+  const bytes = await readFile(f.hypitTgz);
+  assert.throws(() => validateTarball(bytes, "win32", "darwin"), /colliding tarball paths/i);
+  assert.doesNotThrow(() => validateTarball(bytes, "win32", "linux"));
+  if (process.platform === "darwin") {
+    await assert.rejects(prepareResources({ ...f, platform: "win32", arch: "x64" }), /colliding tarball paths/i);
+    await assert.rejects(access(f.out));
+  }
+});
+
 for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32", "x64", "ffmpeg.exe"]] as const) {
   test(`stages ${platform}/${arch} Distribution, full Skill and pinned target FFmpeg`, async (t) => {
     const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));

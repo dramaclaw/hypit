@@ -9,13 +9,15 @@ import { assertSafePath, checkArtifact, checkExecutable, checkoutRoot, cliOption
 
 const exec = promisify(execFile);
 
-function validateTarball(bytes, platform) {
+export function validateTarball(bytes, targetPlatform, hostPlatform = process.platform) {
   const seen = new Set();
-  const normalizedPrefixes = new Map();
-  // macOS volumes can also equate canonically composed and decomposed names.
-  const normalizeComponent = platform === "darwin"
-    ? component => component.normalize("NFD").toLowerCase().normalize("NFD")
-    : component => component.toLowerCase();
+  // Extraction happens on the build host, and the result must also survive the
+  // target filesystem. macOS volumes can equate canonical Unicode spellings.
+  const platforms = new Set([hostPlatform, targetPlatform]);
+  const normalizedPrefixes = new Map([...platforms].map(platform => [platform, new Map()]));
+  const normalizeComponent = (component, platform) => platform === "darwin"
+    ? component.normalize("NFD").toLowerCase().normalize("NFD")
+    : platform === "win32" ? component.toLowerCase() : component;
   // Preflight the complete immutable archive before extracting any entry.
   list({ sync: true, strict: true, onReadEntry(entry) {
     if (!["File", "Directory"].includes(entry.type)) throw new Error(`Forbidden tarball entry type ${entry.type}: ${entry.path}`);
@@ -25,18 +27,21 @@ function validateTarball(bytes, platform) {
     if (relative) {
       const resourcePath = `${distributionPath}/${relative}`;
       if (!knownProfiles.includes(resourcePath)) assertSafePath(resourcePath);
-      if (relative.split("/").some(part => normalizeComponent(part) === "node_modules")) throw new Error(`Forbidden bundled tarball dependency: ${path}`);
+      if (relative.split("/").some(part => part.toLowerCase() === "node_modules")) throw new Error(`Forbidden bundled tarball dependency: ${path}`);
     } else if (entry.type !== "Directory") throw new Error("Invalid tarball package root");
     if (seen.has(path)) throw new Error(`Duplicate tarball path: ${path}`);
     seen.add(path);
-    // Track prefixes too: Foo/a and foo/b merge into one directory on the target.
+    // Track prefixes too: Foo/a and foo/b can merge into one directory.
     const parts = path.split("/");
     for (let index = 1; index <= parts.length; index++) {
       const prefix = parts.slice(0, index).join("/");
-      const normalized = parts.slice(0, index).map(normalizeComponent).join("/");
-      const previous = normalizedPrefixes.get(normalized);
-      if (previous && previous !== prefix) throw new Error(`Colliding tarball paths: ${previous} and ${prefix}`);
-      normalizedPrefixes.set(normalized, prefix);
+      for (const platform of platforms) {
+        const normalized = parts.slice(0, index).map(part => normalizeComponent(part, platform)).join("/");
+        const prefixes = normalizedPrefixes.get(platform);
+        const previous = prefixes.get(normalized);
+        if (previous && previous !== prefix) throw new Error(`Colliding tarball paths on ${platform}: ${previous} and ${prefix}`);
+        prefixes.set(normalized, prefix);
+      }
     }
   } }).end(bytes);
   assert.ok(seen.has("package/package.json"), "Tarball package.json is missing");
