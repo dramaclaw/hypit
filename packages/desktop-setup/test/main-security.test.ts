@@ -22,12 +22,12 @@ test("window uses isolated sandbox with no Node or webview and only absolute loc
 });
 
 test("IPC channels are closed and arguments cannot smuggle keys or invalid values", () => {
-  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe"].sort());
+  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:remove-integration", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe"].sort());
   assert.deepEqual(validateIpcArguments("setup:submit", [input]), input);
   for (const invalid of [{ ...input, extra: true }, { ...input, apiKey: "" }, { ...input, relay: { ...input.relay, extra: true } }, { ...input, relay: { enabled: false } }, { ...input, baseUrl: "https://key:secret@api.example" }, { ...input, baseUrl: "https://api.example?apiKey=secret" }]) {
     assert.throws(() => validateIpcArguments("setup:submit", [invalid]));
   }
-  for (const channel of ["setup:status", "setup:diagnostics", "setup:open-config", "setup:clear", "setup:subscribe", "setup:unsubscribe"] as const) {
+  for (const channel of ["setup:status", "setup:diagnostics", "setup:open-config", "setup:clear", "setup:remove-integration", "setup:subscribe", "setup:unsubscribe"] as const) {
     assert.equal(validateIpcArguments(channel, []), undefined);
     assert.throws(() => validateIpcArguments(channel, ["/arbitrary/path"]));
   }
@@ -138,7 +138,7 @@ test("CJS shell boots without import.meta and stages the Windows credential help
   runInNewContext(await readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8"), { require: (name: string) => {
     assert.equal(name, "electron"); return { ipcRenderer: renderer, contextBridge: { exposeInMainWorld: (name: string, bridge: unknown) => { assert.equal(name, "hypitSetup"); exposed = bridge; } } };
   } });
-  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "onProgress", "openConfigDirectory", "rerunDiagnostics", "submit"]);
+  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "onProgress", "openConfigDirectory", "removeIntegration", "rerunDiagnostics", "submit"]);
   let received = 0;
   const first = exposed.onProgress(() => { received++; });
   const second = exposed.onProgress(() => { received++; });

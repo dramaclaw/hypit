@@ -18,6 +18,8 @@ await build({ absWorkingDir: root, entryPoints: ["src/main.ts"], outfile: `${out
       contents: (await readFile(path, "utf8")).replaceAll("import.meta.url", credentialModuleUrl) }));
   } }], footer: { js: 'startElectronShell(__dirname).catch(() => { process.exitCode = 1; require("electron").app.quit(); });' } });
 await build({ absWorkingDir: root, entryPoints: ["src/preload.ts"], outfile: `${outdir}/preload.cjs`, bundle: true, platform: "node", format: "cjs", target: "node22", external: ["electron"] });
+await build({ absWorkingDir: root, entryPoints: ["src/cleanup-entry.ts"], outfile: `${outdir}/cleanup.cjs`, bundle: true, platform: "node", format: "cjs", target: "node22",
+  footer: { js: 'startIntegrationCleanup().catch(() => { process.stderr.write("本机集成清理失败，用户数据已保留。\\n"); process.exitCode = 1; });' } });
 await build({ absWorkingDir: root, entryPoints: ["src/renderer.ts"], outfile: `${outdir}/renderer.js`, bundle: true, platform: "browser", format: "iife", target: "chrome132" });
 await Promise.all(["index.html", "styles.css"].map((name) => copyFile(`${root}ui/${name}`, `${outdir}/${name}`)));
 await mkdir(`${outdir}/credential-store/runtime`, { recursive: true });

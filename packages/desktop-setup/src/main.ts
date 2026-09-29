@@ -12,7 +12,9 @@ import { exists, isManagedSkillInstalled } from "./skill-install.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { commitDesktopSetup } from "./setup-core.js";
-import { installDesktopIntegration } from "./lifecycle.js";
+import { installDesktopIntegration, removeDesktopIntegration } from "./lifecycle.js";
+import { runDiagnostics } from "./diagnostics.js";
+import { clearDesktopConfiguration, createConfirmationSession, desktopCredentialRefs } from "./clear-configuration.js";
 
 export function browserWindowOptions(preloadPath: string): BrowserWindowConstructorOptions {
   if (!isAbsolute(preloadPath)) throw new Error("Absolute preload path required");
@@ -65,7 +67,7 @@ export function validateIpcArguments(channel: string, args: readonly unknown[]):
     completeNewApiSetup(input);
     return { baseUrl: input.baseUrl, apiKey: input.apiKey, relay: { ...input.relay } };
   }
-  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
+  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
   return undefined;
 }
 
@@ -73,6 +75,7 @@ const errorMessages: Readonly<Record<string, string>> = {
   SETUP_VALIDATION_FAILED: "配置校验失败", SETUP_NEWAPI_FAILED: "NewAPI 连接测试失败", SETUP_OSS_FAILED: "OSS 连接测试失败",
   SETUP_CREDENTIAL_SNAPSHOT_FAILED: "读取平台凭据失败", SETUP_CREDENTIAL_WRITE_FAILED: "保存平台凭据失败", SETUP_PROFILE_WRITE_FAILED: "写入 Runtime Profile 失败",
   INTEGRATION_INSTALL_FAILED: "桌面集成安装失败", SETUP_UNAVAILABLE: "此操作尚未可用", SETUP_REQUEST_FAILED: "操作失败，请检查配置后重试",
+  INTEGRATION_REMOVE_FAILED: "本机集成卸载失败，已保留用户数据；请检查命令入口与 Skill 路径", CLEAR_FAILED: "清除配置失败", CONFIRMATION_REQUIRED: "确认已取消或过期，请重新操作",
 };
 export function serializeFailure(error: unknown): SetupFailure {
   const candidate = error instanceof Error ? /\[([A-Z_]+)\]$/u.exec(error.message)?.[1] : undefined;
@@ -90,14 +93,15 @@ export type SetupServices = {
   readonly install: () => Promise<unknown>;
   readonly diagnose: () => Promise<readonly DiagnosticItem[]>;
   readonly openConfig: () => Promise<void>;
-  /** Task 8 supplies session-confirmed clearing and full diagnostics at this boundary. */
   readonly clear: () => Promise<SetupResult>;
+  readonly removeIntegration?: () => Promise<SetupResult>;
 };
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", skill: "Codex Skill", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
 function publicDiagnostic(item: DiagnosticItem): DiagnosticItem {
   if (!Object.hasOwn(diagnosticLabels, item.code) || !["pass", "warning", "fail"].includes(item.status)) throw new Error("Invalid diagnostic result");
-  return { code: item.code, status: item.status, label: diagnosticLabels[item.code], ...(typeof item.path === "string" ? { path: item.path } : {}) };
+  const key = item.code === "oss" && typeof item.cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(item.cleanupObjectKey) ? item.cleanupObjectKey : undefined;
+  return { code: item.code, status: item.status, label: diagnosticLabels[item.code], ...(typeof item.path === "string" ? { path: item.path } : {}), ...(key ? { cleanupObjectKey: key } : {}) };
 }
 function publicResult(result: SetupResult): SetupResult {
   return { configured: result.configured === true, modelCount: Number.isSafeInteger(result.modelCount) && result.modelCount >= 0 ? result.modelCount : 0,
@@ -141,6 +145,7 @@ export function createSetupController(services: SetupServices) {
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
+    removeIntegration: () => enqueue(async () => { if (!services.removeIntegration) throw new Error("Unavailable [SETUP_UNAVAILABLE]"); return publicResult(await services.removeIntegration()); }),
   };
 }
 
@@ -182,7 +187,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
 export async function startElectronShell(bundleDirectory: string): Promise<void> {
-  const { app, BrowserWindow, ipcMain, shell } = await import("electron");
+  const { app, BrowserWindow, ipcMain, shell, dialog } = await import("electron");
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   await app.whenReady();
   if (process.platform !== "darwin" && process.platform !== "win32") { app.quit(); return; }
@@ -192,17 +197,33 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
   const getStatus = () => readDesktopStatus({ paths, platform, home });
+  const confirmation = createConfirmationSession();
+  let window: InstanceType<typeof BrowserWindow> | undefined;
+  const confirm = async (action: "clear" | "integration", targets: readonly string[]) => {
+    if (!window || window.isDestroyed()) throw new Error("No active session [CONFIRMATION_REQUIRED]");
+    const issued = confirmation.issue(action, targets);
+    const response = await dialog.showMessageBox(window, { type: "warning", title: action === "clear" ? "清除本机配置和凭据" : "卸载本机集成",
+      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。",
+      detail: targets.join("\n"), buttons: ["取消", "确认"], defaultId: 0, cancelId: 0, noLink: true });
+    if (response.response !== 1) { confirmation.invalidate(); throw new Error("Cancelled [CONFIRMATION_REQUIRED]"); }
+    return issued.token;
+  };
+  const suffix = platform === "win32" ? ".exe" : "";
   const controller = createSetupController({
     getStatus,
-    commit: (input) => commitDesktopSetup(input, { paths, platform, credentialStore }),
+    commit: (input) => commitDesktopSetup(input, { paths, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
     install: () => installDesktopIntegration({ paths, platform, home, electronExecutable: process.execPath,
-      cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() }),
-    diagnose: async () => [{ code: "bundle", label: "安装资源", status: "warning" }],
+      cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"), sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() }),
+    diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
-    clear: async () => { throw new Error("Unavailable [SETUP_UNAVAILABLE]"); },
+    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); return getStatus(); },
+    removeIntegration: async () => {
+      const targets = [paths.launcher, paths.skill, paths.managedState, platform === "darwin" ? join(home, ".zprofile") : "HKCU\\Environment\\Path"];
+      const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
+      await removeDesktopIntegration({ paths, platform, home }); return getStatus();
+    },
   });
   const pageUrl = localPageUrl(join(bundleDirectory, "index.html"));
-  let window: InstanceType<typeof BrowserWindow> | undefined;
   let unsubscribe: (() => void) | undefined;
   const detach = () => { unsubscribe?.(); unsubscribe = undefined; };
   const createWindow = async () => {
@@ -210,11 +231,13 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     hardenWebContents(window.webContents);
     window.webContents.on("destroyed", detach);
     window.webContents.on("did-start-loading", detach);
+    window.webContents.on("did-start-loading", () => confirmation.invalidate());
+    window.webContents.on("destroyed", () => confirmation.invalidate());
     window.on("closed", () => { window = undefined; detach(); });
     await window.loadURL(pageUrl);
   };
   const operations = { [IPC_CHANNELS.status]: controller.getStatus, [IPC_CHANNELS.submit]: controller.submit,
-    [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration };
+    [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration };
   for (const channel of Object.keys(operations) as (keyof typeof operations)[]) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       try {

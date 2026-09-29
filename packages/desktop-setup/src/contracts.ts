@@ -32,6 +32,7 @@ export type DiagnosticItem = {
   readonly status: "pass" | "warning" | "fail";
   readonly label: DiagnosticLabel;
   readonly path?: string;
+  readonly cleanupObjectKey?: string;
 };
 
 export type SetupStage =

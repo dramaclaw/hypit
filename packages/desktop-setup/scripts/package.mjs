@@ -60,6 +60,7 @@ export async function inspectApp(appRoot, platform, arch) {
     const pkg = JSON.parse(asar.extractFile(archive, "package.json").toString());
     assert.equal(pkg.main, "dist/main.cjs");
     assert.ok(asar.extractFile(archive, pkg.main).length);
+    assert.ok(asar.extractFile(archive, "dist/cleanup.cjs").length);
     for (const dependency of ["ali-oss", "koffi"]) assert.ok((await readFile(join(resources, "runtime/node_modules", dependency, "package.json"))).length);
     assert.ok((await readFile(join(resources, "app.asar.unpacked/dist/credential-store/runtime/windows-credential.ps1"))).length);
   } finally { await rm(temporary, { recursive: true, force: true }); }

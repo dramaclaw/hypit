@@ -45,6 +45,9 @@ export async function fixture(extra: Record<string, string> = {}) {
     const path = `packages/desktop-setup/node_modules/@ffmpeg-installer/${platform}-${arch}`;
     await put(source, `${path}/package.json`, JSON.stringify({ name: `@ffmpeg-installer/${platform}-${arch}`, version, os: [platform], cpu: [arch] }));
     await put(source, `${path}/ffmpeg${platform === "win32" ? ".exe" : ""}`, executable(platform));
+    const probe = `packages/desktop-setup/node_modules/@ffprobe-installer/${platform}-${arch}`;
+    await put(source, `${probe}/package.json`, JSON.stringify({ name: `@ffprobe-installer/${platform}-${arch}`, version: platform === "darwin" ? "5.0.1" : "5.1.0", os: [platform], cpu: [arch] }));
+    await put(source, `${probe}/ffprobe${platform === "win32" ? ".exe" : ""}`, executable(platform));
   }
   return { root, checkoutRoot: source, hypitTgz: tarball, out: join(root, "out"), source };
 }

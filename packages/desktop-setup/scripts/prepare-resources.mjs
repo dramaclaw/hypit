@@ -82,6 +82,11 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
   if (ffmpeg.name !== target.name || ffmpeg.version !== target.version || !ffmpeg.os?.includes(platform) || !ffmpeg.cpu?.includes(arch)) throw new Error(`FFmpeg must match pinned target package ${target.name}@${target.version}`);
   const executable = join(ffmpegRoot, target.executable);
   checkExecutable(await readFile(executable), target);
+  const probeRoot = join(sourceRoot, "packages/desktop-setup/node_modules", target.probe.name);
+  const probe = JSON.parse(await readFile(join(probeRoot, "package.json"), "utf8"));
+  if (probe.name !== target.probe.name || probe.version !== target.probe.version || !probe.os?.includes(platform) || !probe.cpu?.includes(arch)) throw new Error(`FFprobe must match pinned target package ${target.probe.name}@${target.probe.version}`);
+  const probeExecutable = join(probeRoot, target.probe.executable);
+  checkExecutable(await readFile(probeExecutable), target);
   // Validate the entire source Skill before copying anything, including links.
   await inventory(join(sourceRoot, "skills/hypit"));
   await mkdir(dirname(output), { recursive: true });
@@ -120,9 +125,11 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await mkdir(join(stage, "bin"));
     await copyFile(executable, join(stage, "bin", target.executable));
     await chmod(join(stage, "bin", target.executable), 0o755);
+    await copyFile(probeExecutable, join(stage, "bin", target.probe.executable));
+    await chmod(join(stage, "bin", target.probe.executable), 0o755);
     const files = await inventory(stage, { target, allowBinLinks: true });
     const installed = JSON.parse(await readFile(join(stage, distributionPath, "package.json"), "utf8"));
-    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, runtimeLock: runtimeLock.digests, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
+    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, runtimeLock: runtimeLock.digests, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
     await writeFile(join(stage, "resource-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
     await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot });
     await rename(stage, output);

@@ -15,6 +15,7 @@ export type DesktopSetupDependencies = {
   readonly paths: DesktopPaths;
   readonly credentialStore: WritableCredentialStore;
   readonly platform?: NodeJS.Platform;
+  readonly media?: { readonly ffmpegPath: string; readonly ffprobePath: string };
   readonly connectionTest?: NewApiConnectionTestDependencies;
   /** Must replace atomically: rejection means the previous profile is still in place. */
   readonly writeProfile?: (path: string, document: CanonicalValue, options: { readonly mode?: number }) => Promise<void>;
@@ -129,7 +130,7 @@ export async function commitDesktopSetup(input: SetupInput, dependencies: Deskto
     }
     stage = "PROFILE_WRITE";
     const options = (dependencies.platform ?? process.platform) === "win32" ? {} : { mode: 0o600 };
-    await (dependencies.writeProfile ?? writeProfileAtomically)(dependencies.paths.profile, createDesktopProfile(setup.config), options);
+    await (dependencies.writeProfile ?? writeProfileAtomically)(dependencies.paths.profile, createDesktopProfile(setup.config, dependencies.media), options);
   } catch {
     throw failure(stage, await rollback(store, attempted));
   }

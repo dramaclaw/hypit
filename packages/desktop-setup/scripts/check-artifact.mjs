@@ -15,7 +15,8 @@ export const knownDependencyFixtures = ["runtime/node_modules/stream-http/test/s
 export function targetFor({ platform, arch }) {
   const version = { "darwin-arm64": "4.1.5", "win32-x64": "4.1.0" }[`${platform}-${arch}`];
   if (!version) throw new Error(`Unsupported desktop target: ${platform}/${arch}`);
-  return { platform, arch, name: `@ffmpeg-installer/${platform}-${arch}`, version, executable: platform === "win32" ? "ffmpeg.exe" : "ffmpeg" };
+  return { platform, arch, name: `@ffmpeg-installer/${platform}-${arch}`, version, executable: platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+    probe: { name: `@ffprobe-installer/${platform}-${arch}`, version: platform === "darwin" ? "5.0.1" : "5.1.0", executable: platform === "win32" ? "ffprobe.exe" : "ffprobe" } };
 }
 
 export function checkExecutable(bytes, options) {
@@ -55,6 +56,7 @@ function assertAllowedPath(path, target, directory = false) {
     || path.startsWith("runtime/node_modules/")
     || path.startsWith("skill/hypit/")
     || path === `bin/${target.executable}`
+    || path === `bin/${target.probe.executable}`
     || (directory && ["runtime", "runtime/node_modules", "skill", "skill/hypit", "bin"].includes(path));
   if (!allowed) throw new Error(`Resource outside allowlist: ${path}`);
 }
@@ -130,6 +132,7 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.equal(manifest.platform, platform, "Manifest platform mismatch");
   assert.equal(manifest.arch, arch, "Manifest architecture mismatch");
   assert.deepEqual(manifest.ffmpeg, { name: target.name, version: target.version });
+  assert.deepEqual(manifest.ffprobe, { name: target.probe.name, version: target.probe.version });
   assert.ok(Array.isArray(manifest.strippedProfiles) && manifest.strippedProfiles.every(path => knownProfiles.includes(path)), "Unexpected stripped profiles");
   assert.ok(Array.isArray(manifest.strippedDependencyFixtures) && manifest.strippedDependencyFixtures.every(path => knownDependencyFixtures.includes(path)), "Unexpected stripped dependency fixtures");
   const runtimeLock = await readRuntimeLock(sourceRoot);
@@ -149,6 +152,9 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   const binary = join(root, "bin", target.executable);
   checkExecutable(await readFile(binary), target);
   if (platform === "darwin") assert.ok((await lstat(binary)).mode & 0o111, "FFmpeg is not executable");
+  const probe = join(root, "bin", target.probe.executable);
+  checkExecutable(await readFile(probe), target);
+  if (platform === "darwin") assert.ok((await lstat(probe)).mode & 0o111, "FFprobe is not executable");
   return manifest;
 }
 

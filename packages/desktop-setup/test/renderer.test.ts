@@ -10,6 +10,15 @@ const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoi
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillPath: "/skill", launcherPath: "/launcher", diagnostics: [] };
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
+test("integration removal stays accessible after clearing configuration and lists preservation intent", () => {
+  const { document } = parseHTML("<main id='app'></main>"); const root = document.getElementById("app")! as unknown as HTMLElement;
+  for (const configured of [true, false]) {
+    renderWizard(root, wizardReducer(filled(), { type: "success", result: { ...result, configured } }), () => {});
+    assert.ok(Array.from(root.querySelectorAll("button")).some(button => button.textContent === "卸载本机集成…"));
+    assert.match(root.textContent!, /配置、凭据和视频项目会保留/);
+  }
+});
+
 test("all six fields are required and secrets toggle individually", () => {
   const state = filled();
   assert.equal(canSubmit(state), true);
@@ -93,7 +102,7 @@ test("typing then submitting sends current fields and unsubscribes on disposal",
   const draft: string[] = [];
   const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: { ...result, configured: false } }),
     submit: async (input) => { submitted = input; return { ok: true, value: result }; }, rerunDiagnostics: async () => ({ ok: true, value: result }),
-    openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }),
+    openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
     onProgress: () => () => { detached = true; } }, { getItem: () => null, setItem: (_key, value) => { draft.push(value); }, removeItem: () => {} });
   root.querySelector<HTMLButtonElement>("button")!.click();
   for (const [field, value] of Object.entries(fields)) {
@@ -120,7 +129,7 @@ test("late initial status cannot discard early edits or submitted secrets", asyn
   const dispose = mountWizard(root, { getStatus: () => pending,
     submit: async (input) => { submitted = input; return { ok: true, value: result }; },
     rerunDiagnostics: async () => ({ ok: true, value: result }), openConfigDirectory: async () => ({ ok: true, value: undefined }),
-    clearConfiguration: async () => ({ ok: true, value: result }), onProgress: () => () => {} },
+    clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }), onProgress: () => () => {} },
   { getItem: () => null, setItem: () => {}, removeItem: () => {} });
   root.querySelector<HTMLButtonElement>("button")!.click();
   for (const [field, value] of Object.entries(fields)) {
@@ -146,7 +155,7 @@ test("startup stays on welcome for pristine status and opens recovery for partia
     const root = document.getElementById("app")! as unknown as HTMLElement;
     const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: status }),
       submit: async () => ({ ok: true, value: result }), rerunDiagnostics: async () => ({ ok: true, value: result }),
-      openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }),
+      openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
       onProgress: () => () => {} }, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(root.querySelector("ol [aria-current='step']")?.textContent, expected === "welcome" ? "欢迎" : "NewAPI 与 OSS");

@@ -7,7 +7,15 @@ import { promisify } from "node:util";
 import test from "node:test";
 import type { TestContext } from "node:test";
 import { desktopPaths } from "../src/paths.js";
-import { createWindowsUserPath, installLauncher, removeLauncher, renderLauncher } from "../src/launcher-install.js";
+import { createWindowsUserPath, installLauncher, removeLauncher, renderLauncher, runWindowsPowerShell } from "../src/launcher-install.js";
+
+test("Windows PATH subprocess uses system PowerShell, a 30-second bound and a secret-free environment", async () => {
+  let observed: any;
+  const stdout = await runWindowsPowerShell("registry script", "encoded", async (file, args, options) => { observed = { file, args, options }; return { stdout: "C:\\keep" }; });
+  assert.equal(stdout, "C:\\keep"); assert.match(observed.file, /^[A-Za-z]:\\.*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/);
+  assert.equal(observed.options.timeout, 30000); assert.equal(observed.options.shell, false); assert.equal(observed.options.env.HYPIT_USER_PATH_VALUE, "encoded");
+  assert.ok(Object.keys(observed.options.env).every(key => ["SystemRoot", "WINDIR", "USERPROFILE", "TEMP", "TMP", "HYPIT_USER_PATH_VALUE"].includes(key)));
+});
 
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), "hypit 中文 space-$-"));
@@ -28,6 +36,18 @@ test("Windows command uses quoted Windows-relative paths and preserves forwarded
     cliEntry: "C:\\Users\\王 明\\AppData\\Local\\Programs\\Hypit Setup\\resources\\runtime\\node_modules\\@hypit\\hypit\\bin\\hypit.mjs" });
   assert.ok(content.includes('"%~dp0..\\..\\Programs\\Hypit Setup\\Hypit Setup.exe"'));
   assert.ok(content.includes('"%~dp0..\\..\\Programs\\Hypit Setup\\resources\\runtime\\node_modules\\@hypit\\hypit\\bin\\hypit.mjs" %*'));
+});
+
+test("launcher puts bundled ffmpeg and ffprobe first even with an empty host PATH", async (t) => {
+  const f = await fixture(t); const bundledBin = join(f.home, "bundle bin");
+  await mkdir(bundledBin);
+  for (const tool of ["ffmpeg", "ffprobe"]) await writeFile(join(bundledBin, tool), `#!/bin/sh\nprintf '${tool} bundled\\n'\n`, { mode: 0o755 });
+  await writeFile(f.electronExecutable, '#!/bin/sh\nffmpeg -version\nffprobe -version\n', { mode: 0o755 });
+  await installLauncher({ ...f, bundledBin });
+  const { stdout } = await promisify(execFile)(f.paths.launcher, [], { env: { PATH: "" } });
+  assert.equal(stdout, "ffmpeg bundled\nffprobe bundled\n");
+  const win = renderLauncher({ ...f, platform: "win32", electronExecutable: join(f.home, "Electron.exe"), bundledBin });
+  assert.match(win, /set "PATH=.*bundle bin;%PATH%"/);
 });
 
 test("Windows PATH adapter preserves raw registry values and encodes writes as data", async () => {

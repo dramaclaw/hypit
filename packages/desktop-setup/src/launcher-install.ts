@@ -14,6 +14,7 @@ export type LauncherOptions = {
   readonly home: string;
   readonly electronExecutable: string;
   readonly cliEntry: string;
+  readonly bundledBin?: string;
   readonly userPath?: UserPath;
 };
 type LauncherState = {
@@ -29,15 +30,20 @@ const quote = (path: string) => `"${path.replace(/[\\"$`]/gu, "\\$&")}"`;
 const pathBlock = (path: string) => `# >>> hypit.desktop-managed@1 >>>\nexport PATH=${quote(path)}:"$PATH"\n# <<< hypit.desktop-managed@1 <<<\n`;
 
 type RunPowerShell = (script: string, encodedValue?: string) => Promise<string>;
-const runPowerShell: RunPowerShell = async (script, encodedValue) => {
-  const result = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-    windowsHide: true, env: { ...process.env, ...(encodedValue === undefined ? {} : { HYPIT_USER_PATH_VALUE: encodedValue }) },
+type PowerShellExecutor = (file: string, args: string[], options: { shell: false; windowsHide: true; timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
+export async function runWindowsPowerShell(script: string, encodedValue?: string, execute: PowerShellExecutor = promisify(execFile)): Promise<string> {
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
+  if (!win32.isAbsolute(systemRoot)) throw new Error("Invalid Windows system root");
+  const env: NodeJS.ProcessEnv = { SystemRoot: systemRoot };
+  for (const key of ["WINDIR", "USERPROFILE", "TEMP", "TMP"]) if (process.env[key] !== undefined) env[key] = process.env[key];
+  const result = await execute(win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], {
+    shell: false, windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024, env: { ...env, ...(encodedValue === undefined ? {} : { HYPIT_USER_PATH_VALUE: encodedValue }) },
   });
   return result.stdout;
-};
+}
 
 /** Only HKCU is touched. Raw expandable values and their registry kind survive updates. */
-export function createWindowsUserPath(run: RunPowerShell = runPowerShell): UserPath {
+export function createWindowsUserPath(run: RunPowerShell = runWindowsPowerShell): UserPath {
   return {
     async read() {
       return run(`$ErrorActionPreference='Stop'
@@ -129,7 +135,8 @@ export async function isManagedLauncherInstalled(options: Pick<LauncherOptions, 
 export function renderLauncher(options: LauncherOptions): string {
   if (options.platform === "darwin") {
     if (!isAbsolute(options.electronExecutable) || !isAbsolute(options.cliEntry)) throw new Error("Absolute paths required");
-    return `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec ${quote(options.electronExecutable)} ${quote(options.cliEntry)} "$@"\n`;
+    if (options.bundledBin && !isAbsolute(options.bundledBin)) throw new Error("Absolute bundled bin required");
+    return `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\n${options.bundledBin ? `export PATH=${quote(options.bundledBin)}:"$PATH"\n` : ""}exec ${quote(options.electronExecutable)} ${quote(options.cliEntry)} "$@"\n`;
   }
   const windowsPaths = win32.isAbsolute(options.paths.launcher);
   const path = windowsPaths ? win32 : { dirname, relative, isAbsolute };
@@ -139,7 +146,8 @@ export function renderLauncher(options: LauncherOptions): string {
     const located = path.isAbsolute(rel) ? rel : `%~dp0${rel.replace(/\//gu, "\\")}`;
     return `"${located}"`;
   };
-  return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n${reference(options.electronExecutable)} ${reference(options.cliEntry)} %*\r\nexit /b %errorlevel%\r\n`;
+  const bin = options.bundledBin ? reference(options.bundledBin).slice(1, -1) : undefined;
+  return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n${bin ? `set "PATH=${bin};%PATH%"\r\n` : ""}${reference(options.electronExecutable)} ${reference(options.cliEntry)} %*\r\nexit /b %errorlevel%\r\n`;
 }
 
 export async function installLauncher(options: LauncherOptions): Promise<{ readonly restartMessage: string }> {

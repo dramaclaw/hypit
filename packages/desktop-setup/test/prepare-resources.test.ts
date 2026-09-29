@@ -9,6 +9,17 @@ import { gzipSync } from "node:zlib";
 import { create as createTar, Header } from "tar";
 import { checkout, distributionPath, executable, fixture, loadScript, manifest, put } from "./resource-fixtures.js";
 
+for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) test(`stages and verifies pinned target ffprobe as well as ffmpeg (${platform})`, async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  const { prepareResources } = await loadScript("prepare-resources.mjs");
+  const { checkArtifact } = await loadScript("check-artifact.mjs");
+  const result = await prepareResources({ ...f, platform, arch });
+  const name = `bin/ffprobe${platform === "win32" ? ".exe" : ""}`;
+  assert.ok(result.files[name]); assert.equal(result.ffprobe.name, `@ffprobe-installer/${platform}-${arch}`);
+  await writeFile(join(f.out, name), executable(platform, true));
+  await assert.rejects(checkArtifact({ ...f, platform, arch }));
+});
+
 async function replaceTarball(path: string, entries: { path: string; contents?: string; type?: "Directory" | "File" }[]) {
   const blocks: Buffer[] = [];
   for (const entry of entries) {
@@ -200,7 +211,7 @@ for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32
     assert.equal(m.platform, platform); assert.equal(m.arch, arch);
     assert.equal(m.hypit.name, "@hypit/hypit"); assert.equal(m.hypit.version, "7.8.9");
     assert.equal(JSON.parse(await readFile(join(f.out, distributionPath, "package.json"), "utf8")).version, "7.8.9");
-    assert.deepEqual(await readdir(join(f.out, "bin")), [filename]);
+    assert.deepEqual(await readdir(join(f.out, "bin")), [filename, platform === "win32" ? "ffprobe.exe" : "ffprobe"]);
     assert.deepEqual(await readFile(join(f.out, "bin", filename)), executable(platform));
     if (platform === "darwin") assert.ok((await stat(join(f.out, "bin", filename))).mode & 0o111);
     assert.equal(await readFile(join(f.out, "skill/hypit/references/nested/example.svml"), "utf8"), "<Video />");

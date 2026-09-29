@@ -19,6 +19,8 @@
     "@dramaclaw/provider-newapi": "workspace:*",
     "@ffmpeg-installer/darwin-arm64": "4.1.5",
     "@ffmpeg-installer/win32-x64": "4.1.0",
+    "@ffprobe-installer/darwin-arm64": "5.0.1",
+    "@ffprobe-installer/win32-x64": "5.1.0",
     "@hypit/credential-store-platform": "workspace:*",
     "@hypit/runtime": "workspace:*",
     "@hypit/video-cli": "workspace:*",

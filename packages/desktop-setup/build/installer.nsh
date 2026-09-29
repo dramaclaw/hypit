@@ -1,2 +1,11 @@
-; Per-user installer. Task 8 adds managed integration cleanup here.
-; Preserve project files and configuration on ordinary application uninstall.
+; Per-user only. Profile, credentials, runtimes and projects are retained.
+!macro customUnInstall
+  System::Call 'Kernel32::SetEnvironmentVariable(t "ELECTRON_RUN_AS_NODE", t "1") i.r0'
+  nsExec::ExecToStack /TIMEOUT=30000 '"$INSTDIR\Hypit Setup.exe" "$INSTDIR\resources\app.asar\dist\cleanup.cjs" --integration-only'
+  Pop $0
+  Pop $1
+  System::Call 'Kernel32::SetEnvironmentVariable(t "ELECTRON_RUN_AS_NODE", t "") i.r2'
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Hypit 本机集成清理失败。配置、凭据和视频项目已保留，请检查以下路径：$\r$\n$LOCALAPPDATA\Hypit\bin\hypit.cmd$\r$\n$PROFILE\.codex\skills\hypit$\r$\n用户 PATH (HKCU\Environment\Path)。$\r$\n$1"
+  ${EndIf}
+!macroend

@@ -26,7 +26,7 @@ export type WizardAction =
   | { type: "progress"; progress: SetupProgress }
   | { type: "success"; result: SetupResult }
   | { type: "failure"; error: SetupFailure };
-type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" };
+type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" | "remove-integration" };
 const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId: false, accessKeySecret: false });
 
 function resumableAddress(value: unknown, bare = false): string {
@@ -125,9 +125,14 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     const diagnostics = node("ul", undefined, "diagnostics");
     for (const item of state.result?.diagnostics ?? []) {
       const line = node("li"); line.append(node("span", item.label), node("span", { pass: "通过", warning: "待检查", fail: "失败" }[item.status], item.status));
-      if (item.path) line.append(node("code", item.path)); diagnostics.append(line);
+      if (item.path) line.append(node("code", item.path));
+      if (item.cleanupObjectKey) line.append(node("p", "请在 OSS 中手动删除测试对象："), node("code", item.cleanupObjectKey));
+      diagnostics.append(line);
     }
     panel.append(diagnostics);
+  };
+  const appendMaintenance = () => {
+    panel.append(button("卸载本机集成…", { type: "remove-integration" }, "text-button"), node("p", "移除命令入口、托管 Skill 和 PATH 配置；配置、凭据和视频项目会保留。卸载后可将应用移到废纸篓。", "muted"));
   };
   if (state.error) {
     const warning = node("div", undefined, "warning"); warning.setAttribute("role", "alert");
@@ -176,6 +181,10 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     const submit = node("button", state.error ? "重新测试并安装" : "测试连接并安装", "primary"); submit.type = "submit"; submit.id = "submit-setup"; submit.disabled = !canSubmit(state);
     form.addEventListener("submit", (event) => { event.preventDefault(); dispatch({ type: "submit" }); });
     form.append(submit); panel.append(form);
+    if (state.result) {
+      panel.append(button("重新运行诊断", { type: "diagnostics" }), button("清除本机配置和凭据…", { type: "clear" }, "text-button"));
+      appendMaintenance();
+    }
     return;
   }
   if (state.screen === "working") {
@@ -199,6 +208,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     if (state.result) confirm.append(node("code", state.result.profilePath));
     confirm.append(button("确认清除", { type: "clear" }, "danger"), button("取消", { type: "cancel-clear" })); panel.append(confirm);
   } else panel.append(button("清除本机配置和凭据…", { type: "confirm-clear" }, "text-button"));
+  appendMaintenance();
 }
 
 declare global { interface Window { hypitSetup: SetupBridge } }
@@ -216,9 +226,9 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
   async function dispatch(action: UiAction): Promise<void> {
     if (disposed || busy && !["progress"].includes(action.type)) return;
     if (action.type !== "progress") interactionGeneration++;
-    if (["submit", "diagnostics", "clear", "open-config"].includes(action.type)) {
+    if (["submit", "diagnostics", "clear", "open-config", "remove-integration"].includes(action.type)) {
       if (action.type === "submit" && !canSubmit(state)) return;
-      if (action.type === "clear" && !state.confirmClear) return;
+      if (action.type === "clear" && !state.confirmClear && state.screen !== "settings") return;
       const input = action.type === "submit" ? setupInput(state) : undefined;
       busy = true;
       if (action.type !== "open-config") state = wizardReducer(state, { type: "working" });
@@ -228,9 +238,9 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
           const reply = await bridge.openConfigDirectory();
           if (!reply.ok) state = wizardReducer(state, { type: "failure", error: reply.error });
         } else {
-          const reply = action.type === "submit" ? await bridge.submit(input!) : action.type === "clear" ? await bridge.clearConfiguration() : await bridge.rerunDiagnostics();
+          const reply = action.type === "submit" ? await bridge.submit(input!) : action.type === "clear" ? await bridge.clearConfiguration() : action.type === "remove-integration" ? await bridge.removeIntegration() : await bridge.rerunDiagnostics();
           state = reply.ok ? wizardReducer(state, { type: "success", result: reply.value }) : wizardReducer(state, { type: "failure", error: reply.error });
-          if (action.type === "clear" && reply.ok) { state = initialWizardState(); try { storage.removeItem(draftKey); } catch {} }
+          if (action.type === "clear" && reply.ok) { state = { ...initialWizardState(), screen: "settings", result: reply.value }; try { storage.removeItem(draftKey); } catch {} }
         }
       } catch { state = wizardReducer(state, { type: "failure", error: failure }); }
       finally { busy = false; persist(); render(); }

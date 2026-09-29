@@ -1143,6 +1143,12 @@ importers:
       '@ffmpeg-installer/win32-x64':
         specifier: 4.1.0
         version: 4.1.0
+      '@ffprobe-installer/darwin-arm64':
+        specifier: 5.0.1
+        version: 5.0.1
+      '@ffprobe-installer/win32-x64':
+        specifier: 5.1.0
+        version: 5.1.0
       '@hypit/credential-store-platform':
         specifier: workspace:*
         version: link:../credential-store-platform
@@ -4822,6 +4828,16 @@ packages:
 
   '@ffmpeg-installer/win32-x64@4.1.0':
     resolution: {integrity: sha512-Drt5u2vzDnIONf4ZEkKtFlbvwj6rI3kxw1Ck9fpudmtgaZIHD4ucsWB2lCZBXRxJgXR+2IMSti+4rtM4C4rXgg==}
+    cpu: [x64]
+    os: [win32]
+
+  '@ffprobe-installer/darwin-arm64@5.0.1':
+    resolution: {integrity: sha512-vwNCNjokH8hfkbl6m95zICHwkSzhEvDC3GVBcUp5HX8+4wsX10SP3B+bGur7XUzTIZ4cQpgJmEIAx6TUwRepMg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@ffprobe-installer/win32-x64@5.1.0':
+    resolution: {integrity: sha512-jMGYeAgkrdn4e2vvYt/qakgHRE3CPju4bn5TmdPfoAm1BlX1mY9cyMd8gf5vSzI8gH8Zq5WQAyAkmekX/8TSTg==}
     cpu: [x64]
     os: [win32]
 
@@ -8521,6 +8537,10 @@ snapshots:
   '@ffmpeg-installer/darwin-arm64@4.1.5': {}
 
   '@ffmpeg-installer/win32-x64@4.1.0': {}
+
+  '@ffprobe-installer/darwin-arm64@5.0.1': {}
+
+  '@ffprobe-installer/win32-x64@5.1.0': {}
 
   '@fontsource-variable/archivo@5.3.0':
     optional: true

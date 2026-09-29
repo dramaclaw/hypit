@@ -7,6 +7,11 @@ import { parseLocalRuntimeProfile } from "@hypit/runtime-local";
 
 import { createDesktopProfile } from "../src/profile.js";
 
+test("desktop media providers use both packaged tools explicitly", () => {
+  const profile = createDesktopProfile({}, { ffmpegPath: "/Applications/Hypit Setup.app/bin/ffmpeg", ffprobePath: "/Applications/Hypit Setup.app/bin/ffprobe" }) as any;
+  for (const endpoint of ["media.local", "hyperframes.local"]) assert.deepEqual(profile.endpoints[endpoint].config, { ffmpegPath: "/Applications/Hypit Setup.app/bin/ffmpeg", ffprobePath: "/Applications/Hypit Setup.app/bin/ffprobe" });
+});
+
 test("desktop profile uses host-relative runtime data and only credential references", () => {
   const secrets = ["test-api-secret", "test-oss-access-key", "test-oss-secret"];
   const { config } = completeNewApiSetup({
