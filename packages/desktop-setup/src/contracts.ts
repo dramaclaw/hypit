@@ -62,7 +62,4 @@ export type SetupResult = {
 };
 
 /** The only method that accepts secret-bearing input; all return values are redacted contracts. */
-export type DesktopSetupPreload = {
-  readonly submitSetup: (input: SetupInput) => Promise<SetupResult>;
-  readonly onProgress: (listener: (progress: SetupProgress) => void) => () => void;
-};
+export type DesktopSetupPreload = import("./ipc.js").SetupBridge;
