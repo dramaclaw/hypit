@@ -4,6 +4,11 @@ import test from "node:test";
 import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "../src/contracts.js";
 import { desktopPaths } from "../src/paths.js";
 
+type ExpectFalse<Value extends false> = Value;
+type DisabledRelayIsAccepted = { baseUrl: string; apiKey: string; relay: { enabled: false } } extends SetupInput
+  ? true : false;
+type RejectDisabledRelay = ExpectFalse<DisabledRelayIsAccepted>;
+
 test("Darwin desktop paths stay under the injected user locations", () => {
   const paths = desktopPaths({
     platform: "darwin",

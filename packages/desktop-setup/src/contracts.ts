@@ -1,7 +1,9 @@
 import type { NewApiSetupInput } from "@dramaclaw/provider-newapi";
 
 /** Submitted from the wizard to the main process. Never include this in an outbound IPC event. */
-export type SetupInput = NewApiSetupInput;
+export type SetupInput = Omit<NewApiSetupInput, "relay"> & {
+  readonly relay: Extract<NewApiSetupInput["relay"], { readonly enabled: true }>;
+};
 
 export type DiagnosticCode =
   | "bundle"
