@@ -167,6 +167,10 @@
     "examples/provider-package/hypit.runtime.json"
   ],
   "scripts": {
+    "desktop:build": "pnpm --filter @hypit/desktop-setup build",
+    "desktop:dist:mac": "pnpm --filter @hypit/desktop-setup dist:mac",
+    "desktop:dist:win": "pnpm --filter @hypit/desktop-setup dist:win",
+    "desktop:dist": "pnpm --filter @hypit/desktop-setup dist",
     "pack:distribution": "node scripts/pack-distribution.mjs",
     "check:distribution": "node scripts/check-distribution.mjs",
     "build:public-types": "node scripts/build-public-types.mjs",
