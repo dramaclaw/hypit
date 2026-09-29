@@ -36,6 +36,14 @@ function failure(stage: keyof typeof failures, rollbackFailed = false): Error {
   return new Error(`${failures[stage]}${rollbackFailed ? "；平台凭据回滚未完成" : ""} [SETUP_${stage}_FAILED${rollbackFailed ? "_ROLLBACK_FAILED" : ""}]`);
 }
 
+function cleanupObjectKey(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  // Accept only the provider's complete cleanup message and its UUID-v4 probe path.
+  // Never copy arbitrary upstream text into an outbound error.
+  const match = /^OSS probe cleanup failed; remove object (relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt) manually$/u.exec(error.message);
+  return match?.[0] === error.message ? match[1] : undefined;
+}
+
 async function writeProfileAtomically(path: string, document: CanonicalValue, options: { readonly mode?: number }): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true });
@@ -89,7 +97,11 @@ export async function commitDesktopSetup(input: SetupInput, dependencies: Deskto
     connection = await testNewApiSetupConnection(submitted, dependencies.connectionTest);
   } catch (error) {
     // The provider owns the OSS stage; only classify it, never forward its message.
-    throw failure(error instanceof Error && error.message.startsWith("OSS ") ? "OSS" : "NEWAPI");
+    const stage = error instanceof Error && error.message.startsWith("OSS ") ? "OSS" : "NEWAPI";
+    const safeError = failure(stage);
+    const key = stage === "OSS" ? cleanupObjectKey(error) : undefined;
+    if (key !== undefined) Object.assign(safeError, { cleanupObjectKey: key });
+    throw safeError;
   }
 
   const store = dependencies.credentialStore;
