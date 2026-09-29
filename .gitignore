@@ -1,6 +1,10 @@
 node_modules/
 .worktrees/
 dist/
+# Generated desktop resources and installer artifacts.
+/packages/desktop-setup/resources/
+/packages/desktop-setup/release/
+.hypit-resources-*/
 coverage/
 # Local architecture notes and repository-specific working instructions.
 /design/
