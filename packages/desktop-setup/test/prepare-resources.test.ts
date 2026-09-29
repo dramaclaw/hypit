@@ -2,12 +2,24 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { access, readFile, readdir, rename, rm, stat, symlink } from "node:fs/promises";
+import { access, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { create as createTar, Header } from "tar";
 import { checkout, distributionPath, executable, fixture, loadScript, manifest, put } from "./resource-fixtures.js";
+
+async function replaceTarball(path: string, entries: { path: string; contents?: string; type?: "Directory" | "File" }[]) {
+  const blocks: Buffer[] = [];
+  for (const entry of entries) {
+    const contents = Buffer.from(entry.contents ?? "");
+    const header = new Header({ path: entry.path, type: entry.type ?? "File", size: contents.length, mode: 0o644 });
+    header.encode();
+    blocks.push(header.block!, contents, Buffer.alloc((512 - contents.length % 512) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  await writeFile(path, gzipSync(Buffer.concat(blocks)));
+}
 
 test("committed runtime lock mirrors Distribution dependencies and pins every registry artifact with integrity", async () => {
   const root = JSON.parse(await readFile(join(checkout, "package.json"), "utf8"));
@@ -114,6 +126,46 @@ test("rejects traversal, absolute paths and hard links in Distribution tarballs"
     await assert.rejects(prepareResources({ ...f, platform: "darwin", arch: "arm64" }), /invalid.*path|forbidden tarball.*type/i);
     await assert.rejects(access(f.out));
   }
+});
+
+for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
+  test(`rejects uppercase bundled NODE_MODULES before extraction for ${platform}`, async (t) => {
+    const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+    await replaceTarball(f.hypitTgz, [
+      { path: "package/", type: "Directory" },
+      { path: "package/package.json", contents: JSON.stringify({ name: "@hypit/hypit", version: "7.8.9" }) },
+      { path: "package/packages/example/NODE_MODULES/dependency.js", contents: "unsafe" },
+    ]);
+    const { prepareResources } = await loadScript("prepare-resources.mjs");
+    await assert.rejects(prepareResources({ ...f, platform, arch }), /forbidden bundled tarball dependency/i);
+    await assert.rejects(access(f.out));
+  });
+
+  test(`rejects case-colliding archive directory components before extraction for ${platform}`, async (t) => {
+    const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+    await replaceTarball(f.hypitTgz, [
+      { path: "package/", type: "Directory" },
+      { path: "package/package.json", contents: JSON.stringify({ name: "@hypit/hypit", version: "7.8.9" }) },
+      { path: "package/Package/one.txt", contents: "one" },
+      { path: "package/package/two.txt", contents: "two" },
+    ]);
+    const { prepareResources } = await loadScript("prepare-resources.mjs");
+    await assert.rejects(prepareResources({ ...f, platform, arch }), /collid|duplicate tarball path/i);
+    await assert.rejects(access(f.out));
+  });
+}
+
+test("rejects canonically equivalent macOS archive names before extraction", async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  await replaceTarball(f.hypitTgz, [
+    { path: "package/", type: "Directory" },
+    { path: "package/package.json", contents: JSON.stringify({ name: "@hypit/hypit", version: "7.8.9" }) },
+    { path: "package/Caf\u00e9.txt", contents: "one" },
+    { path: "package/Cafe\u0301.txt", contents: "two" },
+  ]);
+  const { prepareResources } = await loadScript("prepare-resources.mjs");
+  await assert.rejects(prepareResources({ ...f, platform: "darwin", arch: "arm64" }), /colliding tarball paths/i);
+  await assert.rejects(access(f.out));
 });
 
 for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32", "x64", "ffmpeg.exe"]] as const) {

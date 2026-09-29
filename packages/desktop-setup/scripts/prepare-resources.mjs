@@ -9,8 +9,13 @@ import { assertSafePath, checkArtifact, checkExecutable, checkoutRoot, cliOption
 
 const exec = promisify(execFile);
 
-function validateTarball(bytes) {
+function validateTarball(bytes, platform) {
   const seen = new Set();
+  const normalizedPrefixes = new Map();
+  // macOS volumes can also equate canonically composed and decomposed names.
+  const normalizeComponent = platform === "darwin"
+    ? component => component.normalize("NFD").toLowerCase().normalize("NFD")
+    : component => component.toLowerCase();
   // Preflight the complete immutable archive before extracting any entry.
   list({ sync: true, strict: true, onReadEntry(entry) {
     if (!["File", "Directory"].includes(entry.type)) throw new Error(`Forbidden tarball entry type ${entry.type}: ${entry.path}`);
@@ -20,10 +25,19 @@ function validateTarball(bytes) {
     if (relative) {
       const resourcePath = `${distributionPath}/${relative}`;
       if (!knownProfiles.includes(resourcePath)) assertSafePath(resourcePath);
-      if (relative.split("/").includes("node_modules")) throw new Error(`Forbidden bundled tarball dependency: ${path}`);
+      if (relative.split("/").some(part => normalizeComponent(part) === "node_modules")) throw new Error(`Forbidden bundled tarball dependency: ${path}`);
     } else if (entry.type !== "Directory") throw new Error("Invalid tarball package root");
     if (seen.has(path)) throw new Error(`Duplicate tarball path: ${path}`);
     seen.add(path);
+    // Track prefixes too: Foo/a and foo/b merge into one directory on the target.
+    const parts = path.split("/");
+    for (let index = 1; index <= parts.length; index++) {
+      const prefix = parts.slice(0, index).join("/");
+      const normalized = parts.slice(0, index).map(normalizeComponent).join("/");
+      const previous = normalizedPrefixes.get(normalized);
+      if (previous && previous !== prefix) throw new Error(`Colliding tarball paths: ${previous} and ${prefix}`);
+      normalizedPrefixes.set(normalized, prefix);
+    }
   } }).end(bytes);
   assert.ok(seen.has("package/package.json"), "Tarball package.json is missing");
 }
@@ -56,7 +70,7 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
   if (await lstat(output).catch(error => { if (error.code === "ENOENT") return null; throw error; })) throw new Error(`Output already exists: ${output}`);
   const tarball = await readFile(resolve(hypitTgz));
   const tarballDigest = digest(tarball);
-  validateTarball(tarball);
+  validateTarball(tarball, platform);
   const runtimeLock = await readRuntimeLock(sourceRoot);
   const ffmpegRoot = join(sourceRoot, "packages/desktop-setup/node_modules", target.name);
   const ffmpeg = JSON.parse(await readFile(join(ffmpegRoot, "package.json"), "utf8"));
