@@ -2,12 +2,15 @@ import { isAbsolute, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { mkdir, readFile } from "node:fs/promises";
 import type { BrowserWindowConstructorOptions, WebContents } from "electron";
-import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
+import { completeNewApiSetup, newApiDefaultBindings, parseNewApiEndpointConfig } from "@dramaclaw/provider-newapi";
 import { PlatformCredentialStore } from "@hypit/credential-store-platform";
 import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./contracts.js";
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
+import { isManagedSkillInstalled } from "./skill-install.js";
+import { isManagedLauncherInstalled } from "./launcher-install.js";
+import type { LauncherOptions } from "./launcher-install.js";
 import { commitDesktopSetup } from "./setup-core.js";
 import { installDesktopIntegration } from "./lifecycle.js";
 
@@ -134,11 +137,44 @@ export function createSetupController(services: SetupServices) {
     rerunDiagnostics: () => enqueue(async () => {
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
-      return { ...result, diagnostics: (await services.diagnose()).map(publicDiagnostic) };
+      return { ...result, diagnostics: [...result.diagnostics, ...(await services.diagnose()).map(publicDiagnostic)] };
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
   };
+}
+
+export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<SetupResult> {
+  const { paths } = options;
+  const profileValid = async () => {
+    try {
+      const profile = JSON.parse(await readFile(paths.profile, "utf8"));
+      const endpoint = profile?.endpoints?.["newapi.personal"];
+      if (profile?.format !== "hypit.runtime-local@1" || typeof profile.dataRoot !== "string" || !profile.dataRoot.trim()
+        || profile.credentials?.platform?.use !== "@hypit/credential-store-platform"
+        || endpoint?.use !== "@dramaclaw/provider-newapi" || endpoint.pool !== "newapi.personal"
+        || profile.endpoints?.["media.local"]?.use !== "@hypit/provider-media-local"
+        || profile.endpoints?.["hyperframes.local"]?.use !== "@hypit/provider-hyperframes-local"
+        || Object.entries(newApiDefaultBindings).some(([key, value]) => profile.bindings?.[key] !== value)) return false;
+      const config = parseNewApiEndpointConfig(endpoint.config);
+      if (!config.relay) return false;
+      for (const [ref, key] of [[config.apiKey, "newapi.personal.api-key"], [config.relay.accessKeyId, "newapi.personal.oss-ak"], [config.relay.accessKeySecret, "newapi.personal.oss-sk"]] as const) {
+        if (ref.store !== "platform" || ref.key !== key) return false;
+      }
+      // Reuse the same nonblank/address checks as submission, without resolving credentials.
+      validateIpcArguments(IPC_CHANNELS.submit, [{ baseUrl: config.baseUrl, apiKey: "status-validation", relay: {
+        enabled: true, endpoint: config.relay.endpoint, bucket: config.relay.bucket, accessKeyId: "status-validation", accessKeySecret: "status-validation",
+      } }]);
+      return true;
+    } catch { return false; }
+  };
+  const [profile, skill, launcher] = await Promise.all([profileValid(), isManagedSkillInstalled(paths), isManagedLauncherInstalled(options)]);
+  return { configured: profile && skill && launcher, modelCount: 0, relayVerified: false,
+    profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: [
+      { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
+      { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.skill },
+      { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
+    ] };
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
@@ -152,14 +188,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const paths = desktopPaths({ platform, home, appData: platform === "win32" ? process.env.LOCALAPPDATA || join(home, "AppData", "Local") : app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
-  const emptyResult = (): SetupResult => ({ configured: false, modelCount: 0, relayVerified: false, profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: [] });
-  const getStatus = async (): Promise<SetupResult> => {
-    const result = emptyResult();
-    try {
-      const profile = JSON.parse(await readFile(paths.profile, "utf8"));
-      return { ...result, configured: profile?.format === "hypit.runtime-local@1" && typeof profile?.endpoints?.["newapi.personal"]?.config?.baseUrl === "string" };
-    } catch { return result; }
-  };
+  const getStatus = () => readDesktopStatus({ paths, platform, home });
   const controller = createSetupController({
     getStatus,
     commit: (input) => commitDesktopSetup(input, { paths, platform, credentialStore }),

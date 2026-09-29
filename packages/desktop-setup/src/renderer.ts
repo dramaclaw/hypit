@@ -107,9 +107,28 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     steps.append(item);
   });
   root.append(header, steps);
+  const buildNotice = node("aside", undefined, "warning");
+  buildNotice.setAttribute("aria-label", "内部测试版说明");
+  buildNotice.append(node("strong", "未签名的内部测试版"));
+  const userAgent = document.defaultView?.navigator.userAgent ?? "";
+  if (/Windows/u.test(userAgent)) {
+    buildNotice.append(node("p", "Windows SmartScreen 若拦截，请在确认来源可信后选择“更多信息”→“仍要运行”。"),
+      node("p", "Windows 安装包为跨平台构建，未经 Windows 实机验证。"));
+  } else if (/Macintosh|Mac OS X/u.test(userAgent)) {
+    buildNotice.append(node("p", "macOS Gatekeeper 若拦截，请在确认来源可信后右键点击应用并选择“打开”；若仍被阻止，请在系统设置的“隐私与安全性”中查看允许打开选项。"));
+  } else buildNotice.append(node("p", "仅供内部测试；Windows 安装包为跨平台构建，未经 Windows 实机验证。"));
+  root.append(buildNotice);
   const panel = node("section", undefined, "panel");
   panel.setAttribute("aria-busy", String(state.screen === "working"));
   root.append(panel);
+  const appendDiagnostics = () => {
+    const diagnostics = node("ul", undefined, "diagnostics");
+    for (const item of state.result?.diagnostics ?? []) {
+      const line = node("li"); line.append(node("span", item.label), node("span", { pass: "通过", warning: "待检查", fail: "失败" }[item.status], item.status));
+      if (item.path) line.append(node("code", item.path)); diagnostics.append(line);
+    }
+    panel.append(diagnostics);
+  };
   if (state.error) {
     const warning = node("div", undefined, "warning"); warning.setAttribute("role", "alert");
     warning.append(node("strong", state.error.message), node("p", `错误代码：${state.error.code}`));
@@ -126,6 +145,10 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   }
   if (state.screen === "settings") {
     panel.append(node("h1", "连接 NewAPI 与 OSS"), node("p", "六项均为必填。测试会读取可用模型，并在 OSS 中上传、下载及删除一个小型测试文件。", "intro"));
+    if (state.result && !state.result.configured) {
+      panel.append(node("h2", "安装尚未完成"), node("p", "请检查以下未完成项目，重新填写配置并测试安装。已保存的 Profile 不代表命令入口与 Skill 已安装。", "muted"));
+      appendDiagnostics();
+    }
     const form = node("form");
     const labels: Record<keyof Fields, string> = { baseUrl: "NewAPI 地址", apiKey: "NewAPI API Key", endpoint: "OSS Endpoint", bucket: "OSS Bucket", accessKeyId: "OSS AccessKey ID", accessKeySecret: "OSS AccessKey Secret" };
     const placeholders: Partial<Record<keyof Fields, string>> = { baseUrl: "https://newapi.example.com", endpoint: "oss-cn-hangzhou.aliyuncs.com", bucket: "my-video-bucket" };
@@ -165,14 +188,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   const failed = state.result?.diagnostics.some((item) => item.status === "fail");
   panel.append(node("p", "完成 / 诊断", "eyebrow"), node("h1", failed ? "配置已保存，需要检查" : "Hypit 已配置"),
     node("p", "请重启 Codex 和 Terminal，再测试 hypit 命令是否可用。", "intro"));
-  if (state.result) {
-    const diagnostics = node("ul", undefined, "diagnostics");
-    for (const item of state.result.diagnostics) {
-      const line = node("li"); line.append(node("span", item.label), node("span", { pass: "通过", warning: "待检查", fail: "失败" }[item.status], item.status));
-      if (item.path) line.append(node("code", item.path)); diagnostics.append(line);
-    }
-    panel.append(diagnostics);
-  }
+  if (state.result) appendDiagnostics();
   panel.append(node("p", "在 Codex 中试试", "eyebrow"), node("blockquote", EXAMPLE_PROMPT), node("p", "Chrome 和 WhisperX 及模型权重可能在以后首次使用时下载。", "muted"));
   const actions = node("div", undefined, "actions");
   actions.append(button("重新运行诊断", { type: "diagnostics" }, "primary"), button("打开配置目录", { type: "open-config" }), button("修改配置", { type: "edit" }));
@@ -193,11 +209,13 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
   let state = initialWizardState(draft);
   let disposed = false;
   let busy = false;
+  let interactionGeneration = 0;
   const render = () => { if (!disposed) renderWizard(root, state, dispatch); };
   const persist = () => { try { storage.setItem(draftKey, JSON.stringify(persistedWizardState(state))); } catch { /* Storage may be disabled; setup still works. */ } };
   const failure: SetupFailure = { code: "SETUP_REQUEST_FAILED", message: "操作失败，请检查配置后重试" };
   async function dispatch(action: UiAction): Promise<void> {
     if (disposed || busy && !["progress"].includes(action.type)) return;
+    if (action.type !== "progress") interactionGeneration++;
     if (["submit", "diagnostics", "clear", "open-config"].includes(action.type)) {
       if (action.type === "submit" && !canSubmit(state)) return;
       if (action.type === "clear" && !state.confirmClear) return;
@@ -228,10 +246,12 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
   const unsubscribe = bridge.onProgress((progress) => { void dispatch({ type: "progress", progress }); });
   render();
   void bridge.getStatus().then((reply) => {
-    if (disposed || busy) return;
-    if (reply.ok && reply.value.configured) { state = wizardReducer(state, { type: "success", result: reply.value }); render(); }
+    // A startup snapshot predates every user interaction; it must never erase a draft
+    // or replace the outcome of an operation that has already finished.
+    if (disposed || busy || interactionGeneration !== 0) return;
+    if (reply.ok) { state = wizardReducer(state, { type: "success", result: reply.value }); render(); }
     else if (!reply.ok) { state = wizardReducer(state, { type: "failure", error: reply.error }); render(); }
-  }).catch(() => { if (!disposed && !busy) { state = wizardReducer(state, { type: "failure", error: failure }); render(); } });
+  }).catch(() => { if (!disposed && !busy && interactionGeneration === 0) { state = wizardReducer(state, { type: "failure", error: failure }); render(); } });
   return () => { disposed = true; unsubscribe(); state = initialWizardState(); root.replaceChildren(); };
 }
 

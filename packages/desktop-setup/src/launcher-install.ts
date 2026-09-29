@@ -109,6 +109,23 @@ async function readState(path: string): Promise<LauncherState | undefined> {
 }
 const normalizeEntry = (entry: string) => entry.trim().replace(/^"|"$/gu, "").replace(/[\\/]+$/u, "").toLowerCase();
 
+export async function isManagedLauncherInstalled(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<boolean> {
+  try {
+    const { paths } = options;
+    if (!(await lstat(paths.managedState)).isFile()) return false;
+    const state = await readState(paths.managedState);
+    const info = await lstat(paths.launcher);
+    if (!state || state.pathEntry !== dirname(paths.launcher) || !info.isFile()
+      || digest(await readFile(paths.launcher, "utf8")) !== state.launcherDigest) return false;
+    if (options.platform === "darwin") {
+      return (info.mode & 0o111) !== 0 && !!state.zprofileBlock
+        && (await readFile(join(options.home, ".zprofile"), "utf8")).includes(state.zprofileBlock);
+    }
+    return (await (options.userPath ?? windowsUserPath).read()).split(";")
+      .some((entry) => normalizeEntry(entry) === normalizeEntry(state.pathEntry));
+  } catch { return false; }
+}
+
 export function renderLauncher(options: LauncherOptions): string {
   if (options.platform === "darwin") {
     if (!isAbsolute(options.electronExecutable) || !isAbsolute(options.cliEntry)) throw new Error("Absolute paths required");

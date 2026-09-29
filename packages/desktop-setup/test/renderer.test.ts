@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { parseHTML } from "linkedom";
 import { canSubmit, initialWizardState, persistedWizardState, renderWizard, mountWizard, stageCopy, wizardReducer, EXAMPLE_PROMPT } from "../src/renderer.js";
 import type { SetupResult } from "../src/contracts.js";
+import type { SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillPath: "/skill", launcherPath: "/launcher", diagnostics: [] };
@@ -108,4 +109,60 @@ test("typing then submitting sends current fields and unsubscribes on disposal",
   dispose();
   assert.equal(detached, true);
   assert.equal(root.childNodes.length, 0);
+});
+
+test("late initial status cannot discard early edits or submitted secrets", async () => {
+  const { document, window } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  let resolveStatus!: (reply: SetupReply<SetupResult>) => void;
+  const pending = new Promise<SetupReply<SetupResult>>((resolve) => { resolveStatus = resolve; });
+  let submitted: unknown;
+  const dispose = mountWizard(root, { getStatus: () => pending,
+    submit: async (input) => { submitted = input; return { ok: true, value: result }; },
+    rerunDiagnostics: async () => ({ ok: true, value: result }), openConfigDirectory: async () => ({ ok: true, value: undefined }),
+    clearConfiguration: async () => ({ ok: true, value: result }), onProgress: () => () => {} },
+  { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  root.querySelector<HTMLButtonElement>("button")!.click();
+  for (const [field, value] of Object.entries(fields)) {
+    const input = root.querySelector<HTMLInputElement>(`#${field}`)!;
+    input.value = value; input.dispatchEvent(new window.Event("input"));
+  }
+  resolveStatus({ ok: true, value: result });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(root.querySelector<HTMLInputElement>("#apiKey")?.value, fields.apiKey);
+  assert.match(root.textContent!, /连接 NewAPI 与 OSS/);
+  root.querySelector("form")!.dispatchEvent(new window.Event("submit", { cancelable: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((submitted as { apiKey: string }).apiKey, fields.apiKey);
+  dispose();
+});
+
+test("incomplete installation renders setup with explicit failed integration diagnostics", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const incomplete: SetupResult = { ...result, configured: false, diagnostics: [
+    { code: "profile", label: "Runtime Profile", status: "pass" },
+    { code: "launcher", label: "命令入口", status: "fail" },
+    { code: "skill", label: "Codex Skill", status: "fail" },
+  ] };
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result: incomplete }), () => {});
+  assert.match(root.textContent!, /安装尚未完成/);
+  assert.match(root.textContent!, /命令入口.*失败/);
+  assert.match(root.textContent!, /Codex Skill.*失败/);
+  assert.equal(root.querySelectorAll("input[required]").length, 6);
+});
+
+test("internal build notices explain platform-specific unsigned launch and Windows verification limits", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  Object.defineProperty(document, "defaultView", { value: { navigator: { userAgent: "Macintosh" } }, configurable: true });
+  renderWizard(root, initialWizardState(), () => {});
+  assert.match(root.textContent!, /未签名.*内部测试/);
+  assert.match(root.textContent!, /Gatekeeper.*右键.*打开/);
+  assert.doesNotMatch(root.textContent!, /SmartScreen/);
+  Object.defineProperty(document, "defaultView", { value: { navigator: { userAgent: "Windows NT 10.0" } }, configurable: true });
+  renderWizard(root, initialWizardState(), () => {});
+  assert.match(root.textContent!, /SmartScreen.*更多信息.*仍要运行/);
+  assert.match(root.textContent!, /跨平台构建.*未经 Windows 实机验证/);
+  assert.doesNotMatch(root.textContent!, /Gatekeeper/);
 });

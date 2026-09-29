@@ -34,7 +34,7 @@ async function markerAt(path: string): Promise<ManagedSkillMarker | undefined> {
   return marker;
 }
 
-async function treeDigest(root: string): Promise<string> {
+async function treeDigest(root: string, installed = false): Promise<string> {
   if (!(await lstat(root)).isDirectory() || !(await lstat(join(root, "SKILL.md"))).isFile()
     || !(await lstat(join(root, "references"))).isDirectory()) throw new Error("Invalid Skill tree");
   const hash = createHash("sha256");
@@ -44,10 +44,23 @@ async function treeDigest(root: string): Promise<string> {
     if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) throw new Error("Unsupported Skill entry");
     hash.update(JSON.stringify([relative, info.isDirectory() ? "directory" : "file", info.isFile() ? info.size : 0]));
     if (info.isFile()) hash.update(await readFile(path));
-    else for (const name of (await readdir(path)).sort()) await visit(relative ? `${relative}/${name}` : name);
+    else for (const name of (await readdir(path)).sort()) {
+      if (installed && relative === "" && name === SKILL_MARKER) continue;
+      await visit(relative ? `${relative}/${name}` : name);
+    }
   }
   await visit("");
   return hash.digest("hex");
+}
+
+/** Check ownership and installed content without exposing marker data to the renderer. */
+export async function isManagedSkillInstalled(paths: DesktopPaths): Promise<boolean> {
+  try {
+    const marker = await markerAt(paths.skill);
+    return !!marker?.installedVersion.trim()
+      && (marker.backupDirectory === undefined || marker.backupDirectory === paths.skillBackup)
+      && await treeDigest(paths.skill, true) === marker.sourceDigest;
+  } catch { return false; }
 }
 
 /** Copy is staged beside the target, checked byte-for-byte, then committed with directory renames. */
