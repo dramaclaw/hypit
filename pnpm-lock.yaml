@@ -1168,6 +1168,9 @@ importers:
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
+      tar:
+        specifier: 7.5.22
+        version: 7.5.22
 
   packages/driver-node:
     dependencies:

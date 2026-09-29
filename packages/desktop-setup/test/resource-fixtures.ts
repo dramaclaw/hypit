@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { create as createTar } from "tar";
 
 export const checkout = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 export const distributionPath = "runtime/node_modules/@hypit/hypit";
@@ -34,10 +34,13 @@ export async function fixture(extra: Record<string, string> = {}) {
   await put(packageRoot, "bin/hypit.mjs", "console.log('7.8.9');\n");
   for (const [path, value] of Object.entries(extra)) await put(packageRoot, path, value);
   const tarball = join(root, "hypit.tgz");
-  execFileSync("tar", ["-czf", tarball, "-C", root, "package"]);
+  await createTar({ file: tarball, cwd: root, gzip: true, portable: true }, ["package"]);
   for (const [path, value] of Object.entries({ "SKILL.md": "# Hypit\nRead references/guide.md", "agents/openai.yaml": "display_name: Hypit", "references/guide.md": "Complete guide", "references/nested/example.svml": "<Video />" })) {
     await put(source, `skills/hypit/${path}`, value);
   }
+  const runtime = { name: "hypit-desktop-runtime", version: "1.0.0", private: true, dependencies: {} };
+  await put(source, "packages/desktop-setup/runtime-lock/package.json", JSON.stringify(runtime));
+  await put(source, "packages/desktop-setup/runtime-lock/package-lock.json", JSON.stringify({ name: runtime.name, version: runtime.version, lockfileVersion: 3, packages: { "": runtime } }));
   for (const [platform, arch, version] of [["darwin", "arm64", "4.1.5"], ["win32", "x64", "4.1.0"]] as const) {
     const path = `packages/desktop-setup/node_modules/@ffmpeg-installer/${platform}-${arch}`;
     await put(source, `${path}/package.json`, JSON.stringify({ name: `@ffmpeg-installer/${platform}-${arch}`, version, os: [platform], cpu: [arch] }));

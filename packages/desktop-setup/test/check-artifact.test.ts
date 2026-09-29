@@ -4,6 +4,19 @@ import { join } from "node:path";
 import test from "node:test";
 import { distributionPath, executable, fixture, loadScript, manifest, put } from "./resource-fixtures.js";
 
+test("rejects media and credentials except explicit Distribution preview families", async () => {
+  const { assertSafePath } = await loadScript("check-artifact.mjs");
+  for (const filename of ["frame.png", "frame.jpg", "frame.jpeg", "frame.webp", "frame.gif", "audio.aac", "movie.mp4", "movie.mov", "movie.mkv", "movie.webm", "movie.avi", "audio.mp3", "audio.wav", "audio.m4a", "audio.flac", "audio.ogg", "secrets/api-key.txt", "credentials/data", "api-key.txt", "access-key.txt", "token.txt", "password.txt"]) {
+    assert.throws(() => assertSafePath(`${distributionPath}/${filename}`), /forbidden/i, filename);
+  }
+  for (const path of ["skill/hypit/preview/frame.png", "runtime/node_modules/other/preview/frame.png", `${distributionPath}/examples/unapproved/preview/frame.png`, `${distributionPath}/preview/frame.png`]) {
+    assert.throws(() => assertSafePath(path), /forbidden/i, path);
+  }
+  assertSafePath(`${distributionPath}/packages/media-track/preview/Track.png`);
+  assertSafePath(`${distributionPath}/examples/minimal-author-package/packages/example-component/preview/Box.png`);
+  assertSafePath(`${distributionPath}/packages/studio/src/secret-input.ts`);
+});
+
 for (const platform of ["darwin", "win32"] as const) {
   test(`validates ${platform} binary magic and architecture`, async () => {
     const { checkExecutable } = await loadScript("check-artifact.mjs");

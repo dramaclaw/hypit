@@ -26,6 +26,7 @@
   "devDependencies": {
     "electron": "44.4.5",
     "electron-builder": "26.15.3",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "tar": "7.5.22"
   }
 }

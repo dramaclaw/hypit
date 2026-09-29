@@ -8,6 +8,9 @@ import { parseArgs } from "node:util";
 export const checkoutRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 export const distributionPath = "runtime/node_modules/@hypit/hypit";
 export const knownProfiles = ["examples/provider-package/hypit.runtime.json", "examples/semantic-composition/hypit.runtime.json"].map(path => `${distributionPath}/${path}`);
+// A published dependency includes this unused browser test asset. Remove this
+// exact fixture only; do not broaden the media allowlist for dependency trees.
+export const knownDependencyFixtures = ["runtime/node_modules/stream-http/test/server/static/browserify.png"];
 
 export function targetFor({ platform, arch }) {
   const version = { "darwin-arm64": "4.1.5", "win32-x64": "4.1.0" }[`${platform}-${arch}`];
@@ -32,10 +35,16 @@ export function assertSafePath(path) {
   const parts = path.split("/");
   if (!path || path.includes("\\") || isAbsolute(path) || parts.some(part => !part || part === "." || part === ".." || part.includes(":"))) throw new Error(`Invalid resource path: ${path}`);
   const name = parts.at(-1).toLowerCase();
-  if (parts.some(part => /^(?:\.env(?:\..*)?|\.hypit|\.ssh|\.aws|profiles?|outputs?|renders?)$/i.test(part))
+  // These are the preview families included by the root Distribution's files
+  // list. Media anywhere else (including Skill and external dependencies) fails.
+  const previewImage = path.startsWith(`${distributionPath}/`)
+    && /^(?:packages\/[^/]+|examples\/minimal-author-package\/packages\/[^/]+)\/preview\/.+\.(?:png|jpe?g|webp|gif)$/i.test(path.slice(distributionPath.length + 1));
+  if (parts.some(part => /^(?:\.env(?:\..*)?|\.hypit|\.ssh|\.aws|profiles?|outputs?|renders?|secrets?|credentials?)$/i.test(part))
     || /^(?:hypit\.runtime(?:\.[^.]+)?\.json|desktop-newapi\.json|\.npmrc|\.netrc)$/i.test(name)
+    || /^(?:api[-_]?key|access[-_]?key|token|password|secret|credentials?)\.(?:txt|text)$/i.test(name)
     || /(?:credential|service[-_]?account|secret|token|profile).*\.(?:json|ya?ml|toml|ini)$/i.test(name)
-    || /\.(?:key|pem|p12|pfx|mp4|mov|mkv|webm|avi|mp3|wav|m4a|flac|ogg)$/i.test(name)) {
+    || /\.(?:key|pem|p12|pfx|mp4|mov|mkv|webm|avi|mp3|wav|m4a|flac|ogg|aac)$/i.test(name)
+    || (!previewImage && /\.(?:png|jpe?g|webp|gif)$/i.test(name))) {
     throw new Error(`Forbidden resource path: ${path}`);
   }
 }
@@ -52,6 +61,22 @@ function assertAllowedPath(path, target, directory = false) {
 
 export function digest(bytes) {
   return { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+}
+
+export async function readRuntimeLock(sourceRoot = checkoutRoot) {
+  const directory = join(sourceRoot, "packages/desktop-setup/runtime-lock");
+  const packageBytes = await readFile(join(directory, "package.json"));
+  const lockBytes = await readFile(join(directory, "package-lock.json"));
+  const input = JSON.parse(packageBytes);
+  const lock = JSON.parse(lockBytes);
+  assert.equal(lock.lockfileVersion, 3, "Runtime lock must use npm lockfile version 3");
+  assert.deepEqual(lock.packages?.[""]?.dependencies ?? {}, input.dependencies ?? {}, "Runtime lock dependencies differ from its package input");
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (!path) continue;
+    assert.ok(path.startsWith("node_modules/") && !entry.link && !entry.dev, `Invalid runtime lock entry: ${path}`);
+    assert.ok(/^https?:\/\//.test(entry.resolved) && /^sha512-[A-Za-z0-9+/]+=*$/.test(entry.integrity), `Runtime lock requires a registry URL and SHA-512 integrity: ${path}`);
+  }
+  return { input, packageBytes, lockBytes, digests: { packageJson: digest(packageBytes), packageLock: digest(lockBytes) } };
 }
 
 // npm creates relative .bin symlinks on Unix. Only links to regular files inside
@@ -106,6 +131,9 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.equal(manifest.arch, arch, "Manifest architecture mismatch");
   assert.deepEqual(manifest.ffmpeg, { name: target.name, version: target.version });
   assert.ok(Array.isArray(manifest.strippedProfiles) && manifest.strippedProfiles.every(path => knownProfiles.includes(path)), "Unexpected stripped profiles");
+  assert.ok(Array.isArray(manifest.strippedDependencyFixtures) && manifest.strippedDependencyFixtures.every(path => knownDependencyFixtures.includes(path)), "Unexpected stripped dependency fixtures");
+  const runtimeLock = await readRuntimeLock(sourceRoot);
+  assert.deepEqual(manifest.runtimeLock, runtimeLock.digests, "Runtime lock digest mismatch");
   assert.ok(/^[a-f0-9]{64}$/.test(manifest.hypit.tarball.sha256) && Number.isSafeInteger(manifest.hypit.tarball.bytes) && manifest.hypit.tarball.bytes > 0, "Invalid tarball digest");
   for (const path of Object.keys(manifest.files)) assertAllowedPath(path, target);
   const files = await inventory(root, { target, allowBinLinks: true });
@@ -115,6 +143,7 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.equal(installed.name, "@hypit/hypit", "Unexpected Distribution package");
   assert.equal(manifest.hypit.name, installed.name);
   assert.equal(manifest.hypit.version, installed.version, "Distribution version mismatch");
+  assert.deepEqual(installed.dependencies ?? {}, runtimeLock.input.dependencies ?? {}, "Distribution dependencies differ from runtime lock");
   assert.ok(files[`${distributionPath}/bin/hypit.mjs`], "Distribution launcher is missing");
   await checkSkill(root, sourceRoot);
   const binary = join(root, "bin", target.executable);
