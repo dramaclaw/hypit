@@ -89,6 +89,32 @@ test("macOS PATH block is idempotent and uninstall preserves unrelated shell byt
   assert.equal(await removeLauncher(f), false);
 });
 
+test("macOS installation and upgrade preserve non-UTF8 profile bytes exactly", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  const original = Buffer.from([35, 32, 0xff]);
+  await writeFile(profile, original);
+  await installLauncher(f);
+  const installed = await readFile(profile);
+  assert.deepEqual(installed.subarray(0, original.length), original);
+  await installLauncher(f);
+  assert.deepEqual(await readFile(profile), installed);
+  await removeLauncher(f);
+  assert.deepEqual(await readFile(profile), original);
+});
+
+test("macOS uninstall preserves non-UTF8 bytes appended after installation", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  const original = Buffer.from("# original\n");
+  await writeFile(profile, original);
+  await installLauncher(f);
+  const addition = Buffer.from([35, 32, 0xff, 10]);
+  await writeFile(profile, Buffer.concat([await readFile(profile), addition]));
+  await removeLauncher(f);
+  assert.deepEqual(await readFile(profile), Buffer.concat([original, addition]));
+});
+
 test("unmanaged launchers are preserved and modified managed launchers are not removed", async (t) => {
   const f = await fixture(t);
   await mkdir(dirname(f.paths.launcher), { recursive: true });

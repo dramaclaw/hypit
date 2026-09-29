@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, win32 } from "node:path";
 import { promisify } from "node:util";
 import type { DesktopPaths } from "./paths.js";
 import { exists } from "./skill-install.js";
+import type { PreparedRemoval } from "./skill-install.js";
 
 export type UserPath = { readonly read: () => Promise<string>; readonly write: (value: string) => Promise<void> };
 export type LauncherOptions = {
@@ -143,11 +144,11 @@ export async function installLauncher(options: LauncherOptions): Promise<{ reado
     if (options.platform === "darwin") {
       await chmod(pathEntry, 0o700);
       const profile = join(options.home, ".zprofile");
-      const content = snapshots[2]!.bytes?.toString("utf8") ?? "";
+      const content = snapshots[2]!.bytes ?? Buffer.alloc(0);
       const core = pathBlock(pathEntry);
-      const block = oldState?.zprofileBlock ?? `${content && !content.endsWith("\n") ? "\n" : ""}${core}`;
+      const block = oldState?.zprofileBlock ?? `${content.length && content.at(-1) !== 10 ? "\n" : ""}${core}`;
       if (oldState?.zprofileBlock && !content.includes(block)) throw new Error("PATH block was edited");
-      if (!content.includes(block)) await atomicFile(profile, content + block, snapshots[2]!.mode ?? 0o600);
+      if (!content.includes(block)) await atomicFile(profile, Buffer.concat([content, Buffer.from(block)]), snapshots[2]!.mode ?? 0o600);
       state = { ...state, zprofileBlock: block };
     } else {
       oldPath = await userPath.read();
@@ -165,32 +166,62 @@ export async function installLauncher(options: LauncherOptions): Promise<{ reado
   }
 }
 
-export async function removeLauncher(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<boolean> {
+export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<PreparedRemoval | undefined> {
   const snapshots: FileSnapshot[] = [];
   const userPath = options.userPath ?? windowsUserPath;
   let oldPath: string | undefined;
   let pathAttempted = false;
+  let filesAttempted = false;
   try {
     const state = await readState(options.paths.managedState);
-    if (!state) return false;
+    if (!state) return undefined;
     for (const path of launcherFiles(options)) snapshots.push(await snapshotFile(path));
     if (state.pathEntry !== dirname(options.paths.launcher)) throw new Error("Invalid path ownership");
     if (snapshots[0]!.bytes !== undefined && digest(snapshots[0]!.bytes!.toString()) !== state.launcherDigest) throw new Error("Launcher was edited");
+    let profileBytes: Buffer | undefined;
+    let nextPath: string | undefined;
     if (options.platform === "darwin" && state.zprofileBlock) {
-      const content = snapshots[2]!.bytes?.toString("utf8");
-      if (content?.includes(state.zprofileBlock)) await atomicFile(join(options.home, ".zprofile"), content.replace(state.zprofileBlock, ""), snapshots[2]!.mode);
+      const content = snapshots[2]!.bytes;
+      const block = Buffer.from(state.zprofileBlock);
+      const index = content?.indexOf(block) ?? -1;
+      if (content && index !== -1) profileBytes = Buffer.concat([content.subarray(0, index), content.subarray(index + block.length)]);
     } else if (options.platform === "win32" && state.pathAdded) {
       oldPath = await userPath.read();
       const entries = oldPath.split(";");
       const index = entries.indexOf(state.pathEntry);
-      if (index !== -1) { entries.splice(index, 1); pathAttempted = true; await userPath.write(entries.join(";")); }
+      if (index !== -1) { entries.splice(index, 1); nextPath = entries.join(";"); }
     }
-    if (snapshots[0]!.bytes !== undefined) await unlink(options.paths.launcher);
-    await unlink(options.paths.managedState);
+    return {
+      async commit() {
+        if (nextPath !== undefined) { pathAttempted = true; await userPath.write(nextPath); }
+        filesAttempted = true;
+        if (profileBytes !== undefined) await atomicFile(join(options.home, ".zprofile"), profileBytes, snapshots[2]!.mode);
+        if (snapshots[0]!.bytes !== undefined) await unlink(options.paths.launcher);
+        await unlink(options.paths.managedState);
+      },
+      async rollback() {
+        let failed = filesAttempted && await restoreFiles(snapshots);
+        if (pathAttempted && oldPath !== undefined) await userPath.write(oldPath).catch(() => { failed = true; });
+        return failed;
+      },
+      async dispose() {},
+    };
+  } catch {
+    throw new Error("命令入口卸载失败 [LAUNCHER_REMOVE_FAILED]");
+  }
+}
+
+export async function removeLauncher(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<boolean> {
+  let removal: PreparedRemoval | undefined;
+  let committed = false;
+  try {
+    removal = await prepareLauncherRemoval(options);
+    if (!removal) return false;
+    await removal.commit();
+    committed = true;
     return true;
   } catch {
-    let failed = await restoreFiles(snapshots);
-    if (pathAttempted && oldPath !== undefined) await userPath.write(oldPath).catch(() => { failed = true; });
+    const failed = await removal?.rollback();
     throw new Error(`命令入口卸载失败 [LAUNCHER_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
-  }
+  } finally { await removal?.dispose(committed); }
 }

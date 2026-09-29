@@ -1,7 +1,7 @@
-import { installLauncher, launcherFiles, removeLauncher, restoreFiles, snapshotFile, windowsUserPath } from "./launcher-install.js";
+import { installLauncher, launcherFiles, prepareLauncherRemoval, restoreFiles, snapshotFile, windowsUserPath } from "./launcher-install.js";
 import type { FileSnapshot, LauncherOptions } from "./launcher-install.js";
-import { installManagedSkill, removeManagedSkill } from "./skill-install.js";
-import type { SkillInstallOptions } from "./skill-install.js";
+import { installManagedSkill, prepareSkillRemoval } from "./skill-install.js";
+import type { PreparedRemoval, SkillInstallOptions } from "./skill-install.js";
 
 export type DesktopIntegrationOptions = LauncherOptions & SkillInstallOptions;
 
@@ -32,10 +32,21 @@ export async function installDesktopIntegration(options: DesktopIntegrationOptio
 }
 
 export async function removeDesktopIntegration(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<void> {
+  let skill: PreparedRemoval | undefined;
+  let launcher: PreparedRemoval | undefined;
+  let committed = false;
   try {
-    await removeManagedSkill(options);
-    await removeLauncher(options);
-  } catch (error) {
-    throw new Error(`桌面集成卸载失败 [INTEGRATION_REMOVE_FAILED${rollbackFailed(error) ? "_ROLLBACK_FAILED" : ""}]`);
+    skill = await prepareSkillRemoval(options);
+    launcher = await prepareLauncherRemoval(options);
+    await launcher?.commit();
+    await skill?.commit();
+    committed = true;
+  } catch {
+    const skillFailed = await skill?.rollback();
+    const launcherFailed = await launcher?.rollback();
+    throw new Error(`桌面集成卸载失败 [INTEGRATION_REMOVE_FAILED${skillFailed || launcherFailed ? "_ROLLBACK_FAILED" : ""}]`);
+  } finally {
+    await skill?.dispose(committed);
+    await launcher?.dispose(committed);
   }
 }

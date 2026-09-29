@@ -96,29 +96,68 @@ export async function installManagedSkill(options: SkillInstallOptions): Promise
   }
 }
 
-export async function removeManagedSkill(options: { readonly paths: DesktopPaths }): Promise<boolean> {
+export type PreparedRemoval = {
+  readonly commit: () => Promise<void>;
+  /** Return true when restoration is incomplete; retain recovery artifacts in that case. */
+  readonly rollback: () => Promise<boolean>;
+  /** Only discard the old installed tree and its backup after the whole operation commits. */
+  readonly dispose: (committed: boolean) => Promise<void>;
+};
+
+/** Validate ownership and stage restoration before changing any installed component. */
+export async function prepareSkillRemoval(options: { readonly paths: DesktopPaths }): Promise<PreparedRemoval | undefined> {
   const { paths } = options;
   const previous = `${paths.skill}.removed-${randomUUID()}`;
   const restoreStage = `${paths.skill}.restore-${randomUUID()}`;
   let moved = false;
-  let committed = false;
+  let restored = false;
   try {
     const marker = await markerAt(paths.skill);
-    if (!marker) return false;
+    if (!marker) return undefined;
     if (marker.backupDirectory !== undefined) {
       if (marker.backupDirectory !== paths.skillBackup || !(await exists(paths.skillBackup))) throw new Error("Invalid backup");
       await cp(paths.skillBackup, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
     }
-    await rename(paths.skill, previous);
-    moved = true;
-    if (marker.backupDirectory !== undefined) await rename(restoreStage, paths.skill);
+    return {
+      async commit() {
+        await rename(paths.skill, previous);
+        moved = true;
+        if (marker.backupDirectory !== undefined) { await rename(restoreStage, paths.skill); restored = true; }
+      },
+      async rollback() {
+        if (!moved) return false;
+        try {
+          if (restored) { await rename(paths.skill, restoreStage); restored = false; }
+          await rename(previous, paths.skill);
+          moved = false;
+          return false;
+        } catch { return true; }
+      },
+      async dispose(committed) {
+        if (committed) {
+          await rm(previous, { recursive: true, force: true }).catch(() => {});
+          if (marker.backupDirectory !== undefined) await rm(paths.skillBackup, { recursive: true, force: true }).catch(() => {});
+        }
+        await rm(restoreStage, { recursive: true, force: true }).catch(() => {});
+      },
+    };
+  } catch {
+    await rm(restoreStage, { recursive: true, force: true }).catch(() => {});
+    throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED]");
+  }
+}
+
+export async function removeManagedSkill(options: { readonly paths: DesktopPaths }): Promise<boolean> {
+  let removal: PreparedRemoval | undefined;
+  let committed = false;
+  try {
+    removal = await prepareSkillRemoval(options);
+    if (!removal) return false;
+    await removal.commit();
     committed = true;
-    await rm(previous, { recursive: true, force: true }).catch(() => {});
-    if (marker.backupDirectory !== undefined) await rm(paths.skillBackup, { recursive: true, force: true }).catch(() => {});
     return true;
   } catch {
-    let rollbackFailed = false;
-    if (moved && !committed) await rename(previous, paths.skill).catch(() => { rollbackFailed = true; });
-    throw new Error(`Skill 卸载失败 [SKILL_REMOVE_FAILED${rollbackFailed ? "_ROLLBACK_FAILED" : ""}]`);
-  } finally { await rm(restoreStage, { recursive: true, force: true }).catch(() => {}); }
+    const failed = await removal?.rollback();
+    throw new Error(`Skill 卸载失败 [SKILL_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
+  } finally { await removal?.dispose(committed); }
 }
