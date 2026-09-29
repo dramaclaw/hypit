@@ -35,7 +35,7 @@
 5. 通过 `open -a` 启动**已复制的应用**，可见中文欢迎页和六项必填配置表单；“测试连接并安装”在字段为空时禁用。GUI 资源和基本交互已目视检查。
 6. 安装后 CLI 对现有示例 Run 执行了只读 `plan`；其输出列出 8 个请求及 Provider 价格页，但因示例的 WhisperX 与 Seedance Endpoint 未配置，退出码为 1，并明确显示 2 项未解析。没有启动 Build 或付费生成。
 
-本次桌面向导连接测试显示 `SETUP_OSS_FAILED`，并提示 OSS 测试对象键 `relay/hypit/setup-test/dc33f5ae-80f5-4e30-a9db-56c9e4489a62.txt` 可能需要手动清理。未自动访问或清理该对象。由于连接测试未完成，桌面 Profile 与 `~/.local/bin/hypit` 尚未生成，平台凭据落盘、托管 Skill、桌面 Profile 选择及该配置的 Runtime 启停尚不能标记为通过。此错误与其对象清理需使用者确认后再复测；报告不记录任何输入字段值或密钥。
+本次桌面向导连接测试显示 `SETUP_OSS_FAILED`，并提示 OSS 测试对象键 `relay/hypit/setup-test/dc33f5ae-80f5-4e30-a9db-56c9e4489a62.txt` 可能需要手动清理。观察到错误后，验收人员未额外访问或手动清理该对象。由于连接测试未完成，桌面 Profile 与 `~/.local/bin/hypit` 尚未生成，平台凭据落盘、托管 Skill、桌面 Profile 选择及该配置的 Runtime 启停尚不能标记为通过。此错误与其对象清理需使用者确认后再复测；报告不记录任何输入字段值或密钥。
 
 第一次复制到“应用程序”时，构建残留的解包目录占满磁盘，`ditto` 报 `No space left on device`。已删除本次创建的不完整应用拷贝及四个可再生的 `release/mac-arm64`、`release/win-unpacked`、`resources/mac-arm64`、`resources/win-x64` 目录，磁盘恢复后从同一最终 DMG 重新复制成功。最终 DMG/EXE 和校验文件未被删除或修改。检查结束后已卸载 DMG 卷；已复制的应用保留在当前用户“应用程序”中。
 
