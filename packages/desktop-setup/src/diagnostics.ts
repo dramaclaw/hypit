@@ -89,12 +89,13 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
   if (config?.relay && secrets.length === 3) {
     const input: SetupInput = { baseUrl: config.baseUrl, apiKey: secrets[0]!, relay: { enabled: true, endpoint: config.relay.endpoint, bucket: config.relay.bucket, accessKeyId: secrets[1]!, accessKeySecret: secrets[2]! } };
     try {
-      await (options.testConnection ?? testNewApiSetupConnection)(input);
-      results.push({ code: "newapi", label: "NewAPI", status: "pass" }, { code: "oss", label: "OSS", status: "pass" });
+      const connection = await (options.testConnection ?? testNewApiSetupConnection)(input);
+      results.push({ code: "newapi", label: "NewAPI", status: "pass" }, connection.cleanupObjectKey
+        ? { code: "oss", label: "OSS", status: "warning", cleanupObjectKey: connection.cleanupObjectKey }
+        : { code: "oss", label: "OSS", status: "pass" });
     } catch (error) {
       const oss = error instanceof Error && error.message.startsWith("OSS ");
-      const key = error instanceof Error ? /^OSS probe cleanup failed; remove object (relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt) manually$/u.exec(error.message)?.[1] : undefined;
-      results.push({ code: "newapi", label: "NewAPI", status: oss ? "pass" : "fail" }, { code: "oss", label: "OSS", status: oss ? "fail" : "warning", ...(key ? { cleanupObjectKey: key } : {}) });
+      results.push({ code: "newapi", label: "NewAPI", status: oss ? "pass" : "fail" }, { code: "oss", label: "OSS", status: oss ? "fail" : "warning" });
     }
   } else results.push({ code: "newapi", label: "NewAPI", status: "warning" }, { code: "oss", label: "OSS", status: "warning" });
   return results;

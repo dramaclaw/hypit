@@ -76,6 +76,20 @@ test("Chinese stages, cleanup warning and literal example render safely", () => 
   assert.match(root.textContent!, /Chrome.*WhisperX.*下载/);
 });
 
+test("cleanup-only warning appears on the completed page with the exact object key", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const key = "relay/hypit/setup-test/00000000-0000-4000-8000-000000000001.txt";
+  const warned = { ...result, diagnostics: [{ code: "oss" as const, status: "warning" as const, label: "OSS" as const, cleanupObjectKey: key }] };
+  const state = wizardReducer(filled(), { type: "success", result: warned });
+  assert.equal(state.screen, "complete");
+  renderWizard(root, state, () => {});
+  assert.match(root.textContent!, /Hypit 已配置/);
+  assert.match(root.textContent!, /OSS 已验证；测试对象未自动删除/);
+  assert.equal(root.querySelector("li code")?.textContent, key);
+  assert.doesNotMatch(root.textContent!, /OSS 连接测试失败/);
+});
+
 test("wizard DOM uses password inputs and disables actions while working", () => {
   const { document } = parseHTML("<main id='app'></main>");
   const root = document.getElementById("app")! as unknown as HTMLElement;

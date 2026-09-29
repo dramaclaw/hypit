@@ -8,12 +8,28 @@
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |
-| `Hypit-Setup-0.1.0-arm64.dmg` | 196170089 | `b447e7bdc75ebffd79ca338352d231ce50182e389be6c1118d34783f23aa8f9f` |
-| `Hypit-Setup-0.1.0-x64.exe` | 185444057 | `db50d96cc9027422f02e01a6b14d7e83168f64fa056a2218971657bd2c4ce4b2` |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 196170431 | `6ad25816d082ab2a2562ba90fbaba556a27fafaf446ab660b5c94b7a81fcecb1` |
+| `Hypit-Setup-0.1.0-x64.exe` | 185443909 | `340a036e7ab3dbcb111a178fa61ff5158eb2a7c82f4841812b518132dffbb2ec` |
 
 在 `packages/desktop-setup/release/` 目录运行 `shasum -a 256 -c Hypit-Setup-0.1.0-arm64.dmg.sha256` 和 `shasum -a 256 -c Hypit-Setup-0.1.0-x64.exe.sha256`，两项均输出 `OK`。校验文件中的文件名是相对文件名，因此应从 `release/` 目录运行。
 
-## 自动化与 Distribution
+## OSS 清理警告修复复验
+
+本次修复将 OSS 探针的删除失败改为非阻塞警告：上传、签名 URL、下载及内容校验都成功后，删除失败仍返回连接成功，并在完成页和诊断页显示“OSS 已验证；测试对象未自动删除”及严格校验的对象键。若上传、签名、下载或内容校验失败，仍拒绝安装；即使同时删除失败，也保留原本的阻塞错误。回归测试覆盖凭据和 Runtime Profile 继续写入，以及 controller 后续安装与诊断流程继续执行。
+
+| 命令 | 本次结果 |
+| --- | --- |
+| `node --import tsx --test packages/provider-newapi/test/*.test.ts packages/desktop-setup/test/*.test.ts` | 310 通过，0 失败 |
+| `npm run check` | TypeScript 检查通过 |
+| `npm test` | 1461 项：1438 通过、23 按现有环境条件跳过、0 失败 |
+| `npm run desktop:dist:mac` | DMG 构建、挂载、应用及资源检查通过；未签名 |
+| `npm run desktop:dist:win` | NSIS 交叉构建、解包、应用及资源检查通过；未签名 |
+| 两项 `shasum -a 256 -c` | 均输出 `OK` |
+| `git diff --check` | 通过 |
+
+打包脚本对本次 DMG 实际挂载内容及本次 EXE 实际解包内容运行 `inspectApp`，包括应用可执行文件、资源清单与哈希、Runtime、Skill、媒体工具及桌面 bundle。没有读取真实平台凭据、调用真实 OSS/NewAPI 或运行付费生成。此次未在 macOS/Windows 向导中用真实凭据复测成功安装；Windows 仍未在实机安装验证。
+
+## 此前自动化与 Distribution（修复前）
 
 | 命令 | 结果 |
 | --- | --- |
@@ -26,20 +42,20 @@
 
 `npm run desktop:dist:mac` 与 `npm run desktop:dist:win` 分别重新打包 Distribution、锁定的目标平台依赖、Skill 和 FFmpeg/FFprobe；构建脚本从实际 DMG/NSIS 解包内容核对资源清单和哈希，并生成最终校验文件。两个命令均退出 0。构建日志确认 macOS 签名禁用，Windows 安装器与卸载器签名均跳过。
 
-## macOS Apple Silicon 安装检查
+## 此前 macOS Apple Silicon 安装检查（修复前构建）
 
-1. 使用 `hdiutil attach -readonly -nobrowse` 挂载**最终 DMG**；应用主程序、FFmpeg、FFprobe 经 `file` 确认都是 Mach-O arm64。
+1. 使用 `hdiutil attach -readonly -nobrowse` 挂载当时的 DMG；应用主程序、FFmpeg、FFprobe 经 `file` 确认都是 Mach-O arm64。
 2. 从挂载应用中的 `app.asar` 提取检查 `dist/main.cjs`、`dist/preload.cjs`、`dist/renderer.js`、`dist/index.html`、`dist/styles.css`、`dist/cleanup.cjs`，都存在；完整 Skill、资源清单和解包的 Windows 凭据辅助脚本也存在。
-3. 从 DMG 将应用复制到当前用户的 `/Users/wwq/Applications/Hypit Setup.app`。在复制前确认目标不存在；复制后运行安装资源检查，资源清单、文件哈希、Skill 与 GUI bundle 通过。
+3. 从当时的 DMG 将应用复制到当前用户的 `/Users/wwq/Applications/Hypit Setup.app`。在复制前确认目标不存在；复制后运行安装资源检查，资源清单、文件哈希、Skill 与 GUI bundle 通过。该已复制应用并非本次修复重建的版本。
 4. 在 `PATH` 为空的环境中，安装后内置 CLI `--version` 返回 `0.2.16`，内置 FFmpeg 返回 `4.4`，FFprobe 返回 `n4.4.1`。运行安装后 CLI 的 `doctor --json`，一个本地示例 Profile 返回 `ok: true`。
 5. 通过 `open -a` 启动**已复制的应用**，可见中文欢迎页和六项必填配置表单；“测试连接并安装”在字段为空时禁用。GUI 资源和基本交互已目视检查。
 6. 安装后 CLI 对现有示例 Run 执行了只读 `plan`；其输出列出 8 个请求及 Provider 价格页，但因示例的 WhisperX 与 Seedance Endpoint 未配置，退出码为 1，并明确显示 2 项未解析。没有启动 Build 或付费生成。
 
-本次桌面向导连接测试显示 `SETUP_OSS_FAILED`，并提示 OSS 测试对象键 `relay/hypit/setup-test/dc33f5ae-80f5-4e30-a9db-56c9e4489a62.txt` 可能需要手动清理。观察到错误后，验收人员未额外访问或手动清理该对象。由于连接测试未完成，桌面 Profile 与 `~/.local/bin/hypit` 尚未生成，平台凭据落盘、托管 Skill、桌面 Profile 选择及该配置的 Runtime 启停尚不能标记为通过。此错误与其对象清理需使用者确认后再复测；报告不记录任何输入字段值或密钥。
+修复前桌面向导连接测试显示 `SETUP_OSS_FAILED`，并提示 OSS 测试对象键 `relay/hypit/setup-test/dc33f5ae-80f5-4e30-a9db-56c9e4489a62.txt` 可能需要手动清理。观察到错误后，验收人员未额外访问或手动清理该对象。由于当时连接测试未完成，桌面 Profile 与 `~/.local/bin/hypit` 尚未生成，平台凭据落盘、托管 Skill、桌面 Profile 选择及该配置的 Runtime 启停尚不能标记为通过。本次修复已通过模拟删除失败的自动化测试；尚未使用真实配置复测。报告不记录任何输入字段值或密钥。
 
-第一次复制到“应用程序”时，构建残留的解包目录占满磁盘，`ditto` 报 `No space left on device`。已删除本次创建的不完整应用拷贝及四个可再生的 `release/mac-arm64`、`release/win-unpacked`、`resources/mac-arm64`、`resources/win-x64` 目录，磁盘恢复后从同一最终 DMG 重新复制成功。最终 DMG/EXE 和校验文件未被删除或修改。检查结束后已卸载 DMG 卷；已复制的应用保留在当前用户“应用程序”中。
+当时第一次复制到“应用程序”时，构建残留的解包目录占满磁盘，`ditto` 报 `No space left on device`。已删除当时创建的不完整应用拷贝及四个可再生目录，磁盘恢复后从同一 DMG 重新复制成功。当时的 DMG/EXE 和校验文件未被删除或修改。检查结束后已卸载 DMG 卷；已复制的旧版应用保留在当前用户“应用程序”中。
 
-## Windows x64 交叉构建检查
+## 此前 Windows x64 交叉构建检查（修复前构建）
 
 1. `npm run desktop:dist:win` 在 macOS 上完成 NSIS 编译；日志含 `oneClick=true perMachine=false`，并确认 EXE 与卸载器均跳过签名。
 2. 使用 electron-builder 固定的 `7za` 解包最终 EXE，识别为 `NSIS-3 Unicode`；再解出 `$PLUGINSDIR/app-64.7z`，报告 `Everything is Ok`，含 6456 个文件。
@@ -64,5 +80,5 @@ Windows x64：已在 macOS 交叉构建并完成静态与解包检查；尚未�
 ## 尚未执行
 
 - 未进行真实 Windows x64 安装、启动、PATH、系统凭据和卸载验收。
-- 未完成 macOS 桌面向导的成功连接与凭据保存、托管 Skill/命令入口、桌面 Profile 下的 Runtime 启停验收；见上方 OSS 错误。
+- 未使用真实配置完成本次 macOS 桌面向导的成功连接与凭据保存、托管 Skill/命令入口、桌面 Profile 下的 Runtime 启停验收；修复前的 OSS 错误见上方历史记录。
 - 未运行任何付费图片或视频生成测试。若需运行，须先单独确认所选模型、参数和预估费用。

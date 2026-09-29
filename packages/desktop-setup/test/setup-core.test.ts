@@ -116,14 +116,14 @@ test("OSS connection errors are replaced with a stable Chinese stage", async () 
   assert.deepEqual(f.events, ["test-newapi"]);
 });
 
-test("OSS cleanup failure preserves only the validated probe key for manual deletion", async () => {
+test("OSS cleanup failure completes setup and exposes only the validated probe key as a warning", async () => {
   const f = fixture();
   const key = "relay/hypit/setup-test/00000000-0000-4000-8000-000000000001.txt";
   const connectionTest = { ...f.dependencies.connectionTest!,
     async fetch(url: string | URL | Request, init?: RequestInit) {
       if (String(url).endsWith("/models")) return Response.json({ data: [{ id: "model-1" }] });
       assert.equal(init?.method, "GET");
-      return new Response("Authorization Bearer submitted-api-secret nested-secret", { status: 403 });
+      return new Response("HY");
     },
     createOssClient: () => ({
       async put() {},
@@ -134,18 +134,15 @@ test("OSS cleanup failure preserves only the validated probe key for manual dele
       },
     }),
   };
-  await assert.rejects(commitDesktopSetup(input, { ...f.dependencies, connectionTest }), (error: unknown) => {
-    safeFailure("OSS 连接测试失败 [SETUP_OSS_FAILED]")(error);
-    assert.ok(error instanceof Error);
-    assert.equal((error as Error & { cleanupObjectKey?: string }).cleanupObjectKey, key);
-    assert.deepEqual(Object.keys(error), ["cleanupObjectKey"]);
-    assert.equal(JSON.stringify(error), JSON.stringify({ cleanupObjectKey: key }));
-    for (const forbidden of ["Authorization", "submitted-api-secret", "submitted-oss-ak", "submitted-oss-sk", "secret-signature", "nested-secret", "https://oss.example/probe?"]) {
-      assert.equal(`${error.message}${error.stack}${JSON.stringify(error)}`.includes(forbidden), false);
-    }
-    return true;
-  });
-  assert.deepEqual(f.events, []);
+  const result = await commitDesktopSetup(input, { ...f.dependencies, connectionTest });
+  assert.equal(result.configured, true);
+  assert.deepEqual(result.diagnostics.find(item => item.code === "oss"), { code: "oss", status: "warning", label: "OSS", cleanupObjectKey: key });
+  assert.deepEqual([...f.values.values()], secrets.map(secret => ({ secret })));
+  assert.equal(f.documents.length, 1);
+  assert.equal(f.events.filter(event => event === "write-profile").length, 1);
+  for (const forbidden of ["Authorization", "submitted-api-secret", "submitted-oss-ak", "submitted-oss-sk", "secret-signature", "nested-secret", "https://oss.example/probe?"]) {
+    assert.equal(JSON.stringify(result).includes(forbidden), false);
+  }
 });
 
 test("credential snapshot failure leaves credentials and profile untouched", async () => {

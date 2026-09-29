@@ -32,6 +32,7 @@ export type NewApiConnectionTestDependencies = {
 export type NewApiConnectionTestResult = {
   readonly modelCount: number;
   readonly relayVerified: true;
+  readonly cleanupObjectKey?: string;
 };
 
 const defaultDependencies: NewApiConnectionTestDependencies = {
@@ -124,6 +125,7 @@ export async function testNewApiSetupConnection(
   }
 
   let uploaded = false;
+  let cleanupObjectKey: string | undefined;
   try {
     try {
       await client.put(objectKey, PROBE_BYTES, { headers: { "content-type": PROBE_CONTENT_TYPE } });
@@ -144,10 +146,10 @@ export async function testNewApiSetupConnection(
       try {
         await client.delete(objectKey);
       } catch {
-        throw failure(`OSS probe cleanup failed; remove object ${objectKey} manually`);
+        cleanupObjectKey = objectKey;
       }
     }
   }
 
-  return { modelCount: count, relayVerified: true };
+  return { modelCount: count, relayVerified: true, ...(cleanupObjectKey ? { cleanupObjectKey } : {}) };
 }

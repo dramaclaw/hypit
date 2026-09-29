@@ -58,8 +58,9 @@ test("diagnostics run only bounded version/tool probes and setup network tests, 
   const key = "relay/hypit/setup-test/12345678-1234-4123-8123-123456789abc.txt";
   const cleanup = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,
     credentialStore: { owns: () => true, resolve: async () => ({ secret: "private" }) }, execute: async () => undefined,
-    testConnection: async () => { throw new Error(`OSS probe cleanup failed; remove object ${key} manually`); } });
-  assert.equal(cleanup.find(item => item.code === "oss")?.cleanupObjectKey, key);
+    testConnection: async () => ({ modelCount: 1, relayVerified: true, cleanupObjectKey: key }) });
+  assert.deepEqual(cleanup.find(item => item.code === "oss"), { code: "oss", label: "OSS", status: "warning", cleanupObjectKey: key });
+  assert.equal(cleanup.find(item => item.code === "newapi")?.status, "pass");
   const malformed = createDesktopProfile(setup.config) as any; delete malformed.bindings;
   await writeFile(paths.profile, JSON.stringify(malformed));
   const invalid = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,

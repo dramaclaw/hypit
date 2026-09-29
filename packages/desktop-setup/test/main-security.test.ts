@@ -72,9 +72,11 @@ test("only allowlisted error codes and a validated cleanup key cross IPC", () =>
 
 test("controller serializes installs and diagnostics and subscriptions remove listeners", async () => {
   const calls: string[] = [];
+  const key = "relay/hypit/setup-test/12345678-1234-4123-8123-123456789abc.txt";
+  const warned = { ...result, diagnostics: [{ code: "oss" as const, label: "OSS" as const, status: "warning" as const, cleanupObjectKey: key }] };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const controller = createSetupController({ getStatus: async () => result, commit: async () => { calls.push("commit"); await gate; return result; }, install: async () => { calls.push("install"); }, diagnose: async () => { calls.push("diagnose"); return []; }, openConfig: async () => {}, clear: async () => result });
+  const controller = createSetupController({ getStatus: async () => warned, commit: async () => { calls.push("commit"); await gate; return warned; }, install: async () => { calls.push("install"); }, diagnose: async () => { calls.push("diagnose"); return []; }, openConfig: async () => {}, clear: async () => result });
   const progress: string[] = [];
   const off = controller.subscribe((value) => { progress.push(JSON.stringify(value)); });
   const first = controller.submit(input);
@@ -82,7 +84,7 @@ test("controller serializes installs and diagnostics and subscriptions remove li
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["commit"]);
   release();
-  assert.equal((await first).ok, true);
+  assert.deepEqual(await first, { ok: true, value: warned });
   assert.equal((await second).ok, true);
   assert.deepEqual(calls, ["commit", "install", "diagnose", "diagnose"]);
   assert.equal(progress.some((value) => value.includes("complete")), true);

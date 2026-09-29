@@ -168,22 +168,40 @@ test("deletes the probe after signing, download, status, or byte verification fa
   }
 });
 
-test("cleanup failure identifies only the object key, even after another failure", async () => {
-  for (const downloadSucceeds of [true, false]) {
+test("cleanup failure returns a safe object key after successful verification", async () => {
+  let deleteAttempts = 0;
+  const result = await testNewApiSetupConnection(validInput, {
+    fetch: async (url) => String(url) === signedUrl
+      ? new Response(Uint8Array.of(0x48, 0x59))
+      : Response.json({ data: [{ id: "model" }] }),
+    createOssClient: () => ({
+      put: async () => {},
+      signatureUrl: () => signedUrl,
+      delete: async () => { deleteAttempts++; throw new Error("oss-key-secret nested-secret"); },
+    }),
+    randomUUID: () => "00000000-0000-4000-8000-000000000000",
+  });
+  assert.deepEqual(result, { modelCount: 1, relayVerified: true, cleanupObjectKey: objectKey });
+  assert.equal(deleteAttempts, 1);
+});
+
+test("mandatory verification error remains primary when cleanup also fails", async () => {
+  const cases = [
+    { name: "signing", sign: () => { throw new Error("nested-secret"); }, download: async () => new Response(Uint8Array.of(0x48, 0x59)), expected: /OSS probe signing failed/u },
+    { name: "download", sign: () => signedUrl, download: async () => new Response("nested-secret", { status: 403 }), expected: /OSS probe download failed/u },
+    { name: "content", sign: () => signedUrl, download: async () => new Response(Uint8Array.of(0x00)), expected: /OSS probe content mismatch/u },
+  ];
+  for (const item of cases) {
+    let deleteAttempts = 0;
     await assert.rejects(testNewApiSetupConnection(validInput, {
-      fetch: async (url) => String(url) === signedUrl
-        ? downloadSucceeds ? new Response(Uint8Array.of(0x48, 0x59)) : new Response("nested-secret", { status: 403 })
-        : Response.json({ data: [{ id: "model" }] }),
+      fetch: async (url) => String(url) === signedUrl ? item.download() : Response.json({ data: [{ id: "model" }] }),
       createOssClient: () => ({
         put: async () => {},
-        signatureUrl: () => signedUrl,
-        delete: async () => { throw new Error("oss-key-secret nested-secret"); },
+        signatureUrl: item.sign,
+        delete: async () => { deleteAttempts++; throw new Error("oss-key-secret nested-secret"); },
       }),
       randomUUID: () => "00000000-0000-4000-8000-000000000000",
-    }), (error) => {
-      assertSafeError(error, /OSS probe cleanup failed/u);
-      assert.match((error as Error).message, /relay\/hypit\/setup-test\/00000000-0000-4000-8000-000000000000\.txt/u);
-      return true;
-    });
+    }), (error) => assertSafeError(error, item.expected), item.name);
+    assert.equal(deleteAttempts, 1, item.name);
   }
 });
