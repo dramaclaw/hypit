@@ -8,11 +8,13 @@ import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./c
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
-import { exists, isManagedSkillInstalled } from "./skill-install.js";
-import { isManagedLauncherInstalled } from "./launcher-install.js";
+import { canRefreshManagedSkill, exists, isManagedSkillInstalled } from "./skill-install.js";
+import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
+import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
 import { commitDesktopSetup } from "./setup-core.js";
 import { installDesktopIntegration, removeDesktopIntegration } from "./lifecycle.js";
+import type { DesktopIntegrationOptions } from "./lifecycle.js";
 import { runDiagnostics } from "./diagnostics.js";
 import { clearDesktopConfiguration, createConfirmationSession, desktopCredentialRefs } from "./clear-configuration.js";
 
@@ -149,7 +151,7 @@ export function createSetupController(services: SetupServices) {
   };
 }
 
-export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<SetupResult> {
+export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>): Promise<SetupResult> {
   const { paths } = options;
   const profileValid = async () => {
     try {
@@ -173,16 +175,39 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
       return true;
     } catch { return false; }
   };
-  const [profile, skill, launcher, evidence] = await Promise.all([
-    profileValid(), isManagedSkillInstalled(paths), isManagedLauncherInstalled(options),
+  const [profile, skill, launcher, evidence, media] = await Promise.all([
+    profileValid(), isManagedSkillInstalled(paths, options.sourceDirectory && options.installedVersion
+      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined), isManagedLauncherInstalled(options),
     Promise.all([paths.profile, paths.skill, paths.skillBackup, paths.launcher, paths.managedState].map(exists)),
+    desktopMediaAvailable(paths.profile),
   ]);
-  return { configured: profile && skill && launcher, modelCount: 0, relayVerified: false,
+  return { configured: profile && skill && launcher && media !== false, modelCount: 0, relayVerified: false,
     profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
       { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.skill },
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
+      ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),
     ] : [] };
+}
+
+/** Startup-only repair uses the saved profile; it never reads or asks for credentials. */
+export async function refreshDesktopStatus(options: DesktopIntegrationOptions): Promise<SetupResult> {
+  const before = await readDesktopStatus(options);
+  if (before.configured || !before.diagnostics.some(item => item.code === "profile" && item.status === "pass")) return before;
+  if (!(await canRefreshManagedSkill(options.paths))) return before;
+  let media: Awaited<ReturnType<typeof prepareDesktopMediaRefresh>>;
+  let profileRollbackFailed = false;
+  try {
+    media = await prepareDesktopMediaRefresh(options);
+    if (media) await atomicFile(options.paths.profile, media.content, media.snapshot.mode);
+    await installDesktopIntegration({ ...options, preserveExisting: true });
+  } catch {
+    if (media) profileRollbackFailed = await restoreFiles([media.snapshot]);
+    // Failed refreshes leave stale integration visible and attempt to restore the original profile.
+  }
+  const result = await readDesktopStatus(options);
+  return profileRollbackFailed ? { ...result, configured: false,
+    diagnostics: result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const } : item) } : result;
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
@@ -196,7 +221,17 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const paths = desktopPaths({ platform, home, appData: platform === "win32" ? process.env.LOCALAPPDATA || join(home, "AppData", "Local") : app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
-  const getStatus = () => readDesktopStatus({ paths, platform, home });
+  const integration: DesktopIntegrationOptions = { paths, platform, home, electronExecutable: process.execPath,
+    cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"),
+    sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
+  // Refresh once per app launch so explicit removal in this session stays removed.
+  const refreshed = await refreshDesktopStatus(integration);
+  let refreshWarnings = refreshed.diagnostics.filter(item => item.status === "warning");
+  const getStatus = async () => {
+    const result = await readDesktopStatus(integration);
+    return refreshWarnings.length ? { ...result, configured: false,
+      diagnostics: result.diagnostics.map(item => refreshWarnings.find(warning => warning.code === item.code) ?? item) } : result;
+  };
   const confirmation = createConfirmationSession();
   let window: InstanceType<typeof BrowserWindow> | undefined;
   const confirm = async (action: "clear" | "integration", targets: readonly string[]) => {
@@ -212,11 +247,10 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const controller = createSetupController({
     getStatus,
     commit: (input) => commitDesktopSetup(input, { paths, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
-    install: () => installDesktopIntegration({ paths, platform, home, electronExecutable: process.execPath,
-      cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"), sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() }),
+    install: async () => { const result = await installDesktopIntegration(integration); refreshWarnings = []; return result; },
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
-    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); return getStatus(); },
+    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); refreshWarnings = []; return getStatus(); },
     removeIntegration: async () => {
       const targets = [paths.launcher, paths.skill, paths.managedState, platform === "darwin" ? join(home, ".zprofile") : "HKCU\\Environment\\Path"];
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);

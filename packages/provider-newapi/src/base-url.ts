@@ -1,21 +1,20 @@
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
+/** Share the API prefix between setup probes and generation requests. */
 export function normalizeNewApiBaseUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/u, "");
   let url: URL;
   try {
-    url = new URL(trimmed);
+    url = new URL(value.trim());
   } catch {
     throw new Error("DramaClaw NewAPI baseUrl must be a valid HTTPS or loopback HTTP URL");
   }
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHosts.has(url.hostname))) {
     throw new Error("DramaClaw NewAPI baseUrl must use HTTPS or loopback HTTP");
   }
-  if (url.username.length > 0 || url.password.length > 0) {
-    throw new Error("DramaClaw NewAPI baseUrl must not contain credentials");
+  if (url.username || url.password || url.href.includes("?") || url.href.includes("#")) {
+    throw new Error("DramaClaw NewAPI baseUrl must not contain credentials, query parameters or fragments");
   }
-  if (url.search.length > 0 || url.hash.length > 0) {
-    throw new Error("DramaClaw NewAPI baseUrl must not contain a query or fragment");
-  }
-  return trimmed;
+  // An explicit non-root path is already the caller's API prefix.
+  url.pathname = url.pathname.replace(/\/+$/u, "") || "/v1";
+  return url.toString();
 }

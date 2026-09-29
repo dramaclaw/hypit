@@ -15,7 +15,8 @@ for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const)
   const { checkArtifact } = await loadScript("check-artifact.mjs");
   const result = await prepareResources({ ...f, platform, arch });
   const name = `bin/ffprobe${platform === "win32" ? ".exe" : ""}`;
-  assert.ok(result.files[name]); assert.equal(result.ffprobe.name, `@ffprobe-installer/${platform}-${arch}`);
+  const { targetFor } = await loadScript("check-artifact.mjs");
+  assert.ok(result.files[name]); assert.equal(result.ffprobe.name, targetFor({ platform, arch }).probe.name);
   await writeFile(join(f.out, name), executable(platform, true));
   await assert.rejects(checkArtifact({ ...f, platform, arch }));
 });
@@ -220,7 +221,7 @@ for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32
       assert.equal(m.files[path].sha256, createHash("sha256").update(contents).digest("hex"));
       assert.equal(m.files[path].bytes, contents.length);
     }
-    assert.deepEqual(Object.keys(m.resources).sort(), ["bin", "runtime", "skill"]);
+    assert.deepEqual(Object.keys(m.resources).sort(), ["bin", "licenses", "runtime", "skill"]);
     assert.equal(m.hypit.tarball.sha256, createHash("sha256").update(await readFile(f.hypitTgz)).digest("hex"));
     const { checkArtifact } = await loadScript("check-artifact.mjs");
     await checkArtifact({ ...f, platform, arch });
@@ -269,9 +270,35 @@ test("does not replace an existing output directory", async (t) => {
 });
 test("refuses a mismatched FFmpeg package version", async (t) => {
   const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-  await put(f.source, "packages/desktop-setup/node_modules/@ffmpeg-installer/darwin-arm64/package.json", JSON.stringify({ name: "@ffmpeg-installer/darwin-arm64", version: "99.0.0", os: ["darwin"], cpu: ["arm64"] }));
+  const lockPath = "packages/desktop-setup/media-lock.json";
+  const lock = JSON.parse(await readFile(join(f.source, lockPath), "utf8"));
+  lock.targets["darwin-arm64"].version = "99.0.0";
+  await put(f.source, lockPath, JSON.stringify(lock));
   const { prepareResources } = await loadScript("prepare-resources.mjs");
   await assert.rejects(prepareResources({ ...f, platform: "darwin", arch: "arm64" }), /pinned|version/i);
+});
+
+test("rejects modified cached media before publishing resources", async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  const lock = JSON.parse(await readFile(join(f.source, "packages/desktop-setup/media-lock.json"), "utf8"));
+  await put(f.source, `packages/desktop-setup/node_modules/.cache/hypit-media/${lock.targets["darwin-arm64"].ffmpeg.sha256}`, Buffer.concat([executable("darwin"), Buffer.from("tampered")]));
+  const { prepareResources } = await loadScript("prepare-resources.mjs");
+  await assert.rejects(prepareResources({ ...f, platform: "darwin", arch: "arm64" }), /integrity/);
+  await assert.rejects(access(f.out));
+});
+
+test("locked media permits an explicit Windows archive member but rejects traversal", async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  const path = "packages/desktop-setup/media-lock.json";
+  const lock = JSON.parse(await readFile(join(f.source, path), "utf8"));
+  lock.targets["win32-x64"].ffmpeg.entry = "ffmpeg-release/bin/ffmpeg.exe";
+  lock.targets["win32-x64"].ffmpeg.archiveSha256 = "a".repeat(64);
+  await put(f.source, path, JSON.stringify(lock));
+  const { readMediaLock } = await loadScript("check-artifact.mjs");
+  await assert.doesNotReject(readMediaLock(f.source));
+  lock.targets["win32-x64"].ffmpeg.entry = "../ffmpeg.exe";
+  await put(f.source, path, JSON.stringify(lock));
+  await assert.rejects(readMediaLock(f.source), /Invalid/);
 });
 test("refuses Skill symlinks that could import host state", async (t) => {
   const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));

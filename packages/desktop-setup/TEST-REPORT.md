@@ -8,12 +8,31 @@
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |
-| `Hypit-Setup-0.1.0-arm64.dmg` | 196170431 | `6ad25816d082ab2a2562ba90fbaba556a27fafaf446ab660b5c94b7a81fcecb1` |
-| `Hypit-Setup-0.1.0-x64.exe` | 185443909 | `340a036e7ab3dbcb111a178fa61ff5158eb2a7c82f4841812b518132dffbb2ec` |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 228862729 | `da4d09d2d62c5cfed1ca982f101fa8997b36c4cca27c1fc288f5938cf2b09577` |
+| `Hypit-Setup-0.1.0-x64.exe` | 204589541 | `e103d6bd48b2f35d1c20bed6c76ef7bcf9b6372a3cd61c18843694a78ccae583` |
 
 在 `packages/desktop-setup/release/` 目录运行 `shasum -a 256 -c Hypit-Setup-0.1.0-arm64.dmg.sha256` 和 `shasum -a 256 -c Hypit-Setup-0.1.0-x64.exe.sha256`，两项均输出 `OK`。校验文件中的文件名是相对文件名，因此应从 `release/` 目录运行。
 
-## OSS 清理警告修复复验
+## 最终整分支复审修复复验
+
+本次完成三项复审修复：两目标 FFmpeg/FFprobe 更新并固定到 9.0.2；NewAPI 根地址统一补 `/v1`；新 app 启动时安全刷新托管 Skill、命令入口及搬移后可认领的媒体路径，无需重新输入凭据。用户修改或非托管内容保留，失败回滚，无法安全修复时显示未完成或警告。
+
+| 命令 | 本次结果 |
+| --- | --- |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts packages/provider-newapi/test/*.test.ts packages/video-cli/test/newapi-first-run.test.ts` | 382 项：380 通过、2 项 staged-media 条件跳过、0 失败 |
+| `HYPIT_TEST_STAGED_MEDIA=1 node --import tsx --test packages/desktop-setup/test/media-capabilities.test.ts` | 3/3 通过；实际 staging 两目标均检查 |
+| `npm run check` | TypeScript 检查通过 |
+| `npm test` | 1511 项：1486 通过、25 条件跳过、0 失败（含上述 2 项另行执行的 staged-media 测试） |
+| 两平台 `check-artifact.mjs` | 两份 staging 资源、锁定二进制、架构、SHA、许可证、Skill 与 Runtime 均通过 |
+| `npm run desktop:dist:mac` / `npm run desktop:dist:win` | 两份最终包重新打包 Distribution 并完成实际挂载/解包检查，均退出 0 |
+| `npm run check:distribution -- ./dist/release/hypit-hypit-0.2.16.tgz` | 全新安装、组件编译、字体、本地 Runtime、渲染、导出、FFprobe 与 FFmpeg 解码通过；Worker 已停止 |
+| 两项 `shasum -a 256 -c` / `git diff --check` | 均通过 |
+
+旧 macOS 资源在新增回归测试中真实执行失败：`Unrecognized option 'fps_mode'`；旧 Windows 资源缺少该选项字符串。当前 macOS staging 与最终挂载的 DMG 均用自身 FFmpeg 执行 `-fps_mode cfr` + `libx264` 编码两帧，再由自身 FFprobe 确认 H.264/2 帧。Windows 当前二进制由固定 9.0.2 上游归档提取，校验原始归档和二进制 SHA、PE32+ x64、`fps_mode` 选项及无 `--enable-nonfree`；无 Wine，未原生执行 Windows 编码或安装程序。两平台均包含 GPLv3、来源及编译配置说明；外部分发仍须提供对应源码，详见 `media-licenses/*/SOURCES.md`。
+
+最新 Distribution 为 2813224 字节，SHA-256 `319b2a4b170159f931063271d0bbf23c6771dc14809ac613264ed9e042f5f8e2`。没有使用真实凭据、真实 NewAPI/OSS 或付费生成；没有覆盖此前复制到用户“应用程序”的旧版应用。原生 GUI、系统凭据和完整 Windows 安装/卸载验收仍沿用下方“尚未执行”的限制。
+
+## 此前 OSS 清理警告修复复验
 
 本次修复将 OSS 探针的删除失败改为非阻塞警告：上传、签名 URL、下载及内容校验都成功后，删除失败仍返回连接成功，并在完成页和诊断页显示“OSS 已验证；测试对象未自动删除”及严格校验的对象键。若上传、签名、下载或内容校验失败，仍拒绝安装；即使同时删除失败，也保留原本的阻塞错误。回归测试覆盖凭据和 Runtime Profile 继续写入，以及 controller 后续安装与诊断流程继续执行。
 

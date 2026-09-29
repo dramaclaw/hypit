@@ -1,13 +1,46 @@
 import { execFile } from "node:child_process";
 import assert from "node:assert/strict";
-import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { extract, list } from "tar";
-import { assertSafePath, checkArtifact, checkExecutable, checkoutRoot, cliOptions, digest, distributionPath, inventory, knownDependencyFixtures, knownProfiles, readRuntimeLock, resourceDigests, targetFor } from "./check-artifact.mjs";
+import { unzipSync } from "fflate";
+import { assertSafePath, checkArtifact, checkMediaBinary, checkoutRoot, cliOptions, digest, distributionPath, inventory, knownDependencyFixtures, knownProfiles, readMediaLock, readRuntimeLock, resourceDigests, targetFor } from "./check-artifact.mjs";
 
 const exec = promisify(execFile);
+
+async function lockedMedia(sourceRoot, release, target, tool) {
+  const item = release[tool];
+  const cache = join(sourceRoot, "packages/desktop-setup/node_modules/.cache/hypit-media");
+  const path = join(cache, item.sha256);
+  const info = await lstat(path).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  if (info && !info.isFile()) throw new Error("Media cache must contain regular files");
+  let bytes;
+  if (info) bytes = await readFile(path);
+  else {
+    const response = await fetch(item.url, { signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) throw new Error(`Media download failed: ${response.status}`);
+    const download = Buffer.from(await response.arrayBuffer());
+    if (item.entry) {
+      assert.equal(digest(download).sha256, item.archiveSha256, "Media archive integrity mismatch");
+      // Decode only the locked member into memory; never extract archive paths
+      // to the filesystem (other tools, docs, links and traversal are ignored).
+      const entries = unzipSync(download, { filter: file => file.name === item.entry });
+      assert.deepEqual(Object.keys(entries), [item.entry], "Missing locked media archive member");
+      bytes = Buffer.from(entries[item.entry]);
+    } else bytes = download;
+  }
+  assert.deepEqual(digest(bytes), { sha256: item.sha256, bytes: item.bytes }, "Media binary integrity mismatch");
+  checkMediaBinary(bytes, target, tool);
+  if (!info) {
+    await mkdir(cache, { recursive: true });
+    const temporary = await mkdtemp(join(cache, ".download-"));
+    try { await writeFile(join(temporary, "binary"), bytes); await rename(join(temporary, "binary"), path); }
+    finally { await rm(temporary, { recursive: true, force: true }); }
+  }
+  return bytes;
+}
 
 export function validateTarball(bytes, targetPlatform, hostPlatform = process.platform) {
   const seen = new Set();
@@ -77,16 +110,10 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
   const tarballDigest = digest(tarball);
   validateTarball(tarball, platform);
   const runtimeLock = await readRuntimeLock(sourceRoot);
-  const ffmpegRoot = join(sourceRoot, "packages/desktop-setup/node_modules", target.name);
-  const ffmpeg = JSON.parse(await readFile(join(ffmpegRoot, "package.json"), "utf8"));
-  if (ffmpeg.name !== target.name || ffmpeg.version !== target.version || !ffmpeg.os?.includes(platform) || !ffmpeg.cpu?.includes(arch)) throw new Error(`FFmpeg must match pinned target package ${target.name}@${target.version}`);
-  const executable = join(ffmpegRoot, target.executable);
-  checkExecutable(await readFile(executable), target);
-  const probeRoot = join(sourceRoot, "packages/desktop-setup/node_modules", target.probe.name);
-  const probe = JSON.parse(await readFile(join(probeRoot, "package.json"), "utf8"));
-  if (probe.name !== target.probe.name || probe.version !== target.probe.version || !probe.os?.includes(platform) || !probe.cpu?.includes(arch)) throw new Error(`FFprobe must match pinned target package ${target.probe.name}@${target.probe.version}`);
-  const probeExecutable = join(probeRoot, target.probe.executable);
-  checkExecutable(await readFile(probeExecutable), target);
+  const media = await readMediaLock(sourceRoot);
+  const release = media.lock.targets[`${platform}-${arch}`];
+  const executable = await lockedMedia(sourceRoot, release, target, "ffmpeg");
+  const probeExecutable = await lockedMedia(sourceRoot, release, target, "ffprobe");
   // Validate the entire source Skill before copying anything, including links.
   await inventory(join(sourceRoot, "skills/hypit"));
   await mkdir(dirname(output), { recursive: true });
@@ -123,13 +150,14 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await mkdir(join(stage, "skill"));
     await cp(join(sourceRoot, "skills/hypit"), join(stage, "skill/hypit"), { recursive: true, dereference: false });
     await mkdir(join(stage, "bin"));
-    await copyFile(executable, join(stage, "bin", target.executable));
+    await writeFile(join(stage, "bin", target.executable), executable);
     await chmod(join(stage, "bin", target.executable), 0o755);
-    await copyFile(probeExecutable, join(stage, "bin", target.probe.executable));
+    await writeFile(join(stage, "bin", target.probe.executable), probeExecutable);
     await chmod(join(stage, "bin", target.probe.executable), 0o755);
+    await cp(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`), join(stage, "licenses"), { recursive: true, dereference: false });
     const files = await inventory(stage, { target, allowBinLinks: true });
     const installed = JSON.parse(await readFile(join(stage, distributionPath, "package.json"), "utf8"));
-    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, runtimeLock: runtimeLock.digests, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
+    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, runtimeLock: runtimeLock.digests, mediaLock: media.digest, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
     await writeFile(join(stage, "resource-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
     await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot });
     await rename(stage, output);

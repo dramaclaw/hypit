@@ -115,7 +115,7 @@ async function readState(path: string): Promise<LauncherState | undefined> {
 }
 const normalizeEntry = (entry: string) => entry.trim().replace(/^"|"$/gu, "").replace(/[\\/]+$/u, "").toLowerCase();
 
-export async function isManagedLauncherInstalled(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<boolean> {
+export async function isManagedLauncherInstalled(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<LauncherOptions>): Promise<boolean> {
   try {
     const { paths } = options;
     if (!(await lstat(paths.managedState)).isFile()) return false;
@@ -123,6 +123,8 @@ export async function isManagedLauncherInstalled(options: Pick<LauncherOptions, 
     const info = await lstat(paths.launcher);
     if (!state || state.pathEntry !== dirname(paths.launcher) || !info.isFile()
       || digest(await readFile(paths.launcher, "utf8")) !== state.launcherDigest) return false;
+    if (options.electronExecutable && options.cliEntry
+      && state.launcherDigest !== digest(renderLauncher(options as LauncherOptions))) return false;
     if (options.platform === "darwin") {
       return (info.mode & 0o111) !== 0 && !!state.zprofileBlock
         && (await readFile(join(options.home, ".zprofile"), "utf8")).includes(state.zprofileBlock);

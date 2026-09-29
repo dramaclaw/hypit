@@ -28,7 +28,7 @@ Windows：运行 EXE，安装在当前用户下，不需要管理员权限。若
 
 | 配置项 | 填什么 |
 | --- | --- |
-| NewAPI 地址 | 你的 NewAPI 服务基础地址，例如 `https://newapi.example.com` |
+| NewAPI 地址 | 例如 `https://newapi.example.com`，根地址会自动补全 `/v1`；已有 `/v1` 或自定义 API 路径会保留，末尾斜杠会移除 |
 | NewAPI API Key | 该服务分配的密钥 |
 | OSS Endpoint | OSS 的 HTTPS Endpoint，例如 `oss-cn-hangzhou.aliyuncs.com` |
 | OSS Bucket | 用来中转参考图片或视频的 Bucket 名称 |
@@ -51,6 +51,8 @@ hypit doctor --workspace "<视频项目目录>"
 ## 更新与卸载
 
 本版本不自动更新。取得新版安装包后，先结束正在运行的 Hypit 任务，再在相同位置安装新版并打开向导运行诊断。Windows 安装程序更新旧版时会保留命令入口、Skill、Profile 与凭据；macOS 如改变应用位置，应重新打开向导检查命令入口。
+
+已有有效 Profile 时，新应用启动会核对当前包的 Skill 内容、版本和命令入口目标，自动刷新完整的托管集成，不要求再次输入密钥。应用搬移后，可确认属于原托管安装的 FFmpeg/FFprobe 路径也会一并更新。自行修改的 Skill、命令入口或自定义媒体路径会保留；无法安全修复或媒体路径失效时，向导会显示未完成或对应失败项。刷新失败会尝试恢复原文件，恢复异常会明确显示警告。
 
 普通卸载默认保留桌面 Profile、系统凭据与视频项目。macOS 先在应用中点击“卸载本机集成”，确认移除命令入口、托管 Skill 与对应 PATH 配置，再把应用移到废纸篓。Windows 从系统“已安装的应用”卸载；卸载程序会尝试清理本机集成，失败时列出需要检查的位置，Profile、凭据与项目仍保留。卸载本机集成时，安装前备份的外部 Skill 会恢复。
 

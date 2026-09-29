@@ -175,7 +175,9 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
         toggle.setAttribute("aria-pressed", String(state.visible[field as SecretField]));
         control.append(toggle);
       }
-      row.append(label, control); form.append(row);
+      row.append(label, control);
+      if (field === "baseUrl") row.append(node("p", "填写服务根地址时会自动补全 /v1；已有 /v1 或自定义 API 路径会保留。", "muted"));
+      form.append(row);
     }
     form.append(node("p", "仅地址、Endpoint 和 Bucket 可恢复。关闭向导后，密钥需要重新填写。", "muted"));
     const submit = node("button", state.error ? "重新测试并安装" : "测试连接并安装", "primary"); submit.type = "submit"; submit.id = "submit-setup"; submit.disabled = !canSubmit(state);

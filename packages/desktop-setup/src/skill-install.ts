@@ -14,6 +14,8 @@ export type SkillInstallOptions = {
   readonly paths: DesktopPaths;
   readonly sourceDirectory: string;
   readonly installedVersion: string;
+  /** Automatic refresh must never take ownership of an existing user Skill. */
+  readonly preserveExisting?: boolean;
   readonly copyDirectory?: (source: string, destination: string) => Promise<void>;
 };
 
@@ -54,12 +56,23 @@ async function treeDigest(root: string, installed = false): Promise<string> {
 }
 
 /** Check ownership and installed content without exposing marker data to the renderer. */
-export async function isManagedSkillInstalled(paths: DesktopPaths): Promise<boolean> {
+export async function isManagedSkillInstalled(paths: DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
   try {
     const marker = await markerAt(paths.skill);
     return !!marker?.installedVersion.trim()
       && (marker.backupDirectory === undefined || marker.backupDirectory === paths.skillBackup)
-      && await treeDigest(paths.skill, true) === marker.sourceDigest;
+      && await treeDigest(paths.skill, true) === marker.sourceDigest
+      && (!current || (marker.installedVersion === current.installedVersion
+        && marker.sourceDigest === await treeDigest(current.sourceDirectory)));
+  } catch { return false; }
+}
+
+export async function canRefreshManagedSkill(paths: DesktopPaths): Promise<boolean> {
+  try {
+    if (!(await exists(paths.skill))) return !(await exists(paths.skillBackup));
+    if (!(await isManagedSkillInstalled(paths))) return false;
+    const marker = await markerAt(paths.skill);
+    return marker?.backupDirectory === undefined || await exists(paths.skillBackup);
   } catch { return false; }
 }
 
@@ -78,6 +91,7 @@ export async function installManagedSkill(options: SkillInstallOptions): Promise
     await mkdir(dirname(paths.skill), { recursive: true });
     await (options.copyDirectory ?? ((source, destination) => cp(source, destination, { recursive: true, errorOnExist: true, force: false })))(options.sourceDirectory, stage);
     if (await treeDigest(stage) !== sourceDigest) throw new Error("Incomplete Skill copy");
+    if (options.preserveExisting && !(await canRefreshManagedSkill(paths))) throw new Error("User Skill must be preserved");
     const old = await markerAt(paths.skill);
     if (old?.backupDirectory !== undefined && old.backupDirectory !== paths.skillBackup) throw new Error("Invalid backup location");
     let backupDirectory = old?.backupDirectory;

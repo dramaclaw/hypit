@@ -32,6 +32,26 @@ for (const platform of ["darwin", "win32"] as const) {
   });
 }
 
+test("rehashed manifests cannot bless a substituted media binary or omit licensing", async (t) => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  const { prepareResources } = await loadScript("prepare-resources.mjs");
+  const { checkArtifact, inventory, resourceDigests, targetFor } = await loadScript("check-artifact.mjs");
+  const options = { ...f, platform: "darwin", arch: "arm64" };
+  await prepareResources(options);
+  const m = await manifest(f.out);
+  await put(f.out, "bin/ffmpeg", Buffer.concat([executable("darwin"), Buffer.from("substitution")]));
+  m.files = await inventory(f.out, { target: targetFor(options), allowBinLinks: true });
+  m.resources = resourceDigests(m.files);
+  await put(f.out, "resource-manifest.json", JSON.stringify(m));
+  await assert.rejects(checkArtifact(options), /locked binary/);
+  await put(f.out, "bin/ffmpeg", executable("darwin"));
+  await rm(join(f.out, "licenses/COPYING"));
+  m.files = await inventory(f.out, { target: targetFor(options), allowBinLinks: true });
+  m.resources = resourceDigests(m.files);
+  await put(f.out, "resource-manifest.json", JSON.stringify(m));
+  await assert.rejects(checkArtifact(options), /license notices/);
+});
+
 for (const attack of ["digest", "size", "extra", "profile", "credential", "media", "missing-skill", "version", "target", "symlink", "aggregate", "manifest-path"]) {
   test(`artifact checker rejects ${attack} changes`, async (t) => {
     const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));

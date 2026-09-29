@@ -4,6 +4,7 @@ import { lstat, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import mediaLock from "../media-lock.json" with { type: "json" };
 
 export const checkoutRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 export const distributionPath = "runtime/node_modules/@hypit/hypit";
@@ -13,10 +14,38 @@ export const knownProfiles = ["examples/provider-package/hypit.runtime.json", "e
 export const knownDependencyFixtures = ["runtime/node_modules/stream-http/test/server/static/browserify.png"];
 
 export function targetFor({ platform, arch }) {
-  const version = { "darwin-arm64": "4.1.5", "win32-x64": "4.1.0" }[`${platform}-${arch}`];
-  if (!version) throw new Error(`Unsupported desktop target: ${platform}/${arch}`);
-  return { platform, arch, name: `@ffmpeg-installer/${platform}-${arch}`, version, executable: platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
-    probe: { name: `@ffprobe-installer/${platform}-${arch}`, version: platform === "darwin" ? "5.0.1" : "5.1.0", executable: platform === "win32" ? "ffprobe.exe" : "ffprobe" } };
+  const release = mediaLock.targets[`${platform}-${arch}`];
+  if (!release) throw new Error(`Unsupported desktop target: ${platform}/${arch}`);
+  return { platform, arch, name: release.name, version: release.version, executable: platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+    probe: { name: release.name, version: release.version, executable: platform === "win32" ? "ffprobe.exe" : "ffprobe" } };
+}
+
+export function checkMediaBinary(bytes, target, tool) {
+  checkExecutable(bytes, target);
+  assert.ok(!bytes.includes(Buffer.from("--enable-nonfree")), `${tool}: nonfree builds cannot be redistributed`);
+  if (tool === "ffmpeg") assert.ok(bytes.includes(Buffer.from("fps_mode\0")), "FFmpeg lacks required fps_mode option");
+}
+
+export async function readMediaLock(sourceRoot = checkoutRoot) {
+  const bytes = await readFile(join(sourceRoot, "packages/desktop-setup/media-lock.json"));
+  const lock = JSON.parse(bytes);
+  assert.equal(lock.schemaVersion, 1, "Unsupported media lock");
+  for (const [key, expected] of Object.entries(mediaLock.targets)) {
+    const target = lock.targets[key];
+    assert.equal(target?.name, expected.name, "Media must match pinned target name");
+    assert.equal(target?.version, expected.version, "Media must match pinned target version");
+    assert.equal(target?.license, expected.license, "Media license mismatch");
+    for (const tool of ["ffmpeg", "ffprobe"]) {
+      const item = target[tool];
+      assert.ok(/^https:\/\//.test(item.url) && /^[a-f0-9]{64}$/.test(item.sha256) && Number.isSafeInteger(item.bytes) && item.bytes > 0, "Invalid media lock integrity");
+      if (item.entry) {
+        assertSafePath(item.entry);
+        assert.equal(item.entry.split("/").at(-1), `${tool}${key.startsWith("win32-") ? ".exe" : ""}`, "Invalid media archive member");
+        assert.ok(/^[a-f0-9]{64}$/.test(item.archiveSha256), "Invalid media archive lock");
+      }
+    }
+  }
+  return { lock, digest: digest(bytes) };
 }
 
 export function checkExecutable(bytes, options) {
@@ -57,7 +86,8 @@ function assertAllowedPath(path, target, directory = false) {
     || path.startsWith("skill/hypit/")
     || path === `bin/${target.executable}`
     || path === `bin/${target.probe.executable}`
-    || (directory && ["runtime", "runtime/node_modules", "skill", "skill/hypit", "bin"].includes(path));
+    || /^licenses\/(?:COPYING|SOURCES\.md|VERSIONS\.txt)$/.test(path)
+    || (directory && ["runtime", "runtime/node_modules", "skill", "skill/hypit", "bin", "licenses"].includes(path));
   if (!allowed) throw new Error(`Resource outside allowlist: ${path}`);
 }
 
@@ -111,7 +141,7 @@ export async function inventory(root, { target, allowBinLinks = false } = {}) {
 }
 
 export function resourceDigests(files) {
-  return Object.fromEntries(["runtime", "skill", "bin"].map(resource => {
+  return Object.fromEntries(["runtime", "skill", "bin", "licenses"].map(resource => {
     const entries = Object.entries(files).filter(([path]) => path.startsWith(`${resource}/`)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
     return [resource, { sha256: digest(Buffer.from(JSON.stringify(entries))).sha256, bytes: entries.reduce((sum, [, file]) => sum + file.bytes, 0) }];
   }));
@@ -137,6 +167,8 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.ok(Array.isArray(manifest.strippedDependencyFixtures) && manifest.strippedDependencyFixtures.every(path => knownDependencyFixtures.includes(path)), "Unexpected stripped dependency fixtures");
   const runtimeLock = await readRuntimeLock(sourceRoot);
   assert.deepEqual(manifest.runtimeLock, runtimeLock.digests, "Runtime lock digest mismatch");
+  const media = await readMediaLock(sourceRoot);
+  assert.deepEqual(manifest.mediaLock, media.digest, "Media lock digest mismatch");
   assert.ok(/^[a-f0-9]{64}$/.test(manifest.hypit.tarball.sha256) && Number.isSafeInteger(manifest.hypit.tarball.bytes) && manifest.hypit.tarball.bytes > 0, "Invalid tarball digest");
   for (const path of Object.keys(manifest.files)) assertAllowedPath(path, target);
   const files = await inventory(root, { target, allowBinLinks: true });
@@ -150,10 +182,16 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.ok(files[`${distributionPath}/bin/hypit.mjs`], "Distribution launcher is missing");
   await checkSkill(root, sourceRoot);
   const binary = join(root, "bin", target.executable);
-  checkExecutable(await readFile(binary), target);
+  checkMediaBinary(await readFile(binary), target, "ffmpeg");
+  const locked = media.lock.targets[`${platform}-${arch}`];
+  assert.deepEqual(files[`bin/${target.executable}`], { sha256: locked.ffmpeg.sha256, bytes: locked.ffmpeg.bytes }, "FFmpeg differs from locked binary");
   if (platform === "darwin") assert.ok((await lstat(binary)).mode & 0o111, "FFmpeg is not executable");
   const probe = join(root, "bin", target.probe.executable);
-  checkExecutable(await readFile(probe), target);
+  checkMediaBinary(await readFile(probe), target, "ffprobe");
+  assert.deepEqual(files[`bin/${target.probe.executable}`], { sha256: locked.ffprobe.sha256, bytes: locked.ffprobe.bytes }, "FFprobe differs from locked binary");
+  const notices = await inventory(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`));
+  assert.ok(notices.COPYING && notices["SOURCES.md"] && notices["VERSIONS.txt"], "Media license and source notices required");
+  assert.deepEqual(await inventory(join(root, "licenses")), notices, "Media license notices differ from checkout");
   if (platform === "darwin") assert.ok((await lstat(probe)).mode & 0o111, "FFprobe is not executable");
   return manifest;
 }

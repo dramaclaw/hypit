@@ -42,12 +42,13 @@ test("diagnostics run only bounded version/tool probes and setup network tests, 
   const input = { baseUrl: "https://api.example", apiKey: "secret-api", relay: { enabled: true as const, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "secret-ak", accessKeySecret: "secret-sk" } };
   const setup = completeNewApiSetup(input); const values = [input.apiKey, input.relay.accessKeyId, input.relay.accessKeySecret];
   await mkdir(dirname(paths.profile), { recursive: true }); await writeFile(paths.profile, JSON.stringify(createDesktopProfile(setup.config)));
-  const calls: any[] = []; let network = 0;
+  const calls: any[] = []; let network = 0; let testedInput: unknown;
   const result = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,
     credentialStore: { owns: () => true, resolve: async (ref: any) => ({ secret: values[["newapi.personal.api-key", "newapi.personal.oss-ak", "newapi.personal.oss-sk"].indexOf(ref.key)]! }) },
     execute: async (file, args, options) => { calls.push({ file, args, options }); return { stdout: "secret-api", stderr: "secret-sk" }; },
-    testConnection: async (submitted) => { network++; assert.deepEqual(submitted, input); return { modelCount: 3, relayVerified: true }; },
+    testConnection: async (submitted) => { network++; testedInput = submitted; return { modelCount: 3, relayVerified: true }; },
   });
+  assert.deepEqual(testedInput, { ...input, baseUrl: "https://api.example/v1" });
   assert.equal(network, 1); assert.equal(calls.length, 3);
   assert.deepEqual(calls.map(call => call.args), [[join(resources, "runtime/node_modules/@hypit/hypit/bin/hypit.mjs"), "--version"], ["-version"], ["-version"]]);
   assert.ok(calls.every(call => call.options.timeout === 30000 && call.options.shell === false));

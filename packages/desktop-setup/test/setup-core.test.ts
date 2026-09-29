@@ -93,6 +93,19 @@ for (const existing of [false, true]) {
   });
 }
 
+test("desktop root address tests and saves the normalized API base", async () => {
+  const f = fixture();
+  const requested: string[] = [];
+  const connectionTest = { ...f.dependencies.connectionTest!, async fetch(url: string | URL | Request, init?: RequestInit) {
+    requested.push(String(url));
+    return f.dependencies.connectionTest!.fetch(url, init);
+  } };
+  await commitDesktopSetup({ ...input, baseUrl: "https://newapi.example/" }, { ...f.dependencies, connectionTest });
+  assert.equal(requested[0], "https://newapi.example/v1/models");
+  const document = f.documents[0] as { endpoints: Record<string, { config: { baseUrl: string } }> };
+  assert.equal(document.endpoints["newapi.personal"]!.config.baseUrl, "https://newapi.example/v1");
+});
+
 test("invalid or disabled-relay input fails before connections and writes", async () => {
   for (const invalid of [{ ...input, apiKey: "" }, { ...input, relay: { enabled: false } }]) {
     const f = fixture();

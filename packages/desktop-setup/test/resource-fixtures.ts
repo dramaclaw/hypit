@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { create as createTar } from "tar";
+import { createHash } from "node:crypto";
 
 export const checkout = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 export const distributionPath = "runtime/node_modules/@hypit/hypit";
@@ -13,6 +14,7 @@ export async function put(root: string, path: string, value: string | Buffer) {
 }
 export function executable(platform: "darwin" | "win32", wrongArch = false) {
   const data = Buffer.alloc(256);
+  data.write("fps_mode\0--enable-gpl\0", 200);
   if (platform === "darwin") {
     data.writeUInt32LE(0xfeedfacf, 0);
     data.writeUInt32LE(wrongArch ? 0x01000007 : 0x0100000c, 4);
@@ -41,14 +43,15 @@ export async function fixture(extra: Record<string, string> = {}) {
   const runtime = { name: "hypit-desktop-runtime", version: "1.0.0", private: true, dependencies: {} };
   await put(source, "packages/desktop-setup/runtime-lock/package.json", JSON.stringify(runtime));
   await put(source, "packages/desktop-setup/runtime-lock/package-lock.json", JSON.stringify({ name: runtime.name, version: runtime.version, lockfileVersion: 3, packages: { "": runtime } }));
-  for (const [platform, arch, version] of [["darwin", "arm64", "4.1.5"], ["win32", "x64", "4.1.0"]] as const) {
-    const path = `packages/desktop-setup/node_modules/@ffmpeg-installer/${platform}-${arch}`;
-    await put(source, `${path}/package.json`, JSON.stringify({ name: `@ffmpeg-installer/${platform}-${arch}`, version, os: [platform], cpu: [arch] }));
-    await put(source, `${path}/ffmpeg${platform === "win32" ? ".exe" : ""}`, executable(platform));
-    const probe = `packages/desktop-setup/node_modules/@ffprobe-installer/${platform}-${arch}`;
-    await put(source, `${probe}/package.json`, JSON.stringify({ name: `@ffprobe-installer/${platform}-${arch}`, version: platform === "darwin" ? "5.0.1" : "5.1.0", os: [platform], cpu: [arch] }));
-    await put(source, `${probe}/ffprobe${platform === "win32" ? ".exe" : ""}`, executable(platform));
+  const mediaLock = JSON.parse(await readFile(join(checkout, "packages/desktop-setup/media-lock.json"), "utf8"));
+  for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
+    const bytes = executable(platform);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    for (const tool of ["ffmpeg", "ffprobe"]) mediaLock.targets[`${platform}-${arch}`][tool] = { url: `https://example.invalid/${tool}`, sha256, bytes: bytes.length };
+    await put(source, `packages/desktop-setup/node_modules/.cache/hypit-media/${sha256}`, bytes);
+    for (const name of ["COPYING", "SOURCES.md", "VERSIONS.txt"]) await put(source, `packages/desktop-setup/media-licenses/${platform}-${arch}/${name}`, `Fixture ${name}`);
   }
+  await put(source, "packages/desktop-setup/media-lock.json", JSON.stringify(mediaLock));
   return { root, checkoutRoot: source, hypitTgz: tarball, out: join(root, "out"), source };
 }
 export async function manifest(out: string) {

@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { checkArtifact, checkExecutable, checkoutRoot, targetFor } from "./check-artifact.mjs";
 import { prepareResources } from "./prepare-resources.mjs";
 import { writeChecksum } from "./checksums.mjs";
+import { checkMediaRuntime } from "./check-media.mjs";
 
 const exec = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,8 +53,9 @@ export async function inspectApp(appRoot, platform, arch) {
   const temporary = await mkdtemp(join(tmpdir(), "hypit-inspect-"));
   try {
     const { cp } = await import("node:fs/promises");
-    for (const name of ["runtime", "skill", "bin", "resource-manifest.json"]) await cp(join(resources, name), join(temporary, name), { recursive: true, verbatimSymlinks: true });
+    for (const name of ["runtime", "skill", "bin", "licenses", "resource-manifest.json"]) await cp(join(resources, name), join(temporary, name), { recursive: true, verbatimSymlinks: true });
     await checkArtifact({ out: temporary, platform, arch });
+    await checkMediaRuntime(resources, { platform, arch });
     const asar = require(require.resolve("@electron/asar", { paths: [dirname(require.resolve("electron-builder/package.json"))] }));
     const archive = join(resources, "app.asar");
     assert.ok(!asar.listPackage(archive).some(path => /^[/\\]node_modules[/\\]/.test(path)), "Development dependencies must not be copied into app.asar");

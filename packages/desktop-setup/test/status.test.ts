@@ -10,7 +10,8 @@ import { createDesktopProfile } from "../src/profile.js";
 import { desktopPaths } from "../src/paths.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
-import { createSetupController, readDesktopStatus } from "../src/main.js";
+import { createSetupController, readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
+import { renderLauncher } from "../src/launcher-install.js";
 import { mountWizard } from "../src/renderer.js";
 import { SKILL_MARKER } from "../src/skill-install.js";
 import type { SetupInput } from "../src/contracts.js";
@@ -132,3 +133,113 @@ test("Windows status requires its managed launcher and user PATH entry", async (
   assert.equal(status.configured, false);
   assert.equal(status.diagnostics.find((item) => item.code === "launcher")?.status, "fail");
 });
+
+for (const platform of ["darwin", "win32"] as const) {
+  test(`${platform} status detects a bundle upgrade even while the previous integration is intact`, async (t) => {
+    const f = await fixture(t);
+    let path = "";
+    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    await writeFile(f.paths.profile, JSON.stringify(profile()));
+    await installDesktopIntegration(options);
+    assert.equal((await readDesktopStatus({ ...options, installedVersion: "2" })).configured, false);
+    await writeFile(join(f.sourceDirectory, "references", "guide.md"), "updated bundled guide");
+    const status = await readDesktopStatus(options);
+    assert.equal(status.configured, false);
+    assert.equal(status.diagnostics.find(item => item.code === "skill")?.status, "fail");
+  });
+
+  test(`${platform} status detects a moved app launcher even while the original target exists`, async (t) => {
+    const f = await fixture(t);
+    let path = "";
+    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    await writeFile(f.paths.profile, JSON.stringify(profile()));
+    await installDesktopIntegration(options);
+    const electronExecutable = join(f.home, "moved-app", "electron");
+    await mkdir(dirname(electronExecutable));
+    await writeFile(electronExecutable, "fake new app");
+    const status = await readDesktopStatus({ ...options, electronExecutable });
+    assert.equal(status.configured, false);
+    assert.equal(status.diagnostics.find(item => item.code === "launcher")?.status, "fail");
+  });
+
+  test(`${platform} startup refresh upgrades and relocates integration without changing the saved profile`, async (t) => {
+    const f = await fixture(t);
+    let path = "original PATH";
+    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const saved = JSON.stringify(profile());
+    await writeFile(f.paths.profile, saved);
+    await installDesktopIntegration(options);
+    const electronExecutable = join(f.home, "new-app", "electron");
+    const cliEntry = join(f.home, "new-app", "cli.mjs");
+    await mkdir(dirname(electronExecutable));
+    await writeFile(electronExecutable, "new app");
+    await writeFile(cliEntry, "new CLI");
+    await writeFile(join(f.sourceDirectory, "references", "guide.md"), "new guide");
+    const current = { ...options, electronExecutable, cliEntry, installedVersion: "2" };
+    const result = await refreshDesktopStatus(current);
+    assert.equal(result.configured, true);
+    assert.equal(await readFile(f.paths.profile, "utf8"), saved);
+    assert.equal(await readFile(join(f.paths.skill, "references", "guide.md"), "utf8"), "new guide");
+    assert.equal(JSON.parse(await readFile(join(f.paths.skill, SKILL_MARKER), "utf8")).installedVersion, "2");
+    assert.equal(await readFile(f.paths.launcher, "utf8"), renderLauncher(current));
+    assert.equal(result.relayVerified, false);
+    assert.equal((await refreshDesktopStatus(current)).configured, true);
+  });
+
+  test(`${platform} startup refresh repairs missing integration for an already valid profile`, async (t) => {
+    const f = await fixture(t);
+    let path = "";
+    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    await writeFile(f.paths.profile, JSON.stringify(profile()));
+    assert.equal((await refreshDesktopStatus(options)).configured, true);
+    await rm(f.paths.launcher);
+    assert.equal((await refreshDesktopStatus(options)).configured, true);
+    await rm(f.paths.skill, { recursive: true });
+    assert.equal((await refreshDesktopStatus(options)).configured, true);
+  });
+
+  test(`${platform} failed startup refresh rolls back launcher, Skill and PATH and reports incomplete`, async (t) => {
+    const f = await fixture(t);
+    let path = "original PATH";
+    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    await writeFile(f.paths.profile, JSON.stringify(profile()));
+    await installDesktopIntegration(options);
+    const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.skill, "SKILL.md"), join(f.paths.skill, SKILL_MARKER),
+      ...(platform === "darwin" ? [join(f.home, ".zprofile")] : [])];
+    const before = await Promise.all(files.map(file => readFile(file)));
+    const oldPath = path;
+    const electronExecutable = join(f.home, "new-electron");
+    await writeFile(electronExecutable, "new app");
+    const status = await refreshDesktopStatus({ ...options, electronExecutable, installedVersion: "2",
+      copyDirectory: async () => { throw new Error("SECRET_FAILURE"); } });
+    assert.equal(status.configured, false);
+    assert.equal(status.diagnostics.find(item => item.code === "launcher")?.status, "fail");
+    assert.deepEqual(await Promise.all(files.map(file => readFile(file))), before);
+    assert.equal(path, oldPath);
+    assert.doesNotMatch(JSON.stringify(status), /SECRET_FAILURE/);
+  });
+}
+
+for (const modification of ["unmanaged-skill", "edited-skill", "edited-launcher", "unmanaged-launcher", "edited-path", "missing-backup"] as const) {
+  test(`startup refresh preserves ${modification} and reports incomplete`, async (t) => {
+    const f = await fixture(t);
+    await writeFile(f.paths.profile, JSON.stringify(profile()));
+    await installDesktopIntegration(f);
+    if (modification === "unmanaged-skill") await rm(join(f.paths.skill, SKILL_MARKER));
+    if (modification === "edited-skill") await writeFile(join(f.paths.skill, "references", "guide.md"), "user edits");
+    if (modification === "edited-launcher") await writeFile(f.paths.launcher, "user launcher");
+    if (modification === "unmanaged-launcher") await rm(f.paths.managedState);
+    if (modification === "edited-path") await writeFile(join(f.home, ".zprofile"), "user PATH edits");
+    if (modification === "missing-backup") {
+      const markerFile = join(f.paths.skill, SKILL_MARKER);
+      await writeFile(markerFile, JSON.stringify({ ...JSON.parse(await readFile(markerFile, "utf8")), backupDirectory: f.paths.skillBackup }));
+    }
+    const files = [f.paths.profile, f.paths.launcher, join(f.paths.skill, "SKILL.md"), join(f.paths.skill, "references", "guide.md"), join(f.home, ".zprofile"),
+      ...(modification === "unmanaged-skill" ? [] : [join(f.paths.skill, SKILL_MARKER)]), ...(modification === "unmanaged-launcher" ? [] : [f.paths.managedState])];
+    const before = await Promise.all(files.map(file => readFile(file)));
+    const result = await refreshDesktopStatus({ ...f, installedVersion: "2" });
+    assert.equal(result.configured, false);
+    assert.ok(result.diagnostics.some(item => item.status === "fail"));
+    assert.deepEqual(await Promise.all(files.map(file => readFile(file))), before);
+  });
+}

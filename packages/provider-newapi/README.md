@@ -32,7 +32,9 @@ hypit runtime up
 HypiHub，并将上表十三项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
 API Key，再询问是否配置 OSS 中转。仅用文字生成图片或视频时可以选择不配置 OSS。
 
-地址写入 Profile 的 `baseUrl`，必须使用 HTTPS；本机服务可以使用 loopback HTTP。API Key
+地址写入 Profile 的 `baseUrl`，必须使用 HTTPS；本机服务可以使用 loopback HTTP。
+根地址（如 `https://newapi.example.com`）会自动补全 `/v1`；已有 `/v1` 或自定义 API 路径会保留，末尾斜杠会移除。
+地址不能包含用户名、密码、查询参数或 fragment；连接测试和生成请求共用这一地址规则。API Key
 写入 Profile 选定的 CredentialStore，Profile 中只保留 `CredentialRef`，不保存密钥原文。
 默认选择名为 `platform` 的 Store；如果自行改选其他可写 Store，配置流程沿用该选择。
 
