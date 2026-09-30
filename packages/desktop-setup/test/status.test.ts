@@ -8,6 +8,7 @@ import { parseHTML } from "linkedom";
 import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { createDesktopProfile } from "../src/profile.js";
 import { desktopPaths } from "../src/paths.js";
+import { scanAgentTargets } from "../src/agent-targets.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
 import { createSetupController, readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
@@ -33,7 +34,7 @@ async function fixture(t: TestContext) {
   await writeFile(electronExecutable, "fake");
   await writeFile(cliEntry, "fake");
   await mkdir(dirname(paths.profile), { recursive: true });
-  return { paths, home, platform: "darwin" as const, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
+  return { paths, targets: (await scanAgentTargets({ paths })).targets, home, platform: "darwin" as const, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
 }
 
 test("status rejects missing, malformed, empty, and partial NewAPI profiles even with installed integration", async (t) => {
@@ -64,7 +65,7 @@ test("status distinguishes a pristine install from incomplete local artifacts", 
   assert.equal(pristine.configured, false);
   assert.deepEqual(pristine.diagnostics, []);
 
-  for (const target of [f.paths.profile, f.paths.skill, f.paths.skillBackup, f.paths.launcher, f.paths.managedState]) {
+  for (const target of [f.paths.profile, f.paths.portableSkill, f.paths.portableSkillBackup, f.paths.launcher, f.paths.managedState]) {
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, "broken");
     const partial = await readDesktopStatus(f);
@@ -84,7 +85,7 @@ test("completion requires a valid profile, intact managed Skill, launcher and ma
   const complete = await readDesktopStatus(f);
   assert.equal(complete.configured, true);
   assert.equal(complete.relayVerified, false); // Startup has not performed a network probe.
-  for (const target of [f.paths.managedState, f.paths.launcher, join(f.paths.skill, SKILL_MARKER), join(f.paths.skill, "SKILL.md"), join(f.paths.skill, "references", "guide.md")]) {
+  for (const target of [f.paths.managedState, f.paths.launcher, join(f.paths.portableSkill, SKILL_MARKER), join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, "references", "guide.md")]) {
     const original = await readFile(target);
     await writeFile(target, "broken");
     assert.equal((await readDesktopStatus(f)).configured, false, target);
@@ -179,8 +180,8 @@ for (const platform of ["darwin", "win32"] as const) {
     const result = await refreshDesktopStatus(current);
     assert.equal(result.configured, true);
     assert.equal(await readFile(f.paths.profile, "utf8"), saved);
-    assert.equal(await readFile(join(f.paths.skill, "references", "guide.md"), "utf8"), "new guide");
-    assert.equal(JSON.parse(await readFile(join(f.paths.skill, SKILL_MARKER), "utf8")).installedVersion, "2");
+    assert.equal(await readFile(join(f.paths.portableSkill, "references", "guide.md"), "utf8"), "new guide");
+    assert.equal(JSON.parse(await readFile(join(f.paths.portableSkill, SKILL_MARKER), "utf8")).installedVersion, "2");
     assert.equal(await readFile(f.paths.launcher, "utf8"), renderLauncher(current));
     assert.equal(result.relayVerified, false);
     assert.equal((await refreshDesktopStatus(current)).configured, true);
@@ -194,7 +195,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal((await refreshDesktopStatus(options)).configured, true);
     await rm(f.paths.launcher);
     assert.equal((await refreshDesktopStatus(options)).configured, true);
-    await rm(f.paths.skill, { recursive: true });
+    await rm(f.paths.portableSkill, { recursive: true });
     assert.equal((await refreshDesktopStatus(options)).configured, true);
   });
 
@@ -204,7 +205,7 @@ for (const platform of ["darwin", "win32"] as const) {
     const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(options);
-    const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.skill, "SKILL.md"), join(f.paths.skill, SKILL_MARKER),
+    const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER),
       ...(platform === "darwin" ? [join(f.home, ".zprofile")] : [])];
     const before = await Promise.all(files.map(file => readFile(file)));
     const oldPath = path;
@@ -225,17 +226,17 @@ for (const modification of ["unmanaged-skill", "edited-skill", "edited-launcher"
     const f = await fixture(t);
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(f);
-    if (modification === "unmanaged-skill") await rm(join(f.paths.skill, SKILL_MARKER));
-    if (modification === "edited-skill") await writeFile(join(f.paths.skill, "references", "guide.md"), "user edits");
+    if (modification === "unmanaged-skill") await rm(join(f.paths.portableSkill, SKILL_MARKER));
+    if (modification === "edited-skill") await writeFile(join(f.paths.portableSkill, "references", "guide.md"), "user edits");
     if (modification === "edited-launcher") await writeFile(f.paths.launcher, "user launcher");
     if (modification === "unmanaged-launcher") await rm(f.paths.managedState);
     if (modification === "edited-path") await writeFile(join(f.home, ".zprofile"), "user PATH edits");
     if (modification === "missing-backup") {
-      const markerFile = join(f.paths.skill, SKILL_MARKER);
-      await writeFile(markerFile, JSON.stringify({ ...JSON.parse(await readFile(markerFile, "utf8")), backupDirectory: f.paths.skillBackup }));
+      const markerFile = join(f.paths.portableSkill, SKILL_MARKER);
+      await writeFile(markerFile, JSON.stringify({ ...JSON.parse(await readFile(markerFile, "utf8")), backupDirectory: f.paths.portableSkillBackup }));
     }
-    const files = [f.paths.profile, f.paths.launcher, join(f.paths.skill, "SKILL.md"), join(f.paths.skill, "references", "guide.md"), join(f.home, ".zprofile"),
-      ...(modification === "unmanaged-skill" ? [] : [join(f.paths.skill, SKILL_MARKER)]), ...(modification === "unmanaged-launcher" ? [] : [f.paths.managedState])];
+    const files = [f.paths.profile, f.paths.launcher, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, "references", "guide.md"), join(f.home, ".zprofile"),
+      ...(modification === "unmanaged-skill" ? [] : [join(f.paths.portableSkill, SKILL_MARKER)]), ...(modification === "unmanaged-launcher" ? [] : [f.paths.managedState])];
     const before = await Promise.all(files.map(file => readFile(file)));
     const result = await refreshDesktopStatus({ ...f, installedVersion: "2" });
     assert.equal(result.configured, false);

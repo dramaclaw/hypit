@@ -8,6 +8,7 @@ import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./c
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
+import { scanAgentTargets } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedSkillInstalled } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
@@ -153,6 +154,7 @@ export function createSetupController(services: SetupServices) {
 
 export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>): Promise<SetupResult> {
   const { paths } = options;
+  const targets = options.targets ?? (await scanAgentTargets({ paths })).targets;
   const profileValid = async () => {
     try {
       const profile = JSON.parse(await readFile(paths.profile, "utf8"));
@@ -176,15 +178,15 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
     } catch { return false; }
   };
   const [profile, skill, launcher, evidence, media] = await Promise.all([
-    profileValid(), isManagedSkillInstalled(paths, options.sourceDirectory && options.installedVersion
-      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined), isManagedLauncherInstalled(options),
-    Promise.all([paths.profile, paths.skill, paths.skillBackup, paths.launcher, paths.managedState].map(exists)),
+    profileValid(), Promise.all(targets.map(target => isManagedSkillInstalled(target, options.sourceDirectory && options.installedVersion
+      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined))).then(results => results.every(Boolean)), isManagedLauncherInstalled(options),
+    Promise.all([paths.profile, ...targets.flatMap(target => [target.skillDirectory, target.backupDirectory]), paths.launcher, paths.managedState].map(exists)),
     desktopMediaAvailable(paths.profile),
   ]);
   return { configured: profile && skill && launcher && media !== false, modelCount: 0, relayVerified: false,
-    profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
+    profilePath: paths.profile, skillPath: paths.portableSkill, launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
-      { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.skill },
+      { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.portableSkill },
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
       ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),
     ] : [] };
@@ -194,7 +196,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
 export async function refreshDesktopStatus(options: DesktopIntegrationOptions): Promise<SetupResult> {
   const before = await readDesktopStatus(options);
   if (before.configured || !before.diagnostics.some(item => item.code === "profile" && item.status === "pass")) return before;
-  if (!(await canRefreshManagedSkill(options.paths))) return before;
+  if (!(await Promise.all(options.targets.map(canRefreshManagedSkill))).every(Boolean)) return before;
   let media: Awaited<ReturnType<typeof prepareDesktopMediaRefresh>>;
   let profileRollbackFailed = false;
   try {
@@ -222,7 +224,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     agentData: app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
-  const integration: DesktopIntegrationOptions = { paths, platform, home, electronExecutable: process.execPath,
+  const integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
     cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"),
     sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
   // Refresh once per app launch so explicit removal in this session stays removed.

@@ -21,19 +21,6 @@ export type SkillInstallOptions = {
   readonly copyDirectory?: (source: string, destination: string) => Promise<void>;
 };
 
-/** @deprecated Task 4 removes the single Codex path compatibility bridge. */
-export type LegacySkillInstallOptions = Omit<SkillInstallOptions, "target"> & { readonly paths: DesktopPaths };
-
-/** @deprecated Existing lifecycle callers still address the old Codex directory. */
-function legacyTarget(paths: DesktopPaths): AgentSkillTarget {
-  return { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.legacyCodexSkill,
-    backupDirectory: paths.legacyCodexSkillBackup, required: true, detectedAgents: [] };
-}
-
-function asTarget(value: AgentSkillTarget | DesktopPaths): AgentSkillTarget {
-  return "skillDirectory" in value ? value : legacyTarget(value);
-}
-
 export async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
@@ -159,11 +146,7 @@ function publishedMatches(prepared: TreeSnapshot | undefined, published: TreeSna
 }
 
 /** Check ownership and installed content without exposing marker data to the renderer. */
-export async function isManagedSkillInstalled(target: AgentSkillTarget, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean>;
-/** @deprecated Task 4 removes the DesktopPaths overload. */
-export async function isManagedSkillInstalled(paths: DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean>;
-export async function isManagedSkillInstalled(value: AgentSkillTarget | DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
-  const target = asTarget(value);
+export async function isManagedSkillInstalled(target: AgentSkillTarget, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
   try {
     const marker = await markerAt(target);
     return !!marker?.installedVersion.trim()
@@ -173,11 +156,7 @@ export async function isManagedSkillInstalled(value: AgentSkillTarget | DesktopP
   } catch { return false; }
 }
 
-export async function canRefreshManagedSkill(target: AgentSkillTarget): Promise<boolean>;
-/** @deprecated Task 4 removes the DesktopPaths overload. */
-export async function canRefreshManagedSkill(paths: DesktopPaths): Promise<boolean>;
-export async function canRefreshManagedSkill(value: AgentSkillTarget | DesktopPaths): Promise<boolean> {
-  const target = asTarget(value);
+export async function canRefreshManagedSkill(target: AgentSkillTarget): Promise<boolean> {
   try {
     if (!(await exists(target.skillDirectory))) return !(await exists(target.backupDirectory));
     if (!(await isManagedSkillInstalled(target))) return false;
@@ -322,8 +301,8 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
 }
 
 /** Copy, commit, and finalize a single target when no outer transaction is needed. */
-export async function installManagedSkill(options: SkillInstallOptions | LegacySkillInstallOptions): Promise<ManagedSkillMarker> {
-  const prepared = await prepareSkillInstall("target" in options ? options : { ...options, target: legacyTarget(options.paths) });
+export async function installManagedSkill(options: SkillInstallOptions): Promise<ManagedSkillMarker> {
+  const prepared = await prepareSkillInstall(options);
   let committed = false;
   try {
     await prepared.commit();
@@ -343,9 +322,39 @@ export type PreparedRemoval = {
   readonly dispose: (committed: boolean) => Promise<void>;
 };
 
+type LegacyCodexPaths = Pick<AgentSkillTarget, "skillDirectory" | "backupDirectory">;
+const legacyCodexPaths = (paths: DesktopPaths): LegacyCodexPaths => ({
+  skillDirectory: paths.legacyCodexSkill, backupDirectory: paths.legacyCodexSkillBackup,
+});
+
+/** v1 ownership is recognized only at the two fixed legacy Codex locations. */
+async function legacyCodexMarker(paths: DesktopPaths): Promise<{ readonly backupDirectory?: string } | undefined> {
+  const legacy = legacyCodexPaths(paths);
+  try {
+    if (!(await lstat(legacy.skillDirectory)).isDirectory()) return undefined;
+    const markerPath = join(legacy.skillDirectory, SKILL_MARKER);
+    if (!(await lstat(markerPath)).isFile()) return undefined;
+    const marker = JSON.parse(await readFile(markerPath, "utf8"));
+    if (marker?.format !== "hypit.desktop-managed@1"
+      || typeof marker.installedVersion !== "string" || !marker.installedVersion.trim()
+      || typeof marker.sourceDigest !== "string" || !/^[a-f0-9]{64}$/u.test(marker.sourceDigest)
+      || (marker.backupDirectory !== undefined && marker.backupDirectory !== legacy.backupDirectory)
+      || await treeDigest(legacy.skillDirectory, true) !== marker.sourceDigest) return undefined;
+    return marker;
+  } catch { return undefined; }
+}
+
+export async function prepareLegacyCodexMigration(paths: DesktopPaths): Promise<PreparedRemoval | undefined> {
+  return prepareOwnedRemoval(legacyCodexPaths(paths), () => legacyCodexMarker(paths));
+}
+
 /** Validate ownership and stage restoration before changing any installed component. */
-export async function prepareSkillRemoval(options: { readonly target: AgentSkillTarget } | { readonly paths: DesktopPaths }): Promise<PreparedRemoval | undefined> {
-  const target = "target" in options ? options.target : legacyTarget(options.paths);
+export async function prepareSkillRemoval(options: { readonly target: AgentSkillTarget }): Promise<PreparedRemoval | undefined> {
+  return prepareOwnedRemoval(options.target, () => markerAt(options.target));
+}
+
+async function prepareOwnedRemoval(target: LegacyCodexPaths,
+  readMarker: () => Promise<{ readonly backupDirectory?: string } | undefined>): Promise<PreparedRemoval | undefined> {
   const previous = `${target.skillDirectory}.removed-${randomUUID()}`;
   const restoreStage = `${target.skillDirectory}.restore-${randomUUID()}`;
   let moved = false;
@@ -355,7 +364,7 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
   let recoveryFailed = false;
   try {
     const liveSnapshot = await snapshotTree(target.skillDirectory);
-    const marker = await markerAt(target);
+    const marker = await readMarker();
     if (!marker) return undefined;
     let backupSnapshot: TreeSnapshot | undefined;
     if (marker.backupDirectory !== undefined) {
@@ -438,7 +447,7 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
   }
 }
 
-export async function removeManagedSkill(options: { readonly target: AgentSkillTarget } | { readonly paths: DesktopPaths }): Promise<boolean> {
+export async function removeManagedSkill(options: { readonly target: AgentSkillTarget }): Promise<boolean> {
   let removal: PreparedRemoval | undefined;
   let committed = false;
   try {

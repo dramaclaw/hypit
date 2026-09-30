@@ -11,6 +11,7 @@ import { desktopCredentialRefs } from "./clear-configuration.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { UserPath } from "./launcher-install.js";
 import { isManagedSkillInstalled } from "./skill-install.js";
+import { scanAgentTargets } from "./agent-targets.js";
 
 export function diagnosticEnvironment(bin: string, platform: "darwin" | "win32", source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -67,7 +68,10 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
   const requireBundle = () => { if (results[0]?.status !== "pass") throw new Error("Resources failed verification"); };
   await check("version", "Hypit 版本", () => { requireBundle(); return run(options.electronExecutable, [path.join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), "--version"], processOptions); });
   await check("ffmpeg", "FFmpeg", async () => { requireBundle(); await run(path.join(bin, `ffmpeg${suffix}`), ["-version"], processOptions); await run(path.join(bin, `ffprobe${suffix}`), ["-version"], processOptions); });
-  await check("skill", "Codex Skill", () => isManagedSkillInstalled(paths), paths.skill);
+  await check("skill", "Codex Skill", async () => {
+    const { targets } = await scanAgentTargets({ paths });
+    return (await Promise.all(targets.map(target => isManagedSkillInstalled(target)))).every(Boolean);
+  }, paths.portableSkill);
   let config: ReturnType<typeof parseNewApiEndpointConfig> | undefined;
   await check("profile", "Runtime Profile", async () => {
     const profile = JSON.parse(await readFile(paths.profile, "utf8"));

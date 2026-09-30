@@ -8,7 +8,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { desktopPaths } from "../src/paths.js";
 import type { AgentSkillTarget } from "../src/agent-targets.js";
-import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, prepareSkillInstall, prepareSkillRemoval, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
+import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, prepareLegacyCodexMigration, prepareSkillInstall, prepareSkillRemoval, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "hypit 技能 space-"));
@@ -603,18 +603,15 @@ test("removal disposal preserves a changed restore stage", async (t) => {
   assert.equal(await readFile(join(restorePath, "SKILL.md"), "utf8"), "user edit to restore stage");
 });
 
-test("the legacy bridge uses exact Codex fields instead of mutable aliases", async (t) => {
+test("legacy migration ignores path aliases and v1 markers at portable and Claude targets", async (t) => {
   const f = await fixture(t);
-  const paths = { ...f.paths, skill: join(dirname(f.paths.skill), "wrong"),
-    skillBackup: join(dirname(f.paths.skillBackup), "wrong") };
-  await mkdir(paths.legacyCodexSkill, { recursive: true });
-  await writeFile(join(paths.legacyCodexSkill, "SKILL.md"), "user copy");
-  await installManagedSkill({ paths, sourceDirectory: f.sourceDirectory, installedVersion: "1" });
-  assert.equal(await isManagedSkillInstalled(paths), true);
-  assert.equal(await readFile(join(paths.legacyCodexSkill, "SKILL.md"), "utf8"), "# Hypit\n");
-  assert.equal(await readFile(join(paths.legacyCodexSkillBackup, "SKILL.md"), "utf8"), "user copy");
-  await assert.rejects(readFile(join(paths.skill, "SKILL.md")), { code: "ENOENT" });
-  await assert.rejects(readFile(join(paths.skillBackup, "SKILL.md")), { code: "ENOENT" });
-  assert.equal(await removeManagedSkill({ paths }), true);
-  assert.equal(await readFile(join(paths.legacyCodexSkill, "SKILL.md"), "utf8"), "user copy");
+  for (const target of [f.portable, f.claude]) {
+    const marker = await installManagedSkill({ ...f, target });
+    await writeFile(join(target.skillDirectory, SKILL_MARKER), JSON.stringify({ ...marker, format: "hypit.desktop-managed@1" }));
+    const paths = { ...f.paths, skill: target.skillDirectory, skillBackup: target.backupDirectory };
+    assert.equal(await prepareLegacyCodexMigration(paths), undefined);
+    assert.equal(await isManagedSkillInstalled(target), false);
+    assert.equal(await prepareSkillRemoval({ target }), undefined);
+    assert.equal(await readFile(join(target.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
+  }
 });

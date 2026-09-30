@@ -28,6 +28,16 @@ export const targetSummary = (target: AgentSkillTarget) => ({
   detectedAgents: [...target.detectedAgents],
 });
 
+/** All supported destinations, including Agents absent from the current scan. */
+export function supportedSkillTargets(paths: DesktopPaths): readonly AgentSkillTarget[] {
+  return [
+    { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.portableSkill,
+      backupDirectory: paths.portableSkillBackup, required: true, detectedAgents: [] },
+    { id: "claude", label: "Claude Code Skill", skillDirectory: paths.claudeSkill,
+      backupDirectory: paths.claudeSkillBackup, required: false, detectedAgents: [] },
+  ];
+}
+
 export async function scanAgentTargets(options: {
   readonly paths: DesktopPaths;
   readonly exists?: (path: string) => Promise<boolean>;
@@ -36,13 +46,8 @@ export async function scanAgentTargets(options: {
   const detectedAgents = (await Promise.all((Object.keys(options.paths.agentProbePaths) as DetectedAgentId[])
     .map(async (id) => [id, (await Promise.all(options.paths.agentProbePaths[id].map(has))).some(Boolean)] as const)))
     .filter(([, present]) => present).map(([id]) => id);
-  const portableAgents = detectedAgents.filter((id) => id !== "claude-code");
-  const targets: AgentSkillTarget[] = [{ id: "portable", label: "通用 Agent Skill",
-    skillDirectory: options.paths.portableSkill, backupDirectory: options.paths.portableSkillBackup,
-    required: true, detectedAgents: portableAgents }];
-  if (detectedAgents.includes("claude-code")) {
-    targets.push({ id: "claude", label: "Claude Code Skill", skillDirectory: options.paths.claudeSkill,
-      backupDirectory: options.paths.claudeSkillBackup, required: false, detectedAgents: ["claude-code"] });
-  }
+  const targets = supportedSkillTargets(options.paths)
+    .filter(target => target.required || detectedAgents.includes("claude-code"))
+    .map(target => ({ ...target, detectedAgents: detectedAgents.filter(id => target.id === "claude" ? id === "claude-code" : id !== "claude-code") }));
   return { detectedAgents, targets };
 }

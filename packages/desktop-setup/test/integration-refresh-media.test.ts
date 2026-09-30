@@ -7,6 +7,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { desktopPaths } from "../src/paths.js";
+import { scanAgentTargets } from "../src/agent-targets.js";
 import { createDesktopProfile } from "../src/profile.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
 import { readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
@@ -31,7 +32,7 @@ async function fixture(t: TestContext, platform: "darwin" | "win32") {
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, `fixture ${name}`);
     }
-    return { paths, platform, home, userPath, appDirectory, bundledBin, electronExecutable, cliEntry, sourceDirectory, installedVersion: name, media };
+    return { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, userPath, appDirectory, bundledBin, electronExecutable, cliEntry, sourceDirectory, installedVersion: name, media };
   }
   const old = await app("old");
   const current = await app("new");
@@ -80,7 +81,7 @@ for (const platform of ["darwin", "win32"] as const) {
 
   test(`${platform} media migration rolls back profile and integration together when Skill copy fails`, async (t) => {
     const f = await fixture(t, platform);
-    const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.skill, "SKILL.md"), join(f.paths.skill, SKILL_MARKER),
+    const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER),
       ...(platform === "darwin" ? [join(f.current.home, ".zprofile")] : [])];
     const before = await Promise.all(files.map(file => readFile(file)));
     const beforePath = f.readPath();

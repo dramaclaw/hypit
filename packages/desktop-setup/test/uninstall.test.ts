@@ -1,11 +1,44 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { runIntegrationCleanup } from "../src/cleanup-entry.js";
+import { desktopPaths } from "../src/paths.js";
+import { scanAgentTargets } from "../src/agent-targets.js";
+import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
+import { removeDesktopIntegration } from "../src/lifecycle.js";
 
 const require = createRequire(new URL("../package.json", import.meta.url));
+
+test("explicit uninstall enumerates every managed target and legacy tree without Agent detection", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-uninstall-all-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
+  const { targets } = await scanAgentTargets({ paths, exists: async () => true });
+  const sourceDirectory = join(home, "source");
+  await mkdir(join(sourceDirectory, "references"), { recursive: true });
+  await writeFile(join(sourceDirectory, "SKILL.md"), "# Hypit");
+  for (const target of targets) {
+    await mkdir(target.skillDirectory, { recursive: true });
+    await writeFile(join(target.skillDirectory, "SKILL.md"), `user ${target.id}`);
+    await installManagedSkill({ target, sourceDirectory, installedVersion: "1" });
+  }
+  await mkdir(dirname(paths.legacyCodexSkill), { recursive: true });
+  await cp(paths.portableSkill, paths.legacyCodexSkill, { recursive: true });
+  const markerPath = join(paths.legacyCodexSkill, SKILL_MARKER);
+  const marker = JSON.parse(await readFile(markerPath, "utf8"));
+  await writeFile(markerPath, JSON.stringify({ format: "hypit.desktop-managed@1", installedVersion: "1", sourceDigest: marker.sourceDigest }));
+  const noAgents = { ...paths, agentProbePaths: { codex: [], "claymore-piko": [], cursor: [], "claude-code": [] } };
+  assert.deepEqual((await scanAgentTargets({ paths: noAgents })).targets.map(target => target.id), ["portable"]);
+  await removeDesktopIntegration({ paths: noAgents, home, platform: "darwin" });
+  for (const target of targets) {
+    assert.equal(await readFile(join(target.skillDirectory, "SKILL.md"), "utf8"), `user ${target.id}`);
+    await assert.rejects(readFile(join(target.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+  }
+  await assert.rejects(readFile(join(paths.legacyCodexSkill, "SKILL.md")), { code: "ENOENT" });
+});
 
 function cleanupCallsInHook(hook: string, updated: boolean): number {
   const body = hook.match(/!macro customUnInstall\s*([\s\S]*?)!macroend/)?.[1];
