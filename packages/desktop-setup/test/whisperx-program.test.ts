@@ -274,6 +274,45 @@ test("stop waits for installation and uses the existing programs down lifecycle"
   assert.deepEqual((await f.calls()).map(call => call.args[2]), ["prepare", "prepare", "up", "status", "down", "status"]);
 });
 
+test("stop immediately reports stopping and stays non-ready during a delayed post-down status", async (t) => {
+  const f = await fixture(t);
+  await f.service.installAndStart();
+  await f.configure({ delay: 400, delayAction: "status" });
+  const stopping = f.service.stop();
+  const immediate = await f.service.status();
+  let calls = await f.calls();
+  for (let attempt = 0; attempt < 100 && calls.length < 6; attempt++) {
+    await sleep(5);
+    calls = await f.calls();
+  }
+  const actualState = await readFile(join(f.paths.hostState, "fake-state"), "utf8");
+  const duringStatusProbe = await f.service.status();
+  const stopped = await stopping;
+  assert.equal(immediate.state, "stopping");
+  assert.equal(calls.at(-1).args[2], "status");
+  assert.equal(actualState, "down");
+  assert.equal(duringStatusProbe.state, "stopping");
+  assert.equal(duringStatusProbe.stage, undefined);
+  assert.equal(stopped.state, "stopped");
+});
+
+for (const fail of ["down", "status"]) {
+  test(`stop reports a fixed failure when ${fail} fails without restoring cached ready`, async (t) => {
+    const f = await fixture(t);
+    await f.service.installAndStart();
+    await f.configure({ fail });
+    const stopping = f.service.stop();
+    const during = await f.service.status();
+    const stopped = await stopping;
+    assert.equal(during.state, "stopping");
+    assert.equal(stopped.state, "failed");
+    assert.equal(stopped.code, "WHISPERX_COMMAND_FAILED");
+    assert.equal(stopped.stage, undefined);
+    assert.equal(await readFile(join(f.paths.hostState, "fake-state"), "utf8"), fail === "down" ? "ready" : "down");
+    assert.equal(JSON.stringify(stopped).includes("SECRET"), false);
+  });
+}
+
 test("machine paths match the existing WhisperX Program Home on both platforms", () => {
   const mac = whisperXProgramPaths({ hostState: "/home/Hypit" });
   assert.equal(mac.home, "/home/Hypit/programs/whisperx-whisperx.local-127.0.0.1%3A8765");

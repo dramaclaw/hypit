@@ -17,7 +17,7 @@ export type WhisperXProgramCode = "WHISPERX_BUNDLED_UV_INVALID" | "WHISPERX_PROF
   | "WHISPERX_OUTPUT_LIMIT" | "WHISPERX_TIMEOUT" | "WHISPERX_NOT_READY" | "WHISPERX_STATE_FAILED"
   | "WHISPERX_CLEANUP_INCOMPLETE";
 export type WhisperXProgramStatus = {
-  readonly state: "not-installed" | "preparing" | "prepared" | "stopped" | "starting" | "ready" | "mismatch" | "failed";
+  readonly state: "not-installed" | "preparing" | "prepared" | "stopped" | "stopping" | "starting" | "ready" | "mismatch" | "failed";
   readonly stage?: WhisperXProgressStage;
   readonly code?: WhisperXProgramCode;
   readonly logPath?: string;
@@ -289,7 +289,7 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
       return active.promise.then(() => begin(operation, report, signal));
     }
     current = operation === "install" ? { state: "preparing", stage: "preparing-runtime" }
-      : operation === "start" ? { state: "starting", stage: "starting-service" } : current;
+      : operation === "start" ? { state: "starting", stage: "starting-service" } : { state: "stopping" };
     mutationRevision++;
     activeStage = operation === "stop" ? undefined : current.stage;
     const observers = new Set<WhisperXProgressReporter>();
