@@ -1,6 +1,6 @@
 # Hypit 桌面安装包验收记录
 
-日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次通用 Agent 集成复验”对应当前最终构建。
+日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次发布边界复审修复”对应当前最终构建。
 
 ## 最终文件
 
@@ -8,12 +8,35 @@
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |
-| `Hypit-Setup-0.1.0-arm64.dmg` | 228845538 | `829b5d4a71c0f53d76aed02620dd1bbb9935700997adf1cc29e6c522de3040d1` |
-| `Hypit-Setup-0.1.0-x64.exe` | 204605097 | `2a4803cedf1cb051c3b8787e057b54254cccdc9458168e593b458407d5275ebe` |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 228856262 | `fdc45e2d119cf5642de9d1e9d7f4f6f86edb12993f709d19b7dc7bf02bfafbe0` |
+| `Hypit-Setup-0.1.0-x64.exe` | 204607471 | `03a22d2cf743726724a3248bd85fd5172c288137c2920833fd491de8728eb08a` |
 
 在 `packages/desktop-setup/release/` 目录运行 `shasum -a 256 -c Hypit-Setup-0.1.0-arm64.dmg.sha256` 和 `shasum -a 256 -c Hypit-Setup-0.1.0-x64.exe.sha256`，两项均输出 `OK`。校验文件中的文件名是相对文件名，因此应从 `release/` 目录运行。
 
-## 本次通用 Agent 集成复验（2026-09-30）
+## 本次发布边界复审修复（2026-09-30）
+
+最终源码提交为 `3b3fa56a`（基于 `e06d0c38`）。命令入口、托管状态、`.zprofile` 和启动时媒体 Profile 刷新使用同一准备事务：先把目标实际内容移入私有恢复目录，核对被移走文件的身份、字节和权限，再以排他 hard link 发布新文件。发布时出现新目标会保留新目标、原内容和准备内容并停止；回滚同样保留并检查实际被移走的内容，不覆盖并发用户编辑。恢复目录清理失败只报告固定类型警告，不撤销已提交的成功结果。
+
+Windows PATH 改为单次 `compareAndSet(expected, value)` 编辑调用。生产实现使用按用户命名的互斥锁，在同一 PowerShell 调用内进行原始值的区分大小写比较、条件写入和写后检查；观察到值不匹配就停止，不重写该值。此锁只协调本程序的写入者，不能使不参与锁的第三方注册表编辑器具备全局原子性。NSIS 在清理返回零且输出非空时显示信息提示，并继续成功卸载；非零分支保留原行为。
+
+回归先复现 10 项原问题失败，随后补充了 2 项首次创建时目标抢占失败和 2 项已提交 Profile 清理警告失败，再验证修复。新增共 22 项测试，覆盖发布、反向移动、提交前与提交后编辑、正常回滚、Windows 条件编辑、警告的安全 IPC 投影及 NSIS 输出提示。
+
+| 命令 | 本次结果 |
+| --- | --- |
+| `pnpm check` | TypeScript 检查通过 |
+| `pnpm test` | 1639 项：1614 通过、25 条件跳过、0 失败 |
+| `pnpm desktop:build` | 主进程、preload、renderer 与清理入口构建通过 |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts` | 300 项：298 通过、2 项 staged-media 条件跳过、0 失败 |
+| `HYPIT_TEST_STAGED_MEDIA=1 node --import tsx --test packages/desktop-setup/test/media-capabilities.test.ts` | 3/3 通过；最终两平台 staging 均检查 |
+| 两平台 `check-artifact.mjs` | 最终 staging 资源清单、哈希、锁定媒体、架构、许可证、Skill 与 Runtime 通过 |
+| `pnpm desktop:dist:mac` / `pnpm desktop:dist:win` | 最终源码重建，均退出 0；实际 DMG 挂载和实际 EXE 解包后的 `inspectApp` 通过 |
+| 两项 `shasum -a 256 -c` / `git diff --check` | 均通过 |
+
+macOS 检查实际执行包内 FFmpeg/FFprobe，验证 `-fps_mode cfr` 与 H.264 两帧编码；Windows 检查 PE32+ x64、选项、哈希和解包内容，未执行 Windows 程序。排他文件发布依赖同一文件系统支持 hard link；不支持时会停止并保留恢复内容。为腾出打包空间，仅删除并重建了 `release/mac-arm64` 和 `release/win-unpacked` 两个生成目录。
+
+`pre-commit`、`gitleaks` 和 Wine 不在 PATH，未运行。未使用真实凭据、真实 NewAPI/OSS 或付费生成，未替换用户“应用程序”中此前复制的应用。未签名、未公证、未对外发布；原生 GUI、系统凭据及完整 Windows 安装/卸载仍受下方“尚未执行”限制。
+
+## 此前通用 Agent 集成复验（2026-09-30）
 
 最终源码提交为 `620ae66d`，包括 `297ec367`、`33891d39`、`b1fe0635` 和 `34b1d09a` 的修复：命令入口回滚保留并发用户编辑；卸载确认列出通用和 Claude 目标及旧版恢复位置；缺失备份使托管 Skill 未就绪并阻止刷新、升级或卸载；清理失败保留已提交结果和恢复文件，并显示固定类型的诊断警告。中文指南同步说明安装路径。重新扫描 Agent 只读取本地状态，不读取或改写凭据、不执行 NewAPI/OSS 连接探针。
 
