@@ -24,6 +24,14 @@ export type DesktopPathOptions = {
   readonly agentData?: string;
 };
 
+/** Must match provider-whisperx-local's fixed default Program identity and loopback URL. */
+export function whisperXProgramPaths(paths: Pick<DesktopPaths, "hostState">) {
+  const path = win32.isAbsolute(paths.hostState) && !posix.isAbsolute(paths.hostState) ? win32 : posix;
+  const home = path.join(paths.hostState, "programs", "whisperx-whisperx.local-127.0.0.1%3A8765");
+  return { home, state: path.join(paths.hostState, "desktop", "whisperx-state.json"),
+    installationLog: path.join(home, "install.log"), serviceLog: path.join(home, "program.log") };
+}
+
 export function desktopPaths(options: DesktopPathOptions): DesktopPaths {
   const path = options.platform === "win32" ? win32 : posix;
   const hostState = path.join(options.appData, "Hypit");
