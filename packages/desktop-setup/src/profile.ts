@@ -6,6 +6,22 @@ import { isManagedLauncherInstalled, prepareFileChange, snapshotFile } from "./l
 import type { LauncherOptions } from "./launcher-install.js";
 import type { PreparedRemoval } from "./skill-install.js";
 
+export type DesktopProfileDocument = Record<string, unknown> & {
+  readonly format: "hypit.runtime-local@1";
+  readonly dataRoot: string;
+  readonly endpoints: Record<string, unknown>;
+  readonly bindings: Record<string, unknown>;
+};
+
+/** Keep the original document, including unrelated provider settings, when editing owned keys. */
+export function parseDesktopProfileDocument(bytes: Buffer): DesktopProfileDocument {
+  const profile: unknown = JSON.parse(bytes.toString("utf8"));
+  const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+  if (!record(profile) || profile.format !== "hypit.runtime-local@1" || typeof profile.dataRoot !== "string"
+    || !profile.dataRoot.trim() || !record(profile.endpoints) || !record(profile.bindings)) throw new Error("Invalid desktop Profile");
+  return profile as DesktopProfileDocument;
+}
+
 const mediaFields = ["ffmpegPath", "ffprobePath"] as const;
 function mediaConfigs(profile: { endpoints?: Record<string, { config?: Record<string, unknown> }> }): Record<string, unknown>[] {
   return ["media.local", "hyperframes.local"].map(key => profile.endpoints?.[key]?.config)
