@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { promises as mutableFsPromises } from "node:fs";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -73,13 +75,17 @@ test("interrupted or incomplete copy never changes an existing Skill or creates 
     const f = await fixture(t);
     await mkdir(f.target.skillDirectory, { recursive: true });
     await writeFile(join(f.target.skillDirectory, "SKILL.md"), "original");
+    let interruptedStage: string | undefined;
     await assert.rejects(installManagedSkill({ ...f, copyDirectory: async (_source, destination) => {
       await mkdir(destination, { recursive: true });
       await writeFile(join(destination, "SKILL.md"), "# Hypit\n");
-      if (interrupt) throw new Error("submitted-secret");
+      if (interrupt) { interruptedStage = destination; throw new Error("submitted-secret"); }
     } }), /SKILL_INSTALL_FAILED/);
     assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "original");
-    assert.deepEqual(await readdir(dirname(f.target.skillDirectory)), ["hypit"]);
+    if (interrupt) {
+      assert.ok(interruptedStage);
+      assert.equal(await readFile(join(interruptedStage, "SKILL.md"), "utf8"), "# Hypit\n");
+    } else assert.deepEqual(await readdir(dirname(f.target.skillDirectory)), ["hypit"]);
     await assert.rejects(readFile(join(f.target.backupDirectory, "SKILL.md")), { code: "ENOENT" });
   }
 });
@@ -312,6 +318,227 @@ test("install commit and disposal preserve a changed backup stage", async (t) =>
   await assert.rejects(prepared.dispose(false), /SKILL_INSTALL_FAILED/);
   assert.equal(await readFile(join(stagedPath, "SKILL.md"), "utf8"), "user edit to backup stage");
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+});
+
+test("install commit refuses a required backup stage that disappeared", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  const prepared = await prepareSkillInstall(f);
+  const backupStage = (await readdir(dirname(f.portable.backupDirectory))).find((name) => name.startsWith("hypit.stage-"));
+  assert.ok(backupStage);
+  const displaced = join(dirname(f.portable.backupDirectory), "displaced-backup");
+  await mutableFsPromises.rename(join(dirname(f.portable.backupDirectory), backupStage), displaced);
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+  assert.equal(await readFile(join(displaced, "SKILL.md"), "utf8"), "original user copy");
+  await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+});
+
+test("post-rename Skill mismatch never becomes rollback ownership", async (t) => {
+  const f = await fixture(t);
+  const prepared = await prepareSkillInstall(f);
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    await originalRename(source, destination);
+    if (destination === f.portable.skillDirectory && typeof source === "string" && source.includes(".stage-"))
+      await writeFile(join(destination, "SKILL.md"), "user edit at publication");
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(prepared.commit());
+  } finally {
+    mutableFsPromises.rename = originalRename;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edit at publication");
+});
+
+test("post-rename backup mismatch never becomes deletion ownership", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  const prepared = await prepareSkillInstall(f);
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    await originalRename(source, destination);
+    if (destination === f.portable.backupDirectory)
+      await writeFile(join(destination, "SKILL.md"), "user edit at backup publication");
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(prepared.commit());
+  } finally {
+    mutableFsPromises.rename = originalRename;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user edit at backup publication");
+});
+
+test("symlink backup publication uses exclusive creation", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.portable.skillDirectory), { recursive: true });
+  await symlink(f.sourceDirectory, f.portable.skillDirectory, "dir");
+  const prepared = await prepareSkillInstall(f);
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    if (destination === f.portable.backupDirectory) throw new Error("symlink rename must not publish");
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try { await prepared.commit(); }
+  finally { mutableFsPromises.rename = originalRename; syncBuiltinESMExports(); }
+  await prepared.dispose(true);
+  assert.equal((await lstat(f.portable.backupDirectory)).isSymbolicLink(), true);
+});
+
+test("symlink previous-tree moves use exclusive creation through rollback", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.portable.skillDirectory), { recursive: true });
+  await symlink(f.sourceDirectory, f.portable.skillDirectory, "dir");
+  const prepared = await prepareSkillInstall(f);
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    if ((source === f.portable.skillDirectory && typeof destination === "string" && destination.includes(".previous-"))
+      || (typeof source === "string" && source.includes(".previous-") && destination === f.portable.skillDirectory))
+      throw new Error("symlink rename must not move previous tree");
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try {
+    await prepared.commit();
+    assert.equal(await prepared.rollback(), false);
+  } finally {
+    mutableFsPromises.rename = originalRename;
+    syncBuiltinESMExports();
+  }
+  await prepared.dispose(false);
+  assert.equal((await lstat(f.portable.skillDirectory)).isSymbolicLink(), true);
+});
+
+test("file backup and restore publication use exclusive creation", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.portable.skillDirectory), { recursive: true });
+  await writeFile(f.portable.skillDirectory, "user file");
+  const prepared = await prepareSkillInstall(f);
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    if (destination === f.portable.backupDirectory) throw new Error("file rename must not publish");
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try { await prepared.commit(); }
+  finally { mutableFsPromises.rename = originalRename; syncBuiltinESMExports(); }
+  await prepared.dispose(true);
+  assert.equal(await readFile(f.portable.backupDirectory, "utf8"), "user file");
+  const removal = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(removal);
+  mutableFsPromises.rename = async (source, destination) => {
+    if (destination === f.portable.skillDirectory && typeof source === "string" && source.includes(".restore-")) throw new Error("file rename must not restore");
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try { await removal.commit(); }
+  finally { mutableFsPromises.rename = originalRename; syncBuiltinESMExports(); }
+  await removal.dispose(true);
+  assert.equal(await readFile(f.portable.skillDirectory, "utf8"), "user file");
+});
+
+test("symlink removal rollback uses exclusive restoration staging", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.portable.skillDirectory), { recursive: true });
+  await symlink(f.sourceDirectory, f.portable.skillDirectory, "dir");
+  await installManagedSkill(f);
+  const removal = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(removal);
+  await removal.commit();
+  const originalRename = mutableFsPromises.rename;
+  mutableFsPromises.rename = async (source, destination) => {
+    if (source === f.portable.skillDirectory && typeof destination === "string" && destination.includes(".restore-"))
+      throw new Error("symlink rename must not stage rollback");
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try { assert.equal(await removal.rollback(), false); }
+  finally { mutableFsPromises.rename = originalRename; syncBuiltinESMExports(); }
+  await removal.dispose(false);
+  assert.equal(await isManagedSkillInstalled(f.portable), true);
+});
+
+test("preparation preserves a replaced stage when copy fails", async (t) => {
+  const f = await fixture(t);
+  let recoveryPath = "";
+  await assert.rejects(prepareSkillInstall({ ...f, copyDirectory: async (_source, destination) => {
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "SKILL.md"), "incomplete copy");
+    await rm(destination, { recursive: true });
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "SKILL.md"), "user replacement");
+    recoveryPath = destination;
+    throw new Error("copy failed");
+  } }), (error: unknown) => error instanceof Error && error.message.includes(recoveryPath));
+  assert.equal(await readFile(join(recoveryPath, "SKILL.md"), "utf8"), "user replacement");
+});
+
+test("preparation preserves an unverified backup stage when its copy fails", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  let recoveryPath = "";
+  const originalCp = mutableFsPromises.cp;
+  mutableFsPromises.cp = async (source, destination, options) => {
+    if (source === f.portable.skillDirectory && typeof destination === "string") {
+      recoveryPath = destination;
+      await mkdir(destination, { recursive: true });
+      await writeFile(join(destination, "SKILL.md"), "partial backup");
+      throw new Error("backup copy failed");
+    }
+    return originalCp(source, destination, options);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(prepareSkillInstall(f), (error: unknown) => error instanceof Error && error.message.includes(recoveryPath));
+  } finally {
+    mutableFsPromises.cp = originalCp;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await readFile(join(recoveryPath, "SKILL.md"), "utf8"), "partial backup");
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+});
+
+test("removal preparation preserves an unverified restore stage when copy fails", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  let recoveryPath = "";
+  const originalCp = mutableFsPromises.cp;
+  mutableFsPromises.cp = async (source, destination, options) => {
+    if (source === f.portable.backupDirectory && typeof destination === "string") {
+      recoveryPath = destination;
+      await mkdir(destination, { recursive: true });
+      await writeFile(join(destination, "SKILL.md"), "partial restore");
+      throw new Error("restore copy failed");
+    }
+    return originalCp(source, destination, options);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(prepareSkillRemoval({ target: f.portable }),
+      (error: unknown) => error instanceof Error && error.message.includes(recoveryPath));
+  } finally {
+    mutableFsPromises.cp = originalCp;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await readFile(join(recoveryPath, "SKILL.md"), "utf8"), "partial restore");
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
 });
 
 test("removal commit preserves a backup changed after preparation", async (t) => {
