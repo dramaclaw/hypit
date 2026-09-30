@@ -82,13 +82,20 @@ const errorMessages: Readonly<Record<string, string>> = {
   INTEGRATION_REMOVE_FAILED: "本机集成卸载失败，已保留用户数据；请检查命令入口与 Skill 路径", CLEAR_FAILED: "清除配置失败", CONFIRMATION_REQUIRED: "确认已取消或过期，请重新操作",
 };
 export function serializeFailure(error: unknown): SetupFailure {
-  const candidate = error instanceof Error ? /\[([A-Z_]+)\]$/u.exec(error.message)?.[1] : undefined;
+  let rawMessage: unknown;
+  try { if (error instanceof Error) rawMessage = Reflect.get(error, "message"); }
+  catch { /* A thrown Proxy or Error getter is not a public failure detail. */ }
+  const candidate = typeof rawMessage === "string" && rawMessage.length <= 8192 ? /\[([A-Z_]+)\]$/u.exec(rawMessage)?.[1] : undefined;
   const base = candidate?.replace(/_ROLLBACK_FAILED$/u, "");
   const known = base && Object.hasOwn(errorMessages, base);
   const code = known ? candidate! : "SETUP_REQUEST_FAILED";
   const message = known ? `${errorMessages[base!]}${candidate !== base ? "；回滚未完成，请重新运行诊断" : ""}` : errorMessages.SETUP_REQUEST_FAILED!;
-  const key = error && typeof error === "object" && "cleanupObjectKey" in error ? error.cleanupObjectKey : undefined;
-  return { code, message, ...(code === "SETUP_OSS_FAILED" && typeof key === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(key) ? { cleanupObjectKey: key } : {}) };
+  let key: unknown;
+  if (code === "SETUP_OSS_FAILED") {
+    try { if (error !== null && (typeof error === "object" || typeof error === "function")) key = Reflect.get(error, "cleanupObjectKey"); }
+    catch { /* Invalid cleanup details are omitted. */ }
+  }
+  return { code, message, ...(typeof key === "string" && key.length <= 128 && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(key) ? { cleanupObjectKey: key } : {}) };
 }
 
 export type SetupServices = {
@@ -186,7 +193,7 @@ export function createSetupController(services: SetupServices) {
       try { return { ok: true, value: await operation() }; }
       catch (error) { return { ok: false, error: serializeFailure(error) }; }
     });
-    tail = pending;
+    tail = pending.then(() => undefined, () => undefined);
     return pending;
   }
   return {

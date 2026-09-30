@@ -70,6 +70,58 @@ test("only allowlisted error codes and a validated cleanup key cross IPC", () =>
   }
 });
 
+test("failure serialization is total for hostile getters, revoked proxies, and primitive throws", () => {
+  const fallback = { code: "SETUP_REQUEST_FAILED", message: "操作失败，请检查配置后重试" };
+  const oss = new Error("SECRET_API [SETUP_OSS_FAILED]");
+  Object.defineProperties(oss, {
+    code: { get() { throw new Error("SECRET_CODE"); } },
+    cleanupObjectKey: { get() { throw new Error("SECRET_CLEANUP"); } },
+  });
+  assert.deepEqual(serializeFailure(oss), { code: "SETUP_OSS_FAILED", message: "OSS 连接测试失败" });
+  const hostileMessage = new Error("initial");
+  Object.defineProperties(hostileMessage, {
+    message: { get() { throw new Error("SECRET_MESSAGE"); } },
+    cleanupObjectKey: { get() { throw new Error("SECRET_CLEANUP"); } },
+  });
+  const nonstringMessage = new Error("initial");
+  Object.defineProperty(nonstringMessage, "message", { get() { return { toString() { throw new Error("SECRET_COERCION"); } }; } });
+  const revokedError = Proxy.revocable(new Error("SECRET_REVOKED [SETUP_OSS_FAILED]"), {});
+  revokedError.revoke();
+  const revokedObject = Proxy.revocable({ cleanupObjectKey: "SECRET_REVOKED" }, {});
+  revokedObject.revoke();
+  for (const thrown of [hostileMessage, nonstringMessage, revokedError.proxy, revokedObject.proxy, Symbol("SECRET_SYMBOL"), 42n]) {
+    const publicError = serializeFailure(thrown);
+    assert.deepEqual(publicError, fallback);
+    assert.deepEqual(structuredClone(publicError), fallback);
+    assert.equal(JSON.stringify(publicError).includes("SECRET"), false);
+  }
+});
+
+test("a hostile getter failure does not poison later controller requests", async () => {
+  let statusCalls = 0, commits = 0, diagnoses = 0, clears = 0, removals = 0;
+  const hostile = new Error("SECRET_API [SETUP_OSS_FAILED]");
+  Object.defineProperty(hostile, "cleanupObjectKey", { get() { throw new Error("SECRET_CLEANUP"); } });
+  const controller = createSetupController({
+    getStatus: async () => {
+      statusCalls++;
+      return statusCalls === 1 ? { ...result, get profilePath(): string { throw hostile; } } : result;
+    },
+    commit: async () => { commits++; return result; }, install: async () => {},
+    diagnose: async () => { diagnoses++; return []; }, openConfig: async () => {},
+    clear: async () => { clears++; return result; }, removeIntegration: async () => { removals++; return result; },
+  });
+  const first = await controller.getStatus();
+  assert.deepEqual(first, { ok: false, error: { code: "SETUP_OSS_FAILED", message: "OSS 连接测试失败" } });
+  const replies = [first, await controller.getStatus(), await controller.submit(input), await controller.rerunDiagnostics(),
+    await controller.clearConfiguration(), await controller.removeIntegration()];
+  assert.deepEqual(replies.slice(1).map(reply => reply.ok), [true, true, true, true, true]);
+  assert.deepEqual([statusCalls, commits, diagnoses, clears, removals], [3, 1, 2, 1, 1]);
+  for (const reply of replies) {
+    const cloned = structuredClone(reply);
+    assert.equal(JSON.stringify(cloned).includes("SECRET"), false);
+  }
+});
+
 test("controller serializes installs and diagnostics and subscriptions remove listeners", async () => {
   const calls: string[] = [];
   const key = "relay/hypit/setup-test/12345678-1234-4123-8123-123456789abc.txt";
