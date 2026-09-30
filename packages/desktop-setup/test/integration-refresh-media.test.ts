@@ -8,9 +8,9 @@ import type { TestContext } from "node:test";
 import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
-import { createDesktopProfile } from "../src/profile.js";
+import { createDesktopProfile, prepareDesktopMediaRefresh } from "../src/profile.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
-import { readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
+import { readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
 import { SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext, platform: "darwin" | "win32") {
@@ -18,7 +18,7 @@ async function fixture(t: TestContext, platform: "darwin" | "win32") {
   t.after(() => rm(home, { recursive: true, force: true }));
   const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
   let path = "original PATH";
-  const userPath = { read: async () => path, write: async (value: string) => { path = value; } };
+  const userPath = { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } };
   const suffix = platform === "win32" ? ".exe" : "";
   async function app(name: string) {
     const appDirectory = join(home, name);
@@ -46,6 +46,95 @@ async function fixture(t: TestContext, platform: "darwin" | "win32") {
 }
 
 for (const platform of ["darwin", "win32"] as const) {
+  test(`${platform} Profile recovery cleanup warning keeps a committed refresh configured`, async (t) => {
+    const f = await fixture(t, platform);
+    const unlink = fs.unlink;
+    const mock = t.mock.method(fs, "unlink", async (path: Parameters<typeof fs.unlink>[0]) => {
+      if (String(path).startsWith(`${f.paths.profile}.recovery-`) && String(path).endsWith("/displaced")) throw new Error("fixture-secret");
+      return unlink(path);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    const result = await refreshDesktopStatus(f.current);
+    assert.equal(result.configured, true);
+    const warning = result.diagnostics.find(item => item.code === "profile" && item.reason === "CLEANUP_INCOMPLETE");
+    assert.ok(warning);
+    assert.ok(warning.path?.includes(".recovery-"));
+    const reconciled = reconcileStartupStatus(await readDesktopStatus(f.current), result);
+    assert.equal(reconciled.configured, true);
+    assert.ok(reconciled.diagnostics.some(item => item.path === warning.path));
+    assert.doesNotMatch(JSON.stringify(reconciled), /fixture-secret/);
+  });
+
+  test(`${platform} prepared media refresh refuses an edit before its commit`, async (t) => {
+    const f = await fixture(t, platform);
+    const refresh = await prepareDesktopMediaRefresh(f.current);
+    assert.ok(refresh);
+    const edited = `${await readFile(f.paths.profile, "utf8")}\n `;
+    await writeFile(f.paths.profile, edited);
+    await assert.rejects(refresh.commit());
+    assert.equal(await refresh.rollback(), false);
+    assert.deepEqual(await refresh.dispose(false), []);
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+  });
+
+  test(`${platform} Profile publication retains a new destination and the displaced Profile`, async (t) => {
+    const f = await fixture(t, platform);
+    const original = await readFile(f.paths.profile);
+    const edited = JSON.stringify({ ...JSON.parse(original.toString()), userSetting: "concurrent edit" });
+    const link = fs.link;
+    let injected = false;
+    const mock = t.mock.method(fs, "link", async (source: Parameters<typeof fs.link>[0], destination: Parameters<typeof fs.link>[1]) => {
+      if (!injected && destination === f.paths.profile) { injected = true; await writeFile(f.paths.profile, edited); }
+      return link(source, destination);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    const result = await refreshDesktopStatus(f.current);
+    assert.equal(result.configured, false);
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+    const recovery = result.diagnostics.find(item => item.code === "profile" && item.path?.includes(".recovery-"));
+    assert.equal(recovery?.reason, "CLEANUP_INCOMPLETE");
+    assert.deepEqual(await readFile(join(recovery!.path!, "displaced")), original);
+  });
+
+  test(`${platform} media refresh preserves an edit at forward publication`, async (t) => {
+    const f = await fixture(t, platform);
+    const saved = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    const edited = JSON.stringify({ ...saved, userSetting: "concurrent edit" });
+    const rename = fs.rename;
+    let injected = false;
+    const mock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+      if (!injected && (source === f.paths.profile || destination === f.paths.profile)) {
+        injected = true;
+        await writeFile(f.paths.profile, edited);
+      }
+      return rename(source, destination);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    const result = await refreshDesktopStatus(f.current);
+    assert.equal(injected, true);
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+    assert.equal(result.configured, false);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
+  });
+
+  test(`${platform} media rollback retains a user edit made after publication`, async (t) => {
+    const f = await fixture(t, platform);
+    let edited = "";
+    const result = await refreshDesktopStatus({ ...f.current, copyDirectory: async () => {
+      const profile = JSON.parse(await readFile(f.paths.profile, "utf8"));
+      edited = JSON.stringify({ ...profile, userSetting: "concurrent edit" });
+      await writeFile(f.paths.profile, edited);
+      throw new Error("fixture-secret");
+    } });
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+    assert.equal(result.configured, false);
+    assert.equal(result.diagnostics.find(item => item.code === "profile")?.status, "warning");
+    assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
+  });
+
   test(`${platform} moved app refresh replaces proven managed media paths after the old app is gone`, async (t) => {
     const f = await fixture(t, platform);
     const before = JSON.parse(await readFile(f.paths.profile, "utf8"));
@@ -98,11 +187,11 @@ for (const platform of ["darwin", "win32"] as const) {
 
   test(`${platform} a failed profile rollback is explicitly reported without exposing the OS error`, async (t) => {
     const f = await fixture(t, platform);
-    const rename = fs.rename;
+    const link = fs.link;
     let profileWrites = 0;
-    const mock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+    const mock = t.mock.method(fs, "link", async (source: Parameters<typeof fs.link>[0], destination: Parameters<typeof fs.link>[1]) => {
       if (destination === f.paths.profile && ++profileWrites === 2) throw new Error("fixture-secret");
-      return rename(source, destination);
+      return link(source, destination);
     });
     syncBuiltinESMExports();
     t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });

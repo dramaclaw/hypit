@@ -335,7 +335,7 @@ for (const resource of ["profile-before", "profile-after", "launcher-after", "wi
     const profile = join(f.home, ".zprofile");
     let userPath = "original PATH";
     const options = { ...f, platform: resource.startsWith("windows") ? "win32" as const : "darwin" as const,
-      userPath: { read: async () => userPath, write: async (value: string) => { userPath = value; } } };
+      userPath: { read: async () => userPath, compareAndSet: async (expected: string, value: string) => { if (userPath !== expected) return false; userPath = value; return true; } } };
     await writeFile(profile, "original profile\n");
     const rename = fs.rename;
     const mock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
@@ -376,7 +376,7 @@ test("Windows rollback compares file content without assuming POSIX executable m
   });
   syncBuiltinESMExports();
   t.after(() => { statMock.mock.restore(); renameMock.mock.restore(); syncBuiltinESMExports(); });
-  await assert.rejects(installDesktopIntegration({ ...f, platform: "win32", userPath: { read: async () => path, write: async value => { path = value; } } }), /INTEGRATION_INSTALL_FAILED\]$/u);
+  await assert.rejects(installDesktopIntegration({ ...f, platform: "win32", userPath: { read: async () => path, compareAndSet: async (expected, value) => { if (path !== expected) return false; path = value; return true; } } }), /INTEGRATION_INSTALL_FAILED\]$/u);
   await assert.rejects(readFile(f.paths.launcher), { code: "ENOENT" });
   assert.equal(path, "original");
 });
@@ -415,7 +415,7 @@ test("integration reports an incomplete PATH rollback without echoing the OS err
   const f = await fixture(t);
   await assert.rejects(installDesktopIntegration({ ...f, platform: "win32", userPath: {
     async read() { return "C:\\User Tools"; },
-    async write() { throw new Error("submitted-secret"); },
+    async compareAndSet() { throw new Error("submitted-secret"); },
   } }), (error: unknown) => {
     assert.ok(error instanceof Error);
     assert.equal(error.message, "桌面集成安装失败 [INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED]");
@@ -450,7 +450,7 @@ for (const external of [false, true]) {
     let fail = false;
     const options = { ...f, platform: "win32" as const, userPath: {
       async read() { return value; },
-      async write(next: string) { value = next; if (fail) { fail = false; throw new Error("submitted-secret"); } },
+      async compareAndSet(expected: string, next: string) { if (value !== expected) return false; value = next; if (fail) { fail = false; throw new Error("submitted-secret"); } return true; },
     } };
     await installDesktopIntegration(options);
     const files = [f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER),
@@ -486,7 +486,7 @@ for (const failure of ["profile", "skill"] as const) {
     let injected = false;
     const renameMock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
       const target = failure === "profile" ? profile : f.paths.portableSkill;
-      if (!injected && destination === target) {
+      if (!injected && (destination === target || (failure === "profile" && source === target))) {
         injected = true;
         if (failure === "skill") await assert.rejects(readFile(f.paths.launcher), { code: "ENOENT" });
         throw new Error("submitted-secret");
@@ -514,7 +514,7 @@ test("uninstall preflights the Skill backup before changing PATH or launcher fil
   let value = "C:\\Original";
   let writes = 0;
   const options = { ...f, platform: "win32" as const, userPath: {
-    async read() { return value; }, async write(next: string) { ++writes; value = next; },
+    async read() { return value; }, async compareAndSet(expected: string, next: string) { if (value !== expected) return false; ++writes; value = next; return true; },
   } };
   await installDesktopIntegration(options);
   const markerPath = join(f.paths.portableSkill, SKILL_MARKER);
@@ -536,7 +536,7 @@ test("uninstall reports a failed PATH rollback without exposing the OS error or 
   let fail = false;
   const options = { ...f, platform: "win32" as const, userPath: {
     async read() { return value; },
-    async write(next: string) { if (fail) throw new Error("submitted-secret"); value = next; },
+    async compareAndSet(expected: string, next: string) { if (fail) throw new Error("submitted-secret"); if (value !== expected) return false; value = next; return true; },
   } };
   await installDesktopIntegration(options);
   const files = [f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER)];

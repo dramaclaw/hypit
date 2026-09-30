@@ -11,7 +11,7 @@ import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
 import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
-import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
+import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
 import { commitDesktopSetup } from "./setup-core.js";
@@ -149,7 +149,8 @@ function publicDiagnostic(value: unknown): DiagnosticItem {
   }
   if (!isNonSkillCode(code) || label !== diagnosticLabels[code] || target !== undefined) throw new Error("Invalid diagnostic result");
   const key = code === "oss" && typeof cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(cleanupObjectKey) ? cleanupObjectKey : undefined;
-  return { code, status, label: diagnosticLabels[code], ...(path === undefined ? {} : { path }), ...(key ? { cleanupObjectKey: key } : {}) };
+  return { code, status, label: diagnosticLabels[code], ...(path === undefined ? {} : { path }), ...(key ? { cleanupObjectKey: key } : {}),
+    ...((code === "profile" || code === "launcher") && status === "warning" && reason === "CLEANUP_INCOMPLETE" ? { reason } : {}) };
 }
 const publicDiagnostics = (value: unknown): DiagnosticItem[] => publicArray(value, 64, publicDiagnostic);
 function integrationDiagnostics(value: unknown): DiagnosticItem[] {
@@ -189,9 +190,13 @@ function publicResult(value: unknown): SetupResult {
 
 /** Only an incomplete startup refresh can carry a readiness-affecting warning. */
 export function reconcileStartupStatus(current: SetupResult, startup: SetupResult | undefined): SetupResult {
-  const warnings = startup?.configured === false ? startup.diagnostics.filter(item => item.code === "profile" && item.status === "warning") : [];
-  return warnings.length ? { ...current, configured: false,
-    diagnostics: current.diagnostics.map(item => warnings.find(warning => warning.code === item.code && warning.path === item.path) ?? item) } : current;
+  const warnings = startup?.diagnostics.filter(item => item.status === "warning"
+    && (item.reason === "CLEANUP_INCOMPLETE" || (startup.configured === false && item.code === "profile"))) ?? [];
+  const profileRollbackFailed = startup?.configured === false && warnings.some(item => item.code === "profile");
+  const matches = (left: DiagnosticItem, right: DiagnosticItem) => left.code === right.code && left.path === right.path && left.target === right.target;
+  return warnings.length ? { ...current, configured: current.configured && !profileRollbackFailed,
+    diagnostics: [...current.diagnostics.map(item => warnings.find(warning => matches(warning, item)) ?? item),
+      ...warnings.filter(warning => !current.diagnostics.some(item => matches(warning, item)))] } : current;
 }
 
 export function createSetupController(services: SetupServices) {
@@ -309,17 +314,23 @@ export async function refreshDesktopStatus(options: DesktopIntegrationOptions): 
   if (!(await Promise.all(options.targets.map(canRefreshManagedSkill))).every(Boolean)) return before;
   let media: Awaited<ReturnType<typeof prepareDesktopMediaRefresh>>;
   let profileRollbackFailed = false;
+  let committed = false;
+  let integrationWarnings: readonly DiagnosticItem[] = [];
   try {
     media = await prepareDesktopMediaRefresh(options);
-    if (media) await atomicFile(options.paths.profile, media.content, media.snapshot.mode);
-    await installDesktopIntegration({ ...options, preserveExisting: true });
+    await media?.commit();
+    integrationWarnings = (await installDesktopIntegration({ ...options, preserveExisting: true })).diagnostics;
+    committed = true;
   } catch {
-    if (media) profileRollbackFailed = await restoreFiles([media.snapshot]);
+    if (media) profileRollbackFailed = await media.rollback();
     // Failed refreshes leave stale integration visible and attempt to restore the original profile.
   }
+  const warnings = await media?.dispose(committed) ?? [];
+  profileRollbackFailed ||= !committed && warnings.length > 0;
   const result = await readDesktopStatus(options);
   return profileRollbackFailed ? { ...result, configured: false,
-    diagnostics: result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const } : item) } : result;
+    diagnostics: [...result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), ...warnings] }
+    : { ...result, diagnostics: [...result.diagnostics, ...integrationWarnings, ...warnings] };
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */

@@ -128,6 +128,12 @@ test("NSIS cleans managed integration before uninstall and reports failure witho
   assert.doesNotMatch(hook, /RMDir|Delete\s|--clear/);
 });
 
+test("NSIS displays nonempty successful cleanup output while continuing uninstall", async () => {
+  const hook = await readFile(new URL("../build/installer.nsh", import.meta.url), "utf8");
+  assert.match(hook, /\$\{ElseIf\} \$1 != ""\s+MessageBox MB_OK\|MB_ICONINFORMATION "\$1"/);
+  assert.doesNotMatch(hook, /Abort|Quit|SetErrorLevel/);
+});
+
 test("NSIS cleanup executes on ordinary uninstall and is skipped during an update", async () => {
   const hook = await readFile(new URL("../build/installer.nsh", import.meta.url), "utf8");
   const builderRequire = createRequire(require.resolve("electron-builder/package.json"));

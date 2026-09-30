@@ -125,6 +125,18 @@ test("committed integration warnings survive submit and refresh through the safe
   }
 });
 
+for (const [code, label] of [["profile", "Runtime Profile"], ["launcher", "命令入口"]] as const) {
+  test(`${code} recovery warnings retain only the allowlisted reason across IPC`, async () => {
+    const warning = { code, label, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const, path: "/fixed/recovery" };
+    const controller = createSetupController({ getStatus: async () => ({ ...result, diagnostics: [{ ...warning, secret: "SECRET", toJSON: () => ({ secret: "SECRET" }) }] }),
+      commit: async () => result, install: async () => {}, diagnose: async () => [], openConfig: async () => {}, clear: async () => result });
+    const reply = await controller.getStatus();
+    assert.equal(reply.ok, true);
+    if (reply.ok) assert.deepEqual(reply.value.diagnostics, [warning]);
+    assert.doesNotMatch(JSON.stringify(reply), /SECRET/);
+  });
+}
+
 test("Agent rescan uses local status diagnostics and never calls credential or network-dependent services", async () => {
   const calls: string[] = [];
   const local = { code: "skill" as const, label: "Claude Code Skill" as const, target: "claude" as const,

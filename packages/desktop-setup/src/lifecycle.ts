@@ -55,7 +55,7 @@ export async function installDesktopIntegration(options: DesktopIntegrationOptio
     if (launcher) failed = await rollbackAll([launcher]) || failed;
     failure = !failed && isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : `INTEGRATION_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
-  const diagnostics = await disposeAll(operations, committed);
+  const diagnostics = await disposeAll([...(launcher ? [launcher] : []), ...operations], committed);
   if (!committed && diagnostics.length) failure = "INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED";
   if (failure) throw new Error(`桌面集成安装失败 [${failure}]`);
   return { ...result!, diagnostics };

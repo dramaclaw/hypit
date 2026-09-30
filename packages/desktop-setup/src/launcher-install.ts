@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, win32 } from "node:path";
 import { promisify } from "node:util";
 import type { DesktopPaths } from "./paths.js";
 import { exists } from "./skill-install.js";
 import type { PreparedRemoval } from "./skill-install.js";
+import type { DiagnosticItem } from "./contracts.js";
 
-export type UserPath = { readonly read: () => Promise<string>; readonly write: (value: string) => Promise<void> };
+export type UserPath = { readonly read: () => Promise<string>; readonly compareAndSet: (expected: string, value: string) => Promise<boolean> };
 export type LauncherOptions = {
   readonly paths: DesktopPaths;
   readonly platform: "darwin" | "win32";
@@ -42,7 +43,7 @@ export async function runWindowsPowerShell(script: string, encodedValue?: string
   return result.stdout;
 }
 
-/** Only HKCU is touched. Raw expandable values and their registry kind survive updates. */
+/** Only HKCU is touched. The mutex serializes our writers; unrelated registry editors do not participate. */
 export function createWindowsUserPath(run: RunPowerShell = runWindowsPowerShell): UserPath {
   return {
     async read() {
@@ -54,18 +55,34 @@ if ($null -ne $key) {
   finally { $key.Dispose() }
 }`);
     },
-    async write(value) {
-      await run(`$ErrorActionPreference='Stop'
-$value=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:HYPIT_USER_PATH_VALUE))
-$key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    async compareAndSet(expected, value) {
+      const result = await run(`$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$change=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:HYPIT_USER_PATH_VALUE)) | ConvertFrom-Json)
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$mutex=[Threading.Mutex]::new($false,('Local\\Hypit.UserPath.'+$sid))
+$locked=$false
 try {
-  $kind=[Microsoft.Win32.RegistryValueKind]::ExpandString
-  if ($null -ne $key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) { $kind=$key.GetValueKind('Path') }
-  $key.SetValue('Path',$value,$kind)
-} finally { $key.Dispose() }
+  try { $locked=$mutex.WaitOne(10000) } catch [Threading.AbandonedMutexException] { $locked=$true }
+  if (-not $locked) { throw 'PATH lock unavailable' }
+  $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+  try {
+    $kind=[Microsoft.Win32.RegistryValueKind]::ExpandString
+    if ($null -ne $key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) { $kind=$key.GetValueKind('Path') }
+    $current=[string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if (-not [string]::Equals($current,[string]$change.expected,[StringComparison]::Ordinal)) { [Console]::Write('mismatch'); return }
+    $key.SetValue('Path',[string]$change.value,$kind)
+    $observed=[string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if (-not [string]::Equals($observed,[string]$change.value,[StringComparison]::Ordinal)) { [Console]::Write('mismatch'); return }
+  } finally { $key.Dispose() }
+} finally { if ($locked) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class HypitEnvironment { [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result); }'
 $result=[UIntPtr]::Zero
-[void][HypitEnvironment]::SendMessageTimeout([IntPtr]0xffff,0x001a,[UIntPtr]::Zero,'Environment',2,5000,[ref]$result)`, Buffer.from(value).toString("base64"));
+[void][HypitEnvironment]::SendMessageTimeout([IntPtr]0xffff,0x001a,[UIntPtr]::Zero,'Environment',2,5000,[ref]$result)
+[Console]::Write('updated')`, Buffer.from(JSON.stringify({ expected, value })).toString("base64"));
+      if (result === "updated") return true;
+      if (result === "mismatch") return false;
+      throw new Error("Invalid PATH update result");
     },
   };
 }
@@ -82,12 +99,12 @@ export async function atomicFile(path: string, data: string | Buffer, mode = 0o6
   } finally { await unlink(temp).catch(() => {}); }
 }
 
-export type FileSnapshot = { readonly path: string; readonly bytes?: Buffer; readonly mode?: number };
+export type FileSnapshot = { readonly path: string; readonly bytes?: Buffer; readonly mode?: number; readonly ino?: number; readonly dev?: number };
 export async function snapshotFile(path: string): Promise<FileSnapshot> {
   if (!(await exists(path))) return { path };
   const info = await lstat(path);
   if (!info.isFile()) throw new Error("Expected a regular file");
-  return { path, bytes: await readFile(path), mode: info.mode & 0o777 };
+  return { path, bytes: await readFile(path), mode: info.mode & 0o777, ino: info.ino, dev: info.dev };
 }
 export async function restoreFiles(snapshots: readonly FileSnapshot[]): Promise<boolean> {
   let failed = false;
@@ -154,43 +171,118 @@ export function renderLauncher(options: LauncherOptions): string {
 
 function sameFile(left: FileSnapshot, right: FileSnapshot, platform: LauncherOptions["platform"]): boolean {
   return left.bytes === undefined ? right.bytes === undefined
-    : right.bytes !== undefined && left.bytes.equals(right.bytes) && (platform === "win32" || left.mode === right.mode);
+    : right.bytes !== undefined && left.bytes.equals(right.bytes) && (platform === "win32" || left.mode === right.mode)
+      && (left.ino === undefined || (left.ino === right.ino && left.dev === right.dev));
 }
 
-/** Journal only attempted mutations, using the content at their mutation boundary. */
+/** Rename retains whatever was present at the mutation boundary. Hard-link publication never replaces a new destination. */
+export function prepareFileChange(before: FileSnapshot, bytes: Buffer | undefined, platform: LauncherOptions["platform"],
+  mode = before.mode ?? 0o600, code: "launcher" | "profile" = "launcher"): PreparedRemoval {
+  let recovery: string | undefined;
+  let displaced: FileSnapshot | undefined;
+  let staged: FileSnapshot | undefined;
+  let withdrawn: FileSnapshot | undefined;
+  let published = false;
+  let moved = false;
+  let recoveryFailed = false;
+  const warning = (): DiagnosticItem[] => recovery ? [{ code, label: code === "profile" ? "Runtime Profile" : "命令入口",
+    status: "warning", reason: "CLEANUP_INCOMPLETE", path: recovery }] : [];
+  return {
+    async commit() {
+      await mkdir(dirname(before.path), { recursive: true });
+      recovery = await mkdtemp(`${before.path}.recovery-`);
+      if (process.platform !== "win32") await chmod(recovery, 0o700);
+      if (bytes !== undefined) {
+        await atomicFile(join(recovery, "staged"), bytes, mode);
+        staged = await snapshotFile(join(recovery, "staged"));
+      }
+      if (!sameFile(before, await snapshotFile(before.path), platform)) throw new Error("File changed before mutation");
+      if (before.bytes !== undefined) {
+        await rename(before.path, join(recovery, "displaced"));
+        moved = true;
+        displaced = await snapshotFile(join(recovery, "displaced"));
+        if (!sameFile(before, displaced, platform)) throw new Error("File changed during displacement");
+      }
+      if (staged) {
+        try { await link(staged.path, before.path); }
+        catch (error) {
+          // A newly appeared destination belongs to its creator. Retain the prepared output too.
+          if (await exists(before.path)) recoveryFailed = true;
+          throw error;
+        }
+        published = true;
+        if (!sameFile(staged, await snapshotFile(before.path), platform)) throw new Error("File changed during publication");
+      } else if (await exists(before.path)) throw new Error("File appeared during removal");
+    },
+    async rollback() {
+      const fail = () => { recoveryFailed = true; return true; };
+      if (!recovery) return false;
+      if (recoveryFailed) return true;
+      try {
+        if (published) {
+          if (!sameFile(staged!, await snapshotFile(before.path), platform)) return fail();
+          // Do not unlink after a check: preserve a replacement made inside the rename itself.
+          await rename(before.path, join(recovery, "withdrawn"));
+          withdrawn = await snapshotFile(join(recovery, "withdrawn"));
+          published = false;
+          if (!sameFile(staged!, withdrawn, platform)) {
+            await link(withdrawn.path, before.path);
+            return fail();
+          }
+        }
+        if (moved) {
+          if (!displaced || !sameFile(displaced, await snapshotFile(displaced.path), platform)) return fail();
+          await link(displaced.path, before.path);
+          moved = false;
+        }
+        return false;
+      } catch { return fail(); }
+    },
+    async dispose(committed) {
+      if (!recovery) return [];
+      if (recoveryFailed || (!committed && (published || moved))) return warning();
+      try {
+        if (committed && !sameFile(staged ?? { path: before.path }, await snapshotFile(before.path), platform)) return warning();
+        for (const snapshot of [displaced, staged, withdrawn]) {
+          if (snapshot && !sameFile(snapshot, await snapshotFile(snapshot.path), platform)) return warning();
+        }
+        for (const snapshot of [displaced, staged, withdrawn]) if (snapshot) await unlink(snapshot.path);
+        await rmdir(recovery);
+        return [];
+      } catch { return warning(); }
+    },
+  };
+}
+
+/** All mutations participate in the same ownership-aware commit/rollback lifecycle. */
 function launcherTransaction(userPath: UserPath, platform: LauncherOptions["platform"]) {
-  const changes: { before: FileSnapshot; after: FileSnapshot }[] = [];
+  const changes: PreparedRemoval[] = [];
   let pathChange: { before: string; after: string } | undefined;
   return {
     async file(before: FileSnapshot, bytes?: Buffer, mode = before.mode ?? 0o600) {
-      if (!sameFile(before, await snapshotFile(before.path), platform)) throw new Error("Launcher file changed before mutation");
-      changes.push({ before, after: { path: before.path, ...(bytes === undefined ? {} : { bytes, mode }) } });
-      if (bytes === undefined) { if (before.bytes !== undefined) await unlink(before.path); }
-      else await atomicFile(before.path, bytes, mode);
+      const change = prepareFileChange(before, bytes, platform, mode);
+      changes.push(change);
+      await change.commit();
     },
     async path(before: string, after: string) {
-      if (await userPath.read() !== before) throw new Error("User PATH changed before mutation");
       pathChange = { before, after };
-      await userPath.write(after);
+      if (!await userPath.compareAndSet(before, after)) { pathChange = undefined; throw new Error("User PATH changed before mutation"); }
     },
     async rollback() {
       let failed = false;
-      for (const { before, after } of [...changes].reverse()) {
-        try {
-          const current = await snapshotFile(before.path);
-          if (sameFile(before, current, platform)) continue;
-          if (!sameFile(after, current, platform)) { failed = true; continue; }
-          failed = await restoreFiles([before]) || failed;
-        } catch { failed = true; }
-      }
+      for (const change of [...changes].reverse()) failed = await change.rollback() || failed;
       if (pathChange) {
         try {
-          const current = await userPath.read();
-          if (current !== pathChange.after && current !== pathChange.before) failed = true;
-          else await userPath.write(pathChange.before);
+          if (!await userPath.compareAndSet(pathChange.after, pathChange.before)
+            && !await userPath.compareAndSet(pathChange.before, pathChange.before)) failed = true;
         } catch { failed = true; }
       }
       return failed;
+    },
+    async dispose(committed: boolean) {
+      const warnings: DiagnosticItem[] = [];
+      for (const change of [...changes].reverse()) warnings.push(...await change.dispose(committed));
+      return warnings;
     },
   };
 }
@@ -199,7 +291,7 @@ export async function prepareLauncherInstall(options: LauncherOptions): Promise<
   const snapshots: FileSnapshot[] = [];
   const userPath = options.userPath ?? windowsUserPath;
   const transaction = launcherTransaction(userPath, options.platform);
-  return { restartMessage: RESTART_MESSAGE, rollback: transaction.rollback, async dispose() { return []; }, async commit() {
+  return { restartMessage: RESTART_MESSAGE, rollback: transaction.rollback, dispose: transaction.dispose, async commit() {
     const text = renderLauncher(options);
     if (!(await lstat(options.electronExecutable)).isFile() || !(await lstat(options.cliEntry)).isFile()) throw new Error("Missing runtime");
     for (const path of launcherFiles(options)) snapshots.push(await snapshotFile(path));
@@ -231,13 +323,15 @@ export async function prepareLauncherInstall(options: LauncherOptions): Promise<
 
 export async function installLauncher(options: LauncherOptions): Promise<{ readonly restartMessage: string }> {
   const transaction = await prepareLauncherInstall(options);
+  let committed = false;
   try {
     await transaction.commit();
+    committed = true;
     return { restartMessage: RESTART_MESSAGE };
   } catch {
     const failed = await transaction.rollback();
     throw new Error(`命令入口安装失败 [LAUNCHER_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
-  }
+  } finally { await transaction.dispose(committed); }
 }
 
 export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<PreparedRemoval | undefined> {
@@ -272,7 +366,7 @@ export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "pat
         await transaction.file(snapshots[1]!);
       },
       rollback: transaction.rollback,
-      async dispose() { return []; },
+      dispose: transaction.dispose,
     };
   } catch {
     throw new Error("命令入口卸载失败 [LAUNCHER_REMOVE_FAILED]");

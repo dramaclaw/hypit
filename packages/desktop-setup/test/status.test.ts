@@ -239,7 +239,7 @@ test("profile committed then real integration failure reopens setup with failed 
 test("Windows status requires its managed launcher and user PATH entry", async (t) => {
   const f = await fixture(t);
   let path = "C:\\Existing Tools";
-  const options = { ...f, platform: "win32" as const, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+  const options = { ...f, platform: "win32" as const, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
   await writeFile(f.paths.profile, JSON.stringify(profile()));
   await installDesktopIntegration(options);
   assert.equal((await readDesktopStatus(options)).configured, true);
@@ -253,7 +253,7 @@ for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} status detects a bundle upgrade even while the previous integration is intact`, async (t) => {
     const f = await fixture(t);
     let path = "";
-    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(options);
     assert.equal((await readDesktopStatus({ ...options, installedVersion: "2" })).configured, false);
@@ -266,7 +266,7 @@ for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} status detects a moved app launcher even while the original target exists`, async (t) => {
     const f = await fixture(t);
     let path = "";
-    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(options);
     const electronExecutable = join(f.home, "moved-app", "electron");
@@ -280,7 +280,7 @@ for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} startup refresh upgrades and relocates integration without changing the saved profile`, async (t) => {
     const f = await fixture(t);
     let path = "original PATH";
-    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     const saved = JSON.stringify(profile());
     await writeFile(f.paths.profile, saved);
     await installDesktopIntegration(options);
@@ -304,7 +304,7 @@ for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} startup refresh repairs missing integration for an already valid profile`, async (t) => {
     const f = await fixture(t);
     let path = "";
-    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     assert.equal((await refreshDesktopStatus(options)).configured, true);
     await rm(f.paths.launcher);
@@ -316,7 +316,7 @@ for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} failed startup refresh rolls back launcher, Skill and PATH and reports incomplete`, async (t) => {
     const f = await fixture(t);
     let path = "original PATH";
-    const options = { ...f, platform, userPath: { read: async () => path, write: async (value: string) => { path = value; } } };
+    const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(options);
     const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER),

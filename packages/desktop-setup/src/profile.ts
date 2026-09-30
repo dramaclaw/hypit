@@ -2,8 +2,9 @@ import { newApiDefaultBindings } from "@dramaclaw/provider-newapi";
 import type { CanonicalValue } from "@hypit/protocol";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, posix, win32 } from "node:path";
-import { isManagedLauncherInstalled, snapshotFile } from "./launcher-install.js";
-import type { FileSnapshot, LauncherOptions } from "./launcher-install.js";
+import { isManagedLauncherInstalled, prepareFileChange, snapshotFile } from "./launcher-install.js";
+import type { LauncherOptions } from "./launcher-install.js";
+import type { PreparedRemoval } from "./skill-install.js";
 
 const mediaFields = ["ffmpegPath", "ffprobePath"] as const;
 function mediaConfigs(profile: { endpoints?: Record<string, { config?: Record<string, unknown> }> }): Record<string, unknown>[] {
@@ -23,7 +24,7 @@ export async function desktopMediaAvailable(profilePath: string): Promise<boolea
 }
 
 /** Claim old media paths only when they reproduce the complete, intact managed launcher. */
-export async function prepareDesktopMediaRefresh(options: LauncherOptions): Promise<{ snapshot: FileSnapshot; content: string } | undefined> {
+export async function prepareDesktopMediaRefresh(options: LauncherOptions): Promise<PreparedRemoval | undefined> {
   if (!options.bundledBin) return undefined;
   const snapshot = await snapshotFile(options.paths.profile);
   if (!snapshot.bytes) return undefined;
@@ -48,7 +49,7 @@ export async function prepareDesktopMediaRefresh(options: LauncherOptions): Prom
       changed = true;
     }
   }
-  return changed ? { snapshot, content: `${JSON.stringify(profile, null, 2)}\n` } : undefined;
+  return changed ? prepareFileChange(snapshot, Buffer.from(`${JSON.stringify(profile, null, 2)}\n`), options.platform, snapshot.mode, "profile") : undefined;
 }
 
 /** Accepts the secret-free endpoint config returned by completeNewApiSetup. */
