@@ -235,6 +235,48 @@ test("commit refuses changed content after backup staging", async (t) => {
   await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
 });
 
+test("outer rollback preserves a committed Skill edited afterward", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  const prepared = await prepareSkillInstall({ ...f, installedVersion: "2" });
+  await prepared.commit();
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user edit after commit");
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edit after commit");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "original user copy");
+});
+
+test("outer rollback preserves a replacement at a freshly committed path", async (t) => {
+  const f = await fixture(t);
+  const prepared = await prepareSkillInstall(f);
+  await prepared.commit();
+  await rm(f.portable.skillDirectory, { recursive: true });
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "replacement");
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "replacement");
+});
+
+test("removal commit preserves a backup changed after preparation", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  const prepared = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(prepared);
+  await writeFile(join(f.portable.backupDirectory, "SKILL.md"), "changed user backup");
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "changed user backup");
+  assert.deepEqual(await readdir(dirname(f.portable.skillDirectory)), ["hypit"]);
+});
+
 test("the legacy bridge uses exact Codex fields instead of mutable aliases", async (t) => {
   const f = await fixture(t);
   const paths = { ...f.paths, skill: join(dirname(f.paths.skill), "wrong"),

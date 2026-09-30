@@ -139,6 +139,7 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
   let moved = false;
   let backupCreated = false;
   let committed = false;
+  let committedSnapshot: TreeSnapshot | undefined;
   let prepared = false;
   try {
     if (!options.installedVersion || await exists(join(options.sourceDirectory, SKILL_MARKER))) throw new Error("Invalid source");
@@ -183,11 +184,19 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
         if (await exists(target.skillDirectory)) throw new Error("Skill appeared during commit");
         await rename(stage, target.skillDirectory);
         committed = true;
+        committedSnapshot = await snapshotTree(target.skillDirectory);
+        if (!committedSnapshot) throw new Error("Committed Skill disappeared");
       },
       async rollback() {
         try {
           if (committed) {
+            if (!committedSnapshot || !sameSnapshot(committedSnapshot, await snapshotTree(target.skillDirectory))
+              || await exists(stage)) return true;
             await rename(target.skillDirectory, stage);
+            if (!sameSnapshot(committedSnapshot, await snapshotTree(stage))) {
+              if (!(await exists(target.skillDirectory))) await rename(stage, target.skillDirectory).catch(() => {});
+              return true;
+            }
             committed = false;
           }
           if (moved) { await rename(previous, target.skillDirectory); moved = false; }
@@ -247,14 +256,20 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
     const liveSnapshot = await snapshotTree(target.skillDirectory);
     const marker = await markerAt(target);
     if (!marker) return undefined;
+    let backupSnapshot: TreeSnapshot | undefined;
     if (marker.backupDirectory !== undefined) {
-      if (!(await exists(target.backupDirectory))) throw new Error("Invalid backup");
+      backupSnapshot = await snapshotTree(target.backupDirectory);
+      if (!backupSnapshot) throw new Error("Invalid backup");
       await cp(target.backupDirectory, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
+      if ((await snapshotTree(restoreStage))?.digest !== backupSnapshot.digest
+        || !sameSnapshot(backupSnapshot, await snapshotTree(target.backupDirectory))) throw new Error("Backup changed during removal preparation");
     }
     if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed during removal preparation");
     return {
       async commit() {
         if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before removal commit");
+        if (backupSnapshot && !sameSnapshot(backupSnapshot, await snapshotTree(target.backupDirectory)))
+          throw new Error("Backup changed before removal commit");
         await rename(target.skillDirectory, previous);
         moved = true;
         if (!sameSnapshot(liveSnapshot, await snapshotTree(previous))) throw new Error("Skill changed during removal commit");
