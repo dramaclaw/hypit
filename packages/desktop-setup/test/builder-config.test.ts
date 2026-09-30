@@ -7,6 +7,22 @@ import { parse } from "yaml";
 import { loadScript } from "./resource-fixtures.js";
 
 const root = new URL("../", import.meta.url);
+test("uv lock pins official 0.12.20 assets and licenses for exactly the desktop targets", async () => {
+  const lock = JSON.parse(await readFile(new URL("uv-lock.json", root), "utf8"));
+  assert.equal(lock.name, "astral-sh/uv"); assert.equal(lock.version, "0.12.20"); assert.equal(lock.license, "MIT OR Apache-2.0");
+  assert.deepEqual(Object.keys(lock.targets).sort(), ["darwin-arm64", "win32-x64"]);
+  const expected = {
+    "darwin-arm64": ["uv-aarch64-apple-darwin.tar.gz", "uv-aarch64-apple-darwin/uv", "848fdeb602ff1a1baacd4f6c8b7bdc6cf1ad026a6d9cf59475fda17c179743ca"],
+    "win32-x64": ["uv-x86_64-pc-windows-msvc.zip", "uv.exe", "95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06"],
+  };
+  for (const [key, [archive, entry, checksum]] of Object.entries(expected)) {
+    assert.equal(lock.targets[key].url, `https://github.com/astral-sh/uv/releases/download/0.12.20/${archive}`);
+    assert.equal(lock.targets[key].entry, entry); assert.equal(lock.targets[key].archiveSha256, checksum);
+    assert.match(lock.targets[key].sha256, /^[a-f0-9]{64}$/); assert.ok(lock.targets[key].bytes > 0);
+  }
+  assert.match(await readFile(new URL("uv-licenses/LICENSE-APACHE", root), "utf8"), /Apache License/);
+  assert.match(await readFile(new URL("uv-licenses/LICENSE-MIT", root), "utf8"), /Permission is hereby granted/);
+});
 test("internal installers use explicit architectures and per-user unsigned settings", async () => {
   const config = parse(await readFile(new URL("electron-builder.yml", root), "utf8"));
   const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));

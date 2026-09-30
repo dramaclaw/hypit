@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "name": "astral-sh/uv",
+  "version": "0.12.20",
+  "license": "MIT OR Apache-2.0",
+  "targets": {
+    "darwin-arm64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-aarch64-apple-darwin.tar.gz",
+      "archiveSha256": "848fdeb602ff1a1baacd4f6c8b7bdc6cf1ad026a6d9cf59475fda17c179743ca",
+      "members": ["uv-aarch64-apple-darwin/", "uv-aarch64-apple-darwin/uv", "uv-aarch64-apple-darwin/uvx"],
+      "entry": "uv-aarch64-apple-darwin/uv",
+      "sha256": "2dd23b7aaf10b3d709beb3fcfe6d9cc456136f0dbd0f4b0ebd4f44d4a6a299ee",
+      "bytes": 37311088
+    },
+    "win32-x64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06",
+      "members": ["uv.exe", "uvw.exe", "uvx.exe"],
+      "entry": "uv.exe",
+      "sha256": "a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73",
+      "bytes": 42547504
+    }
+  }
+}

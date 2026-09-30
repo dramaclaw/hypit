@@ -6,33 +6,25 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { extract, list } from "tar";
 import { unzipSync } from "fflate";
-import { assertSafePath, checkArtifact, checkMediaBinary, checkoutRoot, cliOptions, digest, distributionPath, inventory, knownDependencyFixtures, knownProfiles, readMediaLock, readRuntimeLock, resourceDigests, targetFor } from "./check-artifact.mjs";
+import { assertSafePath, checkArtifact, checkMediaBinary, checkUvBinary, checkoutRoot, cliOptions, digest, distributionPath, inventory, knownDependencyFixtures, knownProfiles, readMediaLock, readRuntimeLock, readUvLock, resourceDigests, targetFor } from "./check-artifact.mjs";
 
 const exec = promisify(execFile);
 
-async function lockedMedia(sourceRoot, release, target, tool) {
-  const item = release[tool];
-  const cache = join(sourceRoot, "packages/desktop-setup/node_modules/.cache/hypit-media");
+async function cachedBinary(sourceRoot, kind, item, decode, check) {
+  const cache = join(sourceRoot, "packages/desktop-setup/node_modules/.cache", `hypit-${kind.toLowerCase()}`);
   const path = join(cache, item.sha256);
   const info = await lstat(path).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-  if (info && !info.isFile()) throw new Error("Media cache must contain regular files");
+  if (info && !info.isFile()) throw new Error(`${kind} cache must contain regular files`);
   let bytes;
   if (info) bytes = await readFile(path);
   else {
     const response = await fetch(item.url, { signal: AbortSignal.timeout(120_000) });
-    if (!response.ok) throw new Error(`Media download failed: ${response.status}`);
+    if (!response.ok) throw new Error(`${kind} download failed: ${response.status}`);
     const download = Buffer.from(await response.arrayBuffer());
-    if (item.entry) {
-      assert.equal(digest(download).sha256, item.archiveSha256, "Media archive integrity mismatch");
-      // Decode only the locked member into memory; never extract archive paths
-      // to the filesystem (other tools, docs, links and traversal are ignored).
-      const entries = unzipSync(download, { filter: file => file.name === item.entry });
-      assert.deepEqual(Object.keys(entries), [item.entry], "Missing locked media archive member");
-      bytes = Buffer.from(entries[item.entry]);
-    } else bytes = download;
+    bytes = decode(download);
   }
-  assert.deepEqual(digest(bytes), { sha256: item.sha256, bytes: item.bytes }, "Media binary integrity mismatch");
-  checkMediaBinary(bytes, target, tool);
+  assert.deepEqual(digest(bytes), { sha256: item.sha256, bytes: item.bytes }, `${kind} binary integrity mismatch`);
+  check(bytes);
   if (!info) {
     await mkdir(cache, { recursive: true });
     const temporary = await mkdtemp(join(cache, ".download-"));
@@ -40,6 +32,49 @@ async function lockedMedia(sourceRoot, release, target, tool) {
     finally { await rm(temporary, { recursive: true, force: true }); }
   }
   return bytes;
+}
+
+async function lockedMedia(sourceRoot, release, target, tool) {
+  const item = release[tool];
+  return cachedBinary(sourceRoot, "Media", item, download => {
+    if (!item.entry) return download;
+    assert.equal(digest(download).sha256, item.archiveSha256, "Media archive integrity mismatch");
+    const entries = unzipSync(download, { filter: file => file.name === item.entry });
+    assert.deepEqual(Object.keys(entries), [item.entry], "Missing locked media archive member");
+    return Buffer.from(entries[item.entry]);
+  }, bytes => checkMediaBinary(bytes, target, tool));
+}
+
+export async function lockedUv(sourceRoot, item, target) {
+  return cachedBinary(sourceRoot, "uv", item, download => {
+    assert.equal(digest(download).sha256, item.archiveSha256, "uv archive integrity mismatch");
+    assertSafePath(item.entry);
+    const seen = [];
+    const visit = path => { assertSafePath(path.replace(/\/$/, "")); seen.push(path); };
+    let entries;
+    if (target.platform === "win32") {
+      entries = unzipSync(download, { filter: file => {
+        visit(file.name);
+        return file.name === item.entry;
+      } });
+    } else {
+      entries = {};
+      list({ sync: true, strict: true, onReadEntry(entry) {
+        visit(entry.path);
+        assert.equal(entry.type, entry.path.endsWith("/") ? "Directory" : "File", "Forbidden uv archive member type");
+        if (entry.path === item.entry) {
+          const chunks = [];
+          entry.on("data", chunk => chunks.push(chunk));
+          entry.on("end", () => { entries[entry.path] = Buffer.concat(chunks); });
+        }
+      } }).end(download);
+    }
+    // Lock the complete inventory (including sibling launchers), but retain
+    // only uv in memory. No archive path is ever written to the filesystem.
+    assert.deepEqual(seen.sort(), [...item.members].sort(), "Unexpected uv archive members");
+    assert.deepEqual(Object.keys(entries), [item.entry], "Missing locked uv archive member");
+    return Buffer.from(entries[item.entry]);
+  }, bytes => checkUvBinary(bytes, target));
 }
 
 export function validateTarball(bytes, targetPlatform, hostPlatform = process.platform) {
@@ -102,7 +137,7 @@ async function npmCliPath() {
   throw new Error("npm CLI not found; run through npm or install npm alongside Node.js");
 }
 
-export async function prepareResources({ platform, arch, hypitTgz, out, checkoutRoot: sourceRoot = checkoutRoot }) {
+export async function prepareResources({ platform, arch, hypitTgz, out, checkoutRoot: sourceRoot = checkoutRoot, executeUv }) {
   const target = targetFor({ platform, arch });
   const output = resolve(out);
   if (await lstat(output).catch(error => { if (error.code === "ENOENT") return null; throw error; })) throw new Error(`Output already exists: ${output}`);
@@ -114,6 +149,10 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
   const release = media.lock.targets[`${platform}-${arch}`];
   const executable = await lockedMedia(sourceRoot, release, target, "ffmpeg");
   const probeExecutable = await lockedMedia(sourceRoot, release, target, "ffprobe");
+  const uv = await readUvLock(sourceRoot);
+  const uvExecutable = await lockedUv(sourceRoot, uv.lock.targets[`${platform}-${arch}`], target);
+  const uvNotices = await inventory(join(sourceRoot, "packages/desktop-setup/uv-licenses"));
+  assert.ok(uvNotices["LICENSE-APACHE"] && uvNotices["LICENSE-MIT"], "uv license notices required");
   // Validate the entire source Skill before copying anything, including links.
   await inventory(join(sourceRoot, "skills/hypit"));
   await mkdir(dirname(output), { recursive: true });
@@ -154,12 +193,15 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await chmod(join(stage, "bin", target.executable), 0o755);
     await writeFile(join(stage, "bin", target.probe.executable), probeExecutable);
     await chmod(join(stage, "bin", target.probe.executable), 0o755);
+    await writeFile(join(stage, "bin", target.uv.executable), uvExecutable);
+    await chmod(join(stage, "bin", target.uv.executable), 0o755);
     await cp(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`), join(stage, "licenses"), { recursive: true, dereference: false });
+    await cp(join(sourceRoot, "packages/desktop-setup/uv-licenses"), join(stage, "licenses/uv"), { recursive: true, dereference: false });
     const files = await inventory(stage, { target, allowBinLinks: true });
     const installed = JSON.parse(await readFile(join(stage, distributionPath, "package.json"), "utf8"));
-    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, runtimeLock: runtimeLock.digests, mediaLock: media.digest, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
+    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, uv: { name: target.uv.name, version: target.uv.version, ...digest(uvExecutable) }, runtimeLock: runtimeLock.digests, mediaLock: media.digest, uvLock: uv.digest, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
     await writeFile(join(stage, "resource-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-    await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot });
+    await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot, executeUv });
     await rename(stage, output);
     return manifest;
   } finally { await rm(stage, { recursive: true, force: true }); }

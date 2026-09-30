@@ -44,15 +44,29 @@ export async function fixture(extra: Record<string, string> = {}) {
   await put(source, "packages/desktop-setup/runtime-lock/package.json", JSON.stringify(runtime));
   await put(source, "packages/desktop-setup/runtime-lock/package-lock.json", JSON.stringify({ name: runtime.name, version: runtime.version, lockfileVersion: 3, packages: { "": runtime } }));
   const mediaLock = JSON.parse(await readFile(join(checkout, "packages/desktop-setup/media-lock.json"), "utf8"));
+  const uvLock: any = { schemaVersion: 1, name: "astral-sh/uv", version: "0.12.20", license: "MIT OR Apache-2.0", targets: {} };
   for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
     const bytes = executable(platform);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     for (const tool of ["ffmpeg", "ffprobe"]) mediaLock.targets[`${platform}-${arch}`][tool] = { url: `https://example.invalid/${tool}`, sha256, bytes: bytes.length };
     await put(source, `packages/desktop-setup/node_modules/.cache/hypit-media/${sha256}`, bytes);
     for (const name of ["COPYING", "SOURCES.md", "VERSIONS.txt"]) await put(source, `packages/desktop-setup/media-licenses/${platform}-${arch}/${name}`, `Fixture ${name}`);
+    const archive = platform === "darwin" ? "uv-aarch64-apple-darwin.tar.gz" : "uv-x86_64-pc-windows-msvc.zip";
+    uvLock.targets[`${platform}-${arch}`] = {
+      url: `https://github.com/astral-sh/uv/releases/download/0.12.20/${archive}`,
+      entry: platform === "darwin" ? "uv-aarch64-apple-darwin/uv" : "uv.exe",
+      members: platform === "darwin" ? ["uv-aarch64-apple-darwin/", "uv-aarch64-apple-darwin/uv", "uv-aarch64-apple-darwin/uvx"] : ["uv.exe", "uvw.exe", "uvx.exe"],
+      archiveSha256: "1".repeat(64), sha256, bytes: bytes.length,
+    };
+    await put(source, `packages/desktop-setup/node_modules/.cache/hypit-uv/${sha256}`, bytes);
   }
+  await put(source, "packages/desktop-setup/uv-lock.json", JSON.stringify(uvLock));
+  for (const name of ["LICENSE-APACHE", "LICENSE-MIT"]) await put(source, `packages/desktop-setup/uv-licenses/${name}`, `Fixture ${name}`);
   await put(source, "packages/desktop-setup/media-lock.json", JSON.stringify(mediaLock));
-  return { root, checkoutRoot: source, hypitTgz: tarball, out: join(root, "out"), source };
+  // Fake only the external process: archive, binary header, hash, inventory and
+  // artifact validation remain real. Fixtures are deliberately tiny executables.
+  const executeUv = async () => ({ stdout: "uv 0.12.20 (fixture)\n", stderr: "" });
+  return { root, checkoutRoot: source, hypitTgz: tarball, out: join(root, "out"), source, executeUv };
 }
 export async function manifest(out: string) {
   return JSON.parse(await readFile(join(out, "resource-manifest.json"), "utf8"));
