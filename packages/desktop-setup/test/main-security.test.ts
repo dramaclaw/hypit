@@ -5,8 +5,9 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import { execFileSync } from "node:child_process";
-import { browserWindowOptions, createSetupController, isTrustedSender, localPageUrl, serializeFailure, validateIpcArguments, hardenWebContents } from "../src/main.js";
+import { browserWindowOptions, createSetupController, isTrustedSender, localPageUrl, serializeFailure, validateIpcArguments, hardenWebContents, rescanIntegrationTargets } from "../src/main.js";
 import { IPC_CHANNELS } from "../src/ipc.js";
+import { desktopPaths } from "../src/paths.js";
 import type { SetupInput, SetupResult } from "../src/contracts.js";
 
 const input: SetupInput = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", relay: { enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" } };
@@ -22,16 +23,53 @@ test("window uses isolated sandbox with no Node or webview and only absolute loc
 });
 
 test("IPC channels are closed and arguments cannot smuggle keys or invalid values", () => {
-  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:remove-integration", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe"].sort());
+  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:remove-integration", "setup:refresh-agents", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe"].sort());
   assert.deepEqual(validateIpcArguments("setup:submit", [input]), input);
   for (const invalid of [{ ...input, extra: true }, { ...input, apiKey: "" }, { ...input, relay: { ...input.relay, extra: true } }, { ...input, relay: { enabled: false } }, { ...input, baseUrl: "https://key:secret@api.example" }, { ...input, baseUrl: "https://api.example?apiKey=secret" }]) {
     assert.throws(() => validateIpcArguments("setup:submit", [invalid]));
   }
-  for (const channel of ["setup:status", "setup:diagnostics", "setup:open-config", "setup:clear", "setup:remove-integration", "setup:subscribe", "setup:unsubscribe"] as const) {
+  for (const channel of ["setup:status", "setup:diagnostics", "setup:open-config", "setup:clear", "setup:remove-integration", "setup:refresh-agents", "setup:subscribe", "setup:unsubscribe"] as const) {
     assert.equal(validateIpcArguments(channel, []), undefined);
     assert.throws(() => validateIpcArguments(channel, ["/arbitrary/path"]));
   }
+  assert.equal(validateIpcArguments(IPC_CHANNELS.refreshAgents, []), undefined);
+  assert.throws(() => validateIpcArguments(IPC_CHANNELS.refreshAgents, [{ apiKey: "SECRET" }]));
   assert.throws(() => validateIpcArguments("arbitrary", []));
+});
+
+test("Agent refresh joins the controller queue and returns projected status plus diagnostics", async () => {
+  const calls: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const controller = createSetupController({
+    getStatus: async () => { calls.push("status"); return result; },
+    commit: async () => { calls.push("commit"); await gate; return result; },
+    install: async () => { calls.push("install"); },
+    refreshAgents: async () => { calls.push("refresh"); },
+    diagnose: async () => { calls.push("diagnose"); return [{ code: "launcher", label: "命令入口", status: "pass" }]; },
+    openConfig: async () => {}, clear: async () => result,
+  });
+  const progress: string[] = [];
+  controller.subscribe(value => { if (value.kind === "stage") progress.push(value.stage); });
+  const submit = controller.submit(input);
+  const refresh = controller.refreshAgentIntegration();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ["commit"]);
+  release();
+  await submit;
+  assert.deepEqual(await refresh, { ok: true, value: { ...result, diagnostics: [{ code: "launcher", label: "命令入口", status: "pass" }] } });
+  assert.deepEqual(calls, ["commit", "install", "diagnose", "refresh", "status", "diagnose"]);
+  assert.deepEqual(progress.slice(-2), ["installing-skill", "diagnosing"]);
+});
+
+test("rescan retains a still-managed Claude target after Claude is no longer detected", async () => {
+  const paths = desktopPaths({ platform: "darwin", home: "/tmp/agent-home", appData: "/tmp/agent-data" });
+  const targets = await rescanIntegrationTargets(paths,
+    async () => ({ detectedAgents: ["codex"], targets: [{ id: "portable", label: "通用 Agent Skill", skillDirectory: paths.portableSkill,
+      backupDirectory: paths.portableSkillBackup, required: true, detectedAgents: ["codex"] }] }),
+    async target => target.id === "claude");
+  assert.deepEqual(targets.map(target => target.id), ["portable", "claude"]);
+  assert.deepEqual(targets[1]?.detectedAgents, []);
 });
 
 test("sender must be the exact window main frame at the bundled URL", () => {
@@ -303,7 +341,10 @@ test("CJS shell boots without import.meta and stages the Windows credential help
   runInNewContext(await readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8"), { require: (name: string) => {
     assert.equal(name, "electron"); return { ipcRenderer: renderer, contextBridge: { exposeInMainWorld: (name: string, bridge: unknown) => { assert.equal(name, "hypitSetup"); exposed = bridge; } } };
   } });
-  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "onProgress", "openConfigDirectory", "removeIntegration", "rerunDiagnostics", "submit"]);
+  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "onProgress", "openConfigDirectory", "refreshAgentIntegration", "removeIntegration", "rerunDiagnostics", "submit"]);
+  await exposed.refreshAgentIntegration();
+  assert.deepEqual(calls, [["setup:refresh-agents"]]);
+  calls.length = 0;
   let received = 0;
   const first = exposed.onProgress(() => { received++; });
   const second = exposed.onProgress(() => { received++; });

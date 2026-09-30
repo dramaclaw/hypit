@@ -99,7 +99,7 @@ test("macOS PATH block is idempotent and uninstall preserves unrelated shell byt
   const original = "# 用户配置\nexport SOMETHING='keep'";
   await writeFile(profile, original);
   const result = await installLauncher(f);
-  assert.match(result.restartMessage, /Codex.*Terminal/);
+  assert.equal(result.restartMessage, "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。");
   const installed = await readFile(profile, "utf8");
   await installLauncher(f);
   assert.equal(await readFile(profile, "utf8"), installed);

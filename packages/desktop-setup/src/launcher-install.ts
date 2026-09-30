@@ -24,7 +24,7 @@ type LauncherState = {
   readonly pathEntry: string;
   readonly zprofileBlock?: string;
 };
-export const RESTART_MESSAGE = "请重启 Codex 和 Terminal，再测试 hypit 命令是否可用。";
+export const RESTART_MESSAGE = "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。";
 const digest = (content: string) => createHash("sha256").update(content).digest("hex");
 const quote = (path: string) => `"${path.replace(/[\\"$`]/gu, "\\$&")}"`;
 const pathBlock = (path: string) => `# >>> hypit.desktop-managed@1 >>>\nexport PATH=${quote(path)}:"$PATH"\n# <<< hypit.desktop-managed@1 <<<\n`;

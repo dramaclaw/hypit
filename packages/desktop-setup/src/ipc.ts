@@ -5,6 +5,7 @@ export const IPC_CHANNELS = Object.freeze({
   openConfig: "setup:open-config", clear: "setup:clear", progress: "setup:progress",
   subscribe: "setup:subscribe", unsubscribe: "setup:unsubscribe",
   removeIntegration: "setup:remove-integration",
+  refreshAgents: "setup:refresh-agents",
 } as const);
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
 export type SetupFailure = { readonly code: string; readonly message: string; readonly cleanupObjectKey?: string };
@@ -16,5 +17,6 @@ export type SetupBridge = {
   readonly openConfigDirectory: () => Promise<SetupReply<void>>;
   readonly clearConfiguration: () => Promise<SetupReply<SetupResult>>;
   readonly removeIntegration: () => Promise<SetupReply<SetupResult>>;
+  readonly refreshAgentIntegration: () => Promise<SetupReply<SetupResult>>;
   readonly onProgress: (listener: (progress: SetupProgress) => void) => () => void;
 };

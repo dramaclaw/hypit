@@ -4,8 +4,8 @@ import type { SetupBridge, SetupFailure } from "./ipc.js";
 export const EXAMPLE_PROMPT = "请使用 $hypit，把我的参考视频改编成新版本；使用本机已配置的 NewAPI 和 OSS。";
 export const stageCopy: Readonly<Record<SetupStage, string>> = {
   validating: "正在检查配置", "testing-newapi": "正在测试 NewAPI", "testing-oss": "正在测试 OSS 上传、下载与清理",
-  "saving-credentials": "正在保存平台凭据", "writing-profile": "正在写入运行配置", "installing-skill": "正在安装 Codex Skill",
-  "installing-launcher": "正在安装命令入口与 Codex Skill", diagnosing: "正在检查安装结果", complete: "配置完成",
+  "saving-credentials": "正在保存平台凭据", "writing-profile": "正在写入运行配置", "installing-skill": "正在安装 Agent Skill",
+  "installing-launcher": "正在安装命令入口与 Agent Skill", diagnosing: "正在检查安装结果", complete: "配置完成",
 };
 type Fields = { baseUrl: string; apiKey: string; endpoint: string; bucket: string; accessKeyId: string; accessKeySecret: string };
 type SecretField = "apiKey" | "accessKeyId" | "accessKeySecret";
@@ -20,13 +20,14 @@ export type WizardState = {
   readonly returnScreen: "settings" | "complete";
 };
 export type WizardAction =
-  | { type: "begin" | "working" | "edit" | "confirm-clear" | "cancel-clear" }
+  | { type: "begin" | "working" | "refresh-agents" | "edit" | "confirm-clear" | "cancel-clear" }
   | { type: "field"; field: keyof Fields; value: string }
   | { type: "toggle-secret"; field: SecretField }
   | { type: "progress"; progress: SetupProgress }
   | { type: "success"; result: SetupResult }
   | { type: "failure"; error: SetupFailure };
 type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" | "remove-integration" };
+const agentLabels = { codex: "Codex", "claymore-piko": "Claymore Piko", cursor: "Cursor", "claude-code": "Claude Code" } as const;
 const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId: false, accessKeySecret: false });
 
 function resumableAddress(value: unknown, bare = false): string {
@@ -56,7 +57,7 @@ export function canSubmit(state: WizardState): boolean {
 }
 
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
-  if (state.screen === "working" && ["field", "toggle-secret", "begin", "edit", "confirm-clear", "cancel-clear"].includes(action.type)) return state;
+  if (state.screen === "working" && ["field", "toggle-secret", "begin", "edit", "confirm-clear", "cancel-clear", "refresh-agents"].includes(action.type)) return state;
   switch (action.type) {
     case "begin": case "edit": return { ...state, screen: "settings", confirmClear: false };
     case "field": return { ...state, fields: { ...state.fields, [action.field]: action.value } };
@@ -64,6 +65,12 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "working": {
       const { error: _error, ...rest } = state;
       return { ...rest, screen: "working", stage: "validating", confirmClear: false, visible: hidden(), returnScreen: state.screen === "complete" ? "complete" : "settings" };
+    }
+    case "refresh-agents": {
+      const { error: _error, ...rest } = state;
+      return { ...rest, screen: "working", stage: "installing-skill", confirmClear: false, visible: hidden(),
+        fields: { ...state.fields, apiKey: "", accessKeyId: "", accessKeySecret: "" },
+        returnScreen: state.screen === "complete" ? "complete" : "settings" };
     }
     case "progress": return action.progress.kind === "stage" ? { ...state, stage: action.progress.stage } : state;
     case "success": {
@@ -83,7 +90,7 @@ export function setupInput(state: WizardState): SetupInput {
 }
 
 /** DOM text and properties only: no user, server or error text is parsed as HTML. */
-export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (action: UiAction) => void): void {
+export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (action: UiAction) => void, pending = false): void {
   const document = root.ownerDocument;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] => {
     const element = document.createElement(tag);
@@ -93,6 +100,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   };
   const button = (text: string, action: UiAction, className = "secondary") => {
     const element = node("button", text, className); element.type = "button";
+    element.disabled = pending || state.screen === "working";
     element.addEventListener("click", () => { dispatch(action); });
     return element;
   };
@@ -131,6 +139,18 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     }
     panel.append(diagnostics);
   };
+  const appendAgentTargets = () => {
+    if (!state.result) return;
+    panel.append(node("h2", "Agent Skill 安装目标"));
+    const targets = node("ul", undefined, "diagnostics");
+    for (const target of state.result.skillTargets) {
+      const line = node("li"); line.setAttribute("data-agent-target", target.id);
+      line.append(node("strong", target.label), node("span", target.detectedAgents.length
+        ? target.detectedAgents.map(agent => agentLabels[agent]).join("、") : "未检测到对应 Agent"), node("code", target.path));
+      targets.append(line);
+    }
+    panel.append(targets);
+  };
   const appendMaintenance = () => {
     panel.append(button("卸载本机集成…", { type: "remove-integration" }, "text-button"), node("p", "移除命令入口、托管 Skill 和 PATH 配置；配置、凭据和视频项目会保留。卸载后可将应用移到废纸篓。", "muted"));
   };
@@ -141,10 +161,10 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     panel.append(warning);
   }
   if (state.screen === "welcome") {
-    panel.append(node("p", "让 Codex 开始制作视频", "eyebrow"), node("h1", "在这台电脑上\n准备好 Hypit"),
-      node("p", "连接你的 NewAPI 和 OSS，安装视频命令与 Codex Skill。完成后，可以直接用中文描述想做的视频。", "intro"));
+    panel.append(node("p", "Agent 视频工作流", "eyebrow"), node("h1", "为你的 AI Agent 准备 Hypit"),
+      node("p", "连接你的 NewAPI 和 OSS，安装视频命令与 Agent Skill。完成后，可以在已支持的 Agent 中直接用中文描述想做的视频。", "intro"));
     const summary = node("ul", undefined, "summary");
-    ["NewAPI：连接你已有的模型服务", "OSS：验证视频素材的上传与下载", "本机：安装命令入口与 Codex Skill"].forEach((text) => summary.append(node("li", text)));
+    ["NewAPI：连接你已有的模型服务", "OSS：验证视频素材的上传与下载", "本机：安装命令入口与 Agent Skill"].forEach((text) => summary.append(node("li", text)));
     panel.append(summary, node("p", "API Key 与 OSS 密钥将保存在系统凭据库。请准备好六项配置。", "muted"), button("开始配置", { type: "begin" }, "primary"));
     return;
   }
@@ -154,6 +174,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
       panel.append(node("h2", "安装尚未完成"), node("p", "请检查以下未完成项目，重新填写配置并测试安装。已保存的 Profile 不代表命令入口与 Skill 已安装。", "muted"));
       appendDiagnostics();
     }
+    if (state.result) appendAgentTargets();
     const form = node("form");
     const labels: Record<keyof Fields, string> = { baseUrl: "NewAPI 地址", apiKey: "NewAPI API Key", endpoint: "OSS Endpoint", bucket: "OSS Bucket", accessKeyId: "OSS AccessKey ID", accessKeySecret: "OSS AccessKey Secret" };
     const placeholders: Partial<Record<keyof Fields, string>> = { baseUrl: "https://newapi.example.com", endpoint: "oss-cn-hangzhou.aliyuncs.com", bucket: "my-video-bucket" };
@@ -164,7 +185,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
       const input = node("input"); input.id = field; input.name = field; input.setAttribute("required", ""); input.maxLength = 8192;
       const secret = ["apiKey", "accessKeyId", "accessKeySecret"].includes(field);
       input.type = secret && !state.visible[field as SecretField] ? "password" : "text";
-      input.value = state.fields[field]; input.autocomplete = "off"; input.spellcheck = false;
+      input.value = state.fields[field]; input.disabled = pending; input.autocomplete = "off"; input.spellcheck = false;
       input.setAttribute("autocapitalize", "none");
       input.placeholder = placeholders[field] ?? "请输入";
       input.addEventListener("input", () => { dispatch({ type: "field", field, value: input.value }); });
@@ -180,11 +201,11 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
       form.append(row);
     }
     form.append(node("p", "仅地址、Endpoint 和 Bucket 可恢复。关闭向导后，密钥需要重新填写。", "muted"));
-    const submit = node("button", state.error ? "重新测试并安装" : "测试连接并安装", "primary"); submit.type = "submit"; submit.id = "submit-setup"; submit.disabled = !canSubmit(state);
+    const submit = node("button", state.error ? "重新测试并安装" : "测试连接并安装", "primary"); submit.type = "submit"; submit.id = "submit-setup"; submit.disabled = pending || !canSubmit(state);
     form.addEventListener("submit", (event) => { event.preventDefault(); dispatch({ type: "submit" }); });
     form.append(submit); panel.append(form);
     if (state.result) {
-      panel.append(button("重新运行诊断", { type: "diagnostics" }), button("清除本机配置和凭据…", { type: "clear" }, "text-button"));
+      panel.append(button("重新扫描 Agent", { type: "refresh-agents" }), button("重新运行诊断", { type: "diagnostics" }), button("清除本机配置和凭据…", { type: "clear" }, "text-button"));
       appendMaintenance();
     }
     return;
@@ -198,11 +219,11 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   }
   const failed = state.result?.diagnostics.some((item) => item.status === "fail");
   panel.append(node("p", "完成 / 诊断", "eyebrow"), node("h1", failed ? "配置已保存，需要检查" : "Hypit 已配置"),
-    node("p", "请重启 Codex 和 Terminal，再测试 hypit 命令是否可用。", "intro"));
-  if (state.result) appendDiagnostics();
-  panel.append(node("p", "在 Codex 中试试", "eyebrow"), node("blockquote", EXAMPLE_PROMPT), node("p", "Chrome 和 WhisperX 及模型权重可能在以后首次使用时下载。", "muted"));
+    node("p", "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。", "intro"));
+  if (state.result) { appendAgentTargets(); appendDiagnostics(); }
+  panel.append(node("p", "在你的 Agent 中试试", "eyebrow"), node("blockquote", EXAMPLE_PROMPT), node("p", "Chrome 和 WhisperX 及模型权重可能在以后首次使用时下载。", "muted"));
   const actions = node("div", undefined, "actions");
-  actions.append(button("重新运行诊断", { type: "diagnostics" }, "primary"), button("打开配置目录", { type: "open-config" }), button("修改配置", { type: "edit" }));
+  actions.append(button("重新扫描 Agent", { type: "refresh-agents" }, "primary"), button("重新运行诊断", { type: "diagnostics" }), button("打开配置目录", { type: "open-config" }), button("修改配置", { type: "edit" }));
   panel.append(actions);
   if (state.confirmClear) {
     const confirm = node("section", undefined, "warning");
@@ -222,25 +243,25 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
   let disposed = false;
   let busy = false;
   let interactionGeneration = 0;
-  const render = () => { if (!disposed) renderWizard(root, state, dispatch); };
+  const render = () => { if (!disposed) renderWizard(root, state, dispatch, busy); };
   const persist = () => { try { storage.setItem(draftKey, JSON.stringify(persistedWizardState(state))); } catch { /* Storage may be disabled; setup still works. */ } };
   const failure: SetupFailure = { code: "SETUP_REQUEST_FAILED", message: "操作失败，请检查配置后重试" };
   async function dispatch(action: UiAction): Promise<void> {
     if (disposed || busy && !["progress"].includes(action.type)) return;
     if (action.type !== "progress") interactionGeneration++;
-    if (["submit", "diagnostics", "clear", "open-config", "remove-integration"].includes(action.type)) {
+    if (["submit", "diagnostics", "clear", "open-config", "remove-integration", "refresh-agents"].includes(action.type)) {
       if (action.type === "submit" && !canSubmit(state)) return;
       if (action.type === "clear" && !state.confirmClear && state.screen !== "settings") return;
       const input = action.type === "submit" ? setupInput(state) : undefined;
       busy = true;
-      if (action.type !== "open-config") state = wizardReducer(state, { type: "working" });
+      if (action.type !== "open-config") state = wizardReducer(state, { type: action.type === "refresh-agents" ? "refresh-agents" : "working" });
       render();
       try {
         if (action.type === "open-config") {
           const reply = await bridge.openConfigDirectory();
           if (!reply.ok) state = wizardReducer(state, { type: "failure", error: reply.error });
         } else {
-          const reply = action.type === "submit" ? await bridge.submit(input!) : action.type === "clear" ? await bridge.clearConfiguration() : action.type === "remove-integration" ? await bridge.removeIntegration() : await bridge.rerunDiagnostics();
+          const reply = action.type === "submit" ? await bridge.submit(input!) : action.type === "clear" ? await bridge.clearConfiguration() : action.type === "remove-integration" ? await bridge.removeIntegration() : action.type === "refresh-agents" ? await bridge.refreshAgentIntegration() : await bridge.rerunDiagnostics();
           state = reply.ok ? wizardReducer(state, { type: "success", result: reply.value }) : wizardReducer(state, { type: "failure", error: reply.error });
           if (action.type === "clear" && reply.ok) { state = { ...initialWizardState(), screen: "settings", result: reply.value }; try { storage.removeItem(draftKey); } catch {} }
         }

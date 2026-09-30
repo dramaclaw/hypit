@@ -10,6 +10,50 @@ const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoi
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
+test("Agent-neutral copy and detected target summaries render as text", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  renderWizard(root, initialWizardState(), () => {});
+  assert.match(root.textContent!, /为你的 AI Agent 准备 Hypit/);
+  assert.match(root.textContent!, /连接你的 NewAPI 和 OSS，安装视频命令与 Agent Skill。完成后，可以在已支持的 Agent 中直接用中文描述想做的视频。/);
+  const targets: SetupResult = { ...result, skillTargets: [
+    { id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex", "claymore-piko"] },
+    { id: "claude", label: "Claude Code Skill", path: "/claude", detectedAgents: ["claude-code"] },
+  ] };
+  renderWizard(root, wizardReducer(filled(), { type: "success", result: targets }), () => {});
+  for (const copy of ["Codex", "Claymore Piko", "Claude Code", "重新扫描 Agent", "在你的 Agent 中试试", "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。"]) assert.ok(root.textContent?.includes(copy), copy);
+  for (const stale of ["Codex Skill", "让 Codex 开始制作视频", "请重启 Codex"]) assert.equal(root.textContent?.includes(stale), false, stale);
+  assert.equal(root.querySelector("img"), null);
+  assert.equal(root.querySelectorAll("[data-agent-target]").length, 2);
+});
+
+test("refresh button calls only the no-argument bridge operation and blocks mutations while pending", async () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  let release!: (reply: SetupReply<SetupResult>) => void;
+  const pending = new Promise<SetupReply<SetupResult>>(resolve => { release = resolve; });
+  const calls: unknown[][] = [];
+  const dispose = mountWizard(root, {
+    getStatus: async () => ({ ok: true, value: result }),
+    submit: async () => { calls.push(["submit"]); return { ok: true, value: result }; },
+    refreshAgentIntegration: (...args: unknown[]) => { calls.push(["refresh", ...args]); return pending; },
+    rerunDiagnostics: async () => { calls.push(["diagnostics"]); return { ok: true, value: result }; },
+    openConfigDirectory: async () => { calls.push(["open"]); return { ok: true, value: undefined }; },
+    clearConfiguration: async () => { calls.push(["clear"]); return { ok: true, value: result }; },
+    removeIntegration: async () => { calls.push(["remove"]); return { ok: true, value: result }; },
+    onProgress: () => () => {},
+  }, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const refresh = Array.from(root.querySelectorAll("button")).find(button => button.textContent === "重新扫描 Agent")!;
+  refresh.click();
+  assert.deepEqual(calls, [["refresh"]]);
+  assert.equal(root.querySelectorAll("button:not([disabled])").length, 0);
+  release({ ok: false, error: { code: "INTEGRATION_INSTALL_FAILED", message: "桌面集成安装失败" } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(root.textContent!, /桌面集成安装失败/);
+  dispose();
+});
+
 test("integration removal stays accessible after clearing configuration and lists preservation intent", () => {
   const { document } = parseHTML("<main id='app'></main>"); const root = document.getElementById("app")! as unknown as HTMLElement;
   for (const configured of [true, false]) {
@@ -41,6 +85,15 @@ test("work disables repeat submission, success wipes secrets, failure permits re
   const success = wizardReducer(state, { type: "success", result });
   assert.equal(success.screen, "complete");
   for (const secret of ["apiKey", "accessKeyId", "accessKeySecret"] as const) assert.equal(success.fields[secret], "");
+});
+
+test("refresh-agents reducer action enters Agent Skill work without retaining secrets", () => {
+  const state = wizardReducer(filled(), { type: "refresh-agents" });
+  assert.equal(state.screen, "working");
+  assert.equal(state.stage, "installing-skill");
+  assert.equal(stageCopy[state.stage], "正在安装 Agent Skill");
+  assert.equal(state.fields.apiKey, "");
+  assert.equal(state.visible.apiKey, false);
 });
 
 test("failed edits to an existing setup return to settings for retry", () => {
@@ -86,7 +139,7 @@ test("cleanup-only warning appears on the completed page with the exact object k
   renderWizard(root, state, () => {});
   assert.match(root.textContent!, /Hypit 已配置/);
   assert.match(root.textContent!, /OSS 已验证；测试对象未自动删除/);
-  assert.equal(root.querySelector("li code")?.textContent, key);
+  assert.ok(Array.from(root.querySelectorAll("li code")).some(code => code.textContent === key));
   assert.doesNotMatch(root.textContent!, /OSS 连接测试失败/);
 });
 
@@ -99,6 +152,9 @@ test("wizard DOM uses password inputs and disables actions while working", () =>
   renderWizard(root, wizardReducer(filled(), { type: "working" }), () => {});
   assert.equal(root.querySelectorAll("input").length, 0);
   assert.equal(root.querySelectorAll("button:not([disabled])").length, 0);
+  renderWizard(root, filled(), () => {}, true);
+  assert.equal(root.querySelectorAll("button:not([disabled])").length, 0);
+  assert.equal(root.querySelectorAll("input:not([disabled])").length, 0);
 });
 
 test("local document CSP disallows network, inline scripts, objects, framing and forms", async () => {
@@ -115,7 +171,7 @@ test("typing then submitting sends current fields and unsubscribes on disposal",
   let detached = false;
   const draft: string[] = [];
   const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: { ...result, configured: false } }),
-    submit: async (input) => { submitted = input; return { ok: true, value: result }; }, rerunDiagnostics: async () => ({ ok: true, value: result }),
+    submit: async (input) => { submitted = input; return { ok: true, value: result }; }, rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }),
     openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
     onProgress: () => () => { detached = true; } }, { getItem: () => null, setItem: (_key, value) => { draft.push(value); }, removeItem: () => {} });
   root.querySelector<HTMLButtonElement>("button")!.click();
@@ -142,7 +198,7 @@ test("late initial status cannot discard early edits or submitted secrets", asyn
   let submitted: unknown;
   const dispose = mountWizard(root, { getStatus: () => pending,
     submit: async (input) => { submitted = input; return { ok: true, value: result }; },
-    rerunDiagnostics: async () => ({ ok: true, value: result }), openConfigDirectory: async () => ({ ok: true, value: undefined }),
+    rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }), openConfigDirectory: async () => ({ ok: true, value: undefined }),
     clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }), onProgress: () => () => {} },
   { getItem: () => null, setItem: () => {}, removeItem: () => {} });
   root.querySelector<HTMLButtonElement>("button")!.click();
@@ -168,7 +224,7 @@ test("startup stays on welcome for pristine status and opens recovery for partia
     const { document } = parseHTML("<main id='app'></main>");
     const root = document.getElementById("app")! as unknown as HTMLElement;
     const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: status }),
-      submit: async () => ({ ok: true, value: result }), rerunDiagnostics: async () => ({ ok: true, value: result }),
+      submit: async () => ({ ok: true, value: result }), rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }),
       openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
       onProgress: () => () => {} }, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
     await new Promise((resolve) => setImmediate(resolve));

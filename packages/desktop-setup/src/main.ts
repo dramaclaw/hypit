@@ -9,7 +9,7 @@ import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
-import type { AgentScanResult, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
+import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
@@ -71,7 +71,7 @@ export function validateIpcArguments(channel: string, args: readonly unknown[]):
     completeNewApiSetup(input);
     return { baseUrl: input.baseUrl, apiKey: input.apiKey, relay: { ...input.relay } };
   }
-  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
+  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.refreshAgents, IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
   return undefined;
 }
 
@@ -106,6 +106,7 @@ export type SetupServices = {
   readonly openConfig: () => Promise<void>;
   readonly clear: () => Promise<SetupResult>;
   readonly removeIntegration?: () => Promise<SetupResult>;
+  readonly refreshAgents?: () => Promise<void>;
 };
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
@@ -218,10 +219,28 @@ export function createSetupController(services: SetupServices) {
       const result = publicResult(await services.getStatus());
       return { ...result, diagnostics: [...result.diagnostics, ...publicDiagnostics(await services.diagnose())] };
     }),
+    refreshAgentIntegration: () => enqueue(async () => {
+      emit({ kind: "stage", stage: "installing-skill" });
+      if (!services.refreshAgents) throw new Error("Unavailable [SETUP_UNAVAILABLE]");
+      await services.refreshAgents();
+      emit({ kind: "stage", stage: "diagnosing" });
+      const result = publicResult(await services.getStatus());
+      return { ...result, diagnostics: publicDiagnostics(await services.diagnose()) };
+    }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
     removeIntegration: () => enqueue(async () => { if (!services.removeIntegration) throw new Error("Unavailable [SETUP_UNAVAILABLE]"); return publicResult(await services.removeIntegration()); }),
   };
+}
+
+export async function rescanIntegrationTargets(paths: ReturnType<typeof desktopPaths>,
+  scan: (options: { readonly paths: ReturnType<typeof desktopPaths> }) => Promise<AgentScanResult> = scanAgentTargets,
+  managed: (target: AgentSkillTarget) => Promise<boolean> = isManagedSkillInstalled): Promise<readonly AgentSkillTarget[]> {
+  const discovered = await scan({ paths });
+  const retained = await Promise.all(supportedSkillTargets(paths)
+    .filter(target => !discovered.targets.some(active => active.id === target.id))
+    .map(async target => ({ target, keep: await managed(target) })));
+  return [...discovered.targets, ...retained.filter(item => item.keep).map(item => item.target)];
 }
 
 export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>, scan?: AgentScanResult): Promise<SetupResult> {
@@ -301,7 +320,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     agentData: app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
-  const integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
+  let integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
     cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"),
     sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
   // Refresh once per app launch so explicit removal in this session stays removed.
@@ -327,6 +346,11 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     getStatus,
     commit: (input) => commitDesktopSetup(input, { paths, targets: integration.targets, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
     install: async () => { const result = await installDesktopIntegration(integration); startupStatus = undefined; return result; },
+    refreshAgents: async () => {
+      integration = { ...integration, targets: await rescanIntegrationTargets(paths) };
+      await installDesktopIntegration({ ...integration, preserveExisting: false });
+      startupStatus = undefined;
+    },
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
     clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); startupStatus = undefined; return getStatus(); },
@@ -350,7 +374,8 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     await window.loadURL(pageUrl);
   };
   const operations = { [IPC_CHANNELS.status]: controller.getStatus, [IPC_CHANNELS.submit]: controller.submit,
-    [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration };
+    [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration,
+    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration };
   for (const channel of Object.keys(operations) as (keyof typeof operations)[]) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       try {

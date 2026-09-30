@@ -12,6 +12,7 @@ const bridge: SetupBridge = Object.freeze({
   openConfigDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.openConfig),
   clearConfiguration: () => ipcRenderer.invoke(IPC_CHANNELS.clear),
   removeIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.removeIntegration),
+  refreshAgentIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.refreshAgents),
   onProgress(listener) {
     if (typeof listener !== "function") throw new TypeError("Progress listener required");
     // Each registration is distinct, even if a caller registers the same callback twice.
