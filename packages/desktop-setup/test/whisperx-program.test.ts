@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import fs, { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
@@ -41,7 +42,7 @@ const ready = action === 'prepare' || state === 'ready';
 const ok = action === 'status' || action === 'down' || ready;
 const record = { id: 'whisperx.local', endpoint: 'whisperx.local', state, detail: 'SECRET', stateDetail: 'SECRET', logPath: '/SECRET/log', ...(control.pid ? { pid: control.pid } : {}) };
 const programs = (action === 'status' || !ok) ? [record] : [];
-console.log(control.invalid ? 'SECRET invalid JSON' : JSON.stringify({ format: 'hypit.cli-programs@1', action, ok, ready, programCount: 1, readyCount: ready ? 1 : 0, programs, ...(programs.length ? {} : { omittedPrograms: 1 }), ...control.reportPatch }));
+console.log(control.invalid ? 'SECRET invalid JSON' : JSON.stringify({ format: 'hypit.cli-programs@1', action, ok, ready, programCount: 1, readyCount: ready ? 1 : 0, programs, ...(programs.length ? {} : { omittedPrograms: 1 }), ...control.reportPatch, ...control.actionPatches?.[action] }));
 if (control.nonzero === action) process.exitCode = 1;
 `;
 
@@ -318,3 +319,85 @@ test("a symlink machine marker is refused with a fixed state error", async (t) =
   assert.equal((await f.service.installAndStart()).code, "WHISPERX_STATE_FAILED");
   assert.deepEqual(await readFile(f.paths.profile), f.bytes);
 });
+
+for (const { name, ok, nonzero } of [
+  { name: "failed exit and ok:false", ok: false, nonzero: "status" },
+  { name: "zero exit and ok:false", ok: false, nonzero: undefined },
+  { name: "failed exit and ok:true", ok: true, nonzero: "status" },
+]) {
+  test(`ready from a status report with ${name} cannot publish or report ready`, async (t) => {
+    const f = await fixture(t, { nonzero, actionPatches: { status: { ok } } });
+    const stages: WhisperXProgressStage[] = [];
+    const result = await f.service.installAndStart(stage => { stages.push(stage); });
+    assert.equal(result.state, "failed");
+    assert.equal(result.code, "WHISPERX_COMMAND_FAILED");
+    assert.equal(stages.includes("ready"), false);
+    assert.deepEqual(await readFile(f.paths.profile), f.bytes);
+    assert.equal((await f.service.status()).state, "failed");
+    assert.equal(await readFile(join(f.paths.hostState, "fake-state"), "utf8"), "ready");
+  });
+}
+
+test("unsuccessful status reports still project stopped and mismatch states", async (t) => {
+  const f = await fixture(t);
+  await f.service.installAndStart();
+  await f.service.stop();
+  await f.configure({ nonzero: "status", actionPatches: { status: { ok: false } } });
+  assert.equal((await f.service.status()).state, "stopped");
+  await writeFile(join(f.paths.hostState, "fake-state"), "mismatch");
+  assert.equal((await f.service.status()).state, "mismatch");
+});
+
+for (const { target, fail } of [
+  { target: "marker", fail: false },
+  { target: "Profile", fail: false },
+  { target: "Profile", fail: true },
+]) {
+  test(`status remains starting during paused ${target} publication${fail ? " that fails" : ""}`, async (t) => {
+    const f = await fixture(t);
+    const statePath = whisperXProgramPaths(f.paths).state;
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const paused = new Promise<void>(resolve => { reached = resolve; });
+    const originalLink = fs.link;
+    let markerLinks = 0;
+    let pausedOnce = false;
+    const mock = t.mock.method(fs, "link", async (...args: Parameters<typeof fs.link>) => {
+      if (String(args[1]) === statePath) markerLinks++;
+      if (!pausedOnce && ((target === "Profile" && String(args[1]) === f.paths.profile)
+        || (target === "marker" && String(args[1]) === statePath && markerLinks === 2))) {
+        pausedOnce = true;
+        reached();
+        await gate;
+        if (fail) throw new Error("Injected Profile publication failure");
+      }
+      return originalLink(...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    const stages: WhisperXProgressStage[] = [];
+    const installation = f.service.installAndStart(stage => { stages.push(stage); });
+    let observed;
+    let observedStages;
+    try {
+      await Promise.race([paused, installation.then(() => { throw new Error("Publication was not paused"); })]);
+      observed = await f.service.status();
+      observedStages = [...stages];
+    } finally { release(); }
+    const completed = await installation;
+    assert.equal(observed.state, "starting");
+    assert.equal(observed.stage, "starting-service");
+    assert.equal(observedStages.includes("ready"), false);
+    if (fail) {
+      assert.equal(completed.state, "failed");
+      assert.equal(completed.code, "WHISPERX_PROFILE_COMMIT_FAILED");
+      assert.equal(stages.includes("ready"), false);
+      assert.deepEqual(await readFile(f.paths.profile), f.bytes);
+    } else {
+      assert.equal(completed.state, "ready");
+      assert.equal(stages.at(-1), "ready");
+      assert.equal(JSON.parse(await readFile(f.paths.profile, "utf8")).bindings["@hypit/whisperx@1#whisperx-alignment"], "whisperx.local");
+    }
+  });
+}

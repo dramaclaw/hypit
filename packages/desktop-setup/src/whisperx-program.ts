@@ -128,14 +128,16 @@ async function execute(options: WhisperXProgramOptions, action: Action, profile:
   if (!record(value) || value.format !== "hypit.cli-programs@1" || value.action !== action || value.programCount !== 1
     || typeof value.ok !== "boolean" || typeof value.ready !== "boolean" || !Array.isArray(value.programs)
     || ![0, 1].includes(value.readyCount as number) || value.ready !== (value.readyCount === 1)) throw new ProgramError("WHISPERX_INVALID_REPORT");
-  if (exitCode !== 0 && value.ok) throw new ProgramError("WHISPERX_COMMAND_FAILED");
+  const ok = exitCode === 0 && value.ok;
+  // Unsuccessful non-ready reports still describe stopped/mismatched Programs, but cannot attest readiness.
+  if (!ok && (value.ok || value.ready)) throw new ProgramError("WHISPERX_COMMAND_FAILED");
   const programs = value.programs;
   if (programs.length > 1 || (action === "status" && programs.length !== 1)) throw new ProgramError("WHISPERX_INVALID_REPORT");
   const program: unknown = programs[0];
   if (program !== undefined && (!record(program) || program.endpoint !== LOCAL_WHISPERX_ENDPOINT || program.id !== LOCAL_WHISPERX_ENDPOINT
     || !["ready", "down", "mismatch"].includes(program.state as string))) throw new ProgramError("WHISPERX_INVALID_REPORT");
   if (record(program) && value.ready !== (program.state === "ready")) throw new ProgramError("WHISPERX_INVALID_REPORT");
-  return { ok: value.ok, ready: value.ready, ...(record(program) ? { program } : {}) };
+  return { ok, ready: value.ready, ...(record(program) ? { program } : {}) };
 }
 
 /** Own one instance in the desktop main process. No lifecycle work is owned by an observer. */
@@ -233,18 +235,20 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
       if (operation !== "stop") stage("starting-service");
       const changed = await execute(options, operation === "stop" ? "down" : "up", candidate.candidatePath);
       const inspected = await execute(options, "status", candidate.candidatePath);
-      current = project(inspected, await readState());
+      const observed = project(inspected, await readState());
       if (operation === "stop") {
         if (!changed.ok || inspected.program?.state !== "down" || inspected.program?.pid !== undefined) throw new ProgramError("WHISPERX_COMMAND_FAILED");
         if (await readState()) await saveState(true);
         current = project(inspected, await readState());
-      } else if (changed.ok && inspected.ready && current.state === "ready") {
+      } else if (changed.ok && inspected.ok && inspected.ready && inspected.program?.state === "ready") {
+        // Keep shared status at starting until both the marker and real Profile publication succeed.
         await saveState(false);
         publicationAttempted = true;
         await candidate.commit();
         committed = true;
         stage("ready");
-      } else if (current.state !== "starting" && current.state !== "mismatch") throw new ProgramError("WHISPERX_NOT_READY");
+      } else if (observed.state === "starting" || observed.state === "mismatch") current = observed;
+      else throw new ProgramError("WHISPERX_NOT_READY");
     } catch (error) {
       current = publicationAttempted && !committed ? failure("WHISPERX_PROFILE_COMMIT_FAILED") : errorStatus(error);
     } finally {
