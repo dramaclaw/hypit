@@ -10,7 +10,8 @@ import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
 import { createDesktopProfile, prepareDesktopMediaRefresh } from "../src/profile.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
-import { readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
+import { createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
+import { runDiagnostics } from "../src/diagnostics.js";
 import { SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext, platform: "darwin" | "win32") {
@@ -60,10 +61,28 @@ for (const platform of ["darwin", "win32"] as const) {
     const warning = result.diagnostics.find(item => item.code === "profile" && item.reason === "CLEANUP_INCOMPLETE");
     assert.ok(warning);
     assert.ok(warning.path?.includes(".recovery-"));
+    assert.equal(result.diagnostics.filter(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path).length, 1);
     const reconciled = reconcileStartupStatus(await readDesktopStatus(f.current), result);
     assert.equal(reconciled.configured, true);
     assert.ok(reconciled.diagnostics.some(item => item.path === warning.path));
     assert.doesNotMatch(JSON.stringify(reconciled), /fixture-secret/);
+    const fresh = await readDesktopStatus(f.current);
+    assert.equal(fresh.configured, true);
+    assert.ok(fresh.diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path));
+    const controller = createSetupController({ getStatus: () => readDesktopStatus(f.current), commit: async () => fresh,
+      install: async () => {}, diagnose: () => runDiagnostics({ ...f.current, resources: join(f.current.appDirectory, "resources"), arch: "arm64",
+        credentialStore: { owns: () => true, resolve: async () => undefined } as any, execute: async () => undefined }),
+      openConfig: async () => {}, clear: () => readDesktopStatus(f.current), refreshAgents: async () => {} });
+    for (const reply of [await controller.getStatus(), await controller.rerunDiagnostics(), await controller.refreshAgentIntegration()]) {
+      assert.equal(reply.ok, true);
+      if (reply.ok) assert.equal(reply.value.diagnostics.filter(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path).length, 1);
+    }
+    mock.mock.restore(); syncBuiltinESMExports();
+    await rm(warning.path!, { recursive: true });
+    const cleared = await readDesktopStatus(f.current);
+    assert.equal(cleared.configured, true);
+    assert.ok(!cleared.diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path));
+    assert.ok(!reconcileStartupStatus(cleared, result).diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path));
   });
 
   test(`${platform} prepared media refresh refuses an edit before its commit`, async (t) => {
@@ -199,6 +218,8 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(profileWrites, 2);
     assert.equal(result.configured, false);
     assert.equal(result.diagnostics.find(item => item.code === "profile")?.status, "warning");
+    const apparentlyReady = { ...await readDesktopStatus(f.current), configured: true, diagnostics: [] };
+    assert.equal(reconcileStartupStatus(apparentlyReady, result).configured, false);
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
   });
 

@@ -67,6 +67,25 @@ test("same-version status and diagnostics reject missing recorded backup with an
   if (result.ok) assert.ok(result.value.diagnostics.some(item => item.reason === "SKILL_BACKUP_UNAVAILABLE"));
 });
 
+test("fresh status and diagnostics discover launcher, managed-state, and zprofile recovery siblings", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.profile, JSON.stringify(profile()));
+  await installDesktopIntegration(f);
+  const recoveryPaths = [f.paths.launcher, f.paths.managedState, join(f.home, ".zprofile")]
+    .map(path => `${path}.recovery-A1b2C3`);
+  for (const path of recoveryPaths) await mkdir(path);
+  const status = await readDesktopStatus(f);
+  assert.equal(status.configured, true);
+  assert.deepEqual(status.diagnostics.filter(item => item.code === "launcher" && item.reason === "CLEANUP_INCOMPLETE")
+    .map(item => item.path), recoveryPaths);
+  const diagnostics = await runDiagnostics({ ...f, resources: f.sourceDirectory, arch: "arm64",
+    credentialStore: { owns: () => false, resolve: async () => undefined }, execute: async () => {} });
+  assert.deepEqual(diagnostics.filter(item => item.code === "launcher" && item.reason === "CLEANUP_INCOMPLETE")
+    .map(item => item.path), recoveryPaths);
+  for (const path of recoveryPaths) await rm(path, { recursive: true });
+  assert.ok(!(await readDesktopStatus(f)).diagnostics.some(item => item.code === "launcher" && item.reason === "CLEANUP_INCOMPLETE"));
+});
+
 test("missing backup retains an owned Claude target after Agent discovery stops finding it", async (t) => {
   const f = await fixture(t);
   const targets = supportedSkillTargets(f.paths);

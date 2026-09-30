@@ -1,6 +1,6 @@
 # Hypit 桌面安装包验收记录
 
-日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次发布边界复审修复”对应当前最终构建。
+日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次恢复警告持久化修复”对应当前最终构建。
 
 ## 最终文件
 
@@ -8,12 +8,31 @@
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |
-| `Hypit-Setup-0.1.0-arm64.dmg` | 228856262 | `fdc45e2d119cf5642de9d1e9d7f4f6f86edb12993f709d19b7dc7bf02bfafbe0` |
-| `Hypit-Setup-0.1.0-x64.exe` | 204607471 | `03a22d2cf743726724a3248bd85fd5172c288137c2920833fd491de8728eb08a` |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 228849797 | `12cca8110c4dea04e0f6c9d0f18854d74c7dd2f19818aa5dd732994438d244f2` |
+| `Hypit-Setup-0.1.0-x64.exe` | 204609700 | `5e84ea2dfd6ab858d4790a9f32d7286b3ac3f5475ebab45e7ba0bc4d499bd79e` |
 
 在 `packages/desktop-setup/release/` 目录运行 `shasum -a 256 -c Hypit-Setup-0.1.0-arm64.dmg.sha256` 和 `shasum -a 256 -c Hypit-Setup-0.1.0-x64.exe.sha256`，两项均输出 `OK`。校验文件中的文件名是相对文件名，因此应从 `release/` 目录运行。
 
-## 本次发布边界复审修复（2026-09-30）
+## 本次恢复警告持久化修复（2026-09-30）
+
+命令入口、托管状态文件、macOS `.zprofile` 和 Runtime Profile 的准备事务可能留下同名 `.recovery-XXXXXX` 兄弟目录。现在启动状态、重新扫描和显式诊断会读取这四个固定目标的直接父目录，按生成器的六字符后缀筛选，用 `lstat` 检查目录或符号链接，不读取恢复内容或符号链接目标。每个目录最多检查 256 个条目，每个目标最多列出 3 条恢复路径；截断或检查失败时给出无路径的固定警告。已提交的配置继续保持就绪；恢复目录移除后，警告在下一次状态读取中消失。
+
+回归先在 macOS 和 Windows 两种路径上复现了全新状态丢失 Profile 警告，再验证修复；复审发现启动时 Profile 回滚失败可能被清理警告过滤误删，也先复现失败再修复。测试覆盖命令入口、托管状态、`.zprofile`、Profile、显式诊断、重新扫描、清理后消失、相似文件和其他目录忽略、目录上限、符号链接安全报告、固定恢复指引及重复警告去重。真正的 Profile 回滚失败仍保持未就绪。
+
+| 命令 | 本次结果 |
+| --- | --- |
+| `pnpm check` | TypeScript 检查通过 |
+| `pnpm test` | 1644 项：1619 通过、25 条件跳过、0 失败 |
+| `pnpm desktop:build` | 桌面 bundle 构建通过 |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts` | 305 项：303 通过、2 项 staged-media 条件跳过、0 失败 |
+| `HYPIT_TEST_STAGED_MEDIA=1 node --import tsx --test packages/desktop-setup/test/media-capabilities.test.ts` | 3/3 通过 |
+| 两平台 `check-artifact.mjs` | staging 资源清单、哈希、锁定媒体、架构、许可证、Skill 与 Runtime 通过 |
+| `pnpm desktop:dist:mac` / `pnpm desktop:dist:win` | 基于修复源码重建；DMG 实际挂载及 EXE 实际解包后的应用检查通过 |
+| 两项 `shasum -a 256 -c` / `git diff --check` | 均通过 |
+
+当前包仍未签名、公证或发布；Windows 尚未经真实 Windows x64 安装与卸载。未使用真实平台凭据、真实 NewAPI/OSS 或付费生成；未替换用户“应用程序”中的旧应用。其他既有限制与下方记录相同。
+
+## 此前发布边界复审修复（2026-09-30）
 
 最终源码提交为 `3b3fa56a`（基于 `e06d0c38`）。命令入口、托管状态、`.zprofile` 和启动时媒体 Profile 刷新使用同一准备事务：先把目标实际内容移入私有恢复目录，核对被移走文件的身份、字节和权限，再以排他 hard link 发布新文件。发布时出现新目标会保留新目标、原内容和准备内容并停止；回滚同样保留并检查实际被移走的内容，不覆盖并发用户编辑。恢复目录清理失败只报告固定类型警告，不撤销已提交的成功结果。
 

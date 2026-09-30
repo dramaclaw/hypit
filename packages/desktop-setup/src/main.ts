@@ -18,6 +18,7 @@ import { commitDesktopSetup } from "./setup-core.js";
 import { installDesktopIntegration, removeDesktopIntegration } from "./lifecycle.js";
 import type { DesktopIntegrationOptions } from "./lifecycle.js";
 import { runDiagnostics } from "./diagnostics.js";
+import { transactionRecoveryWarnings } from "./recovery-discovery.js";
 import { clearDesktopConfiguration, createConfirmationSession, desktopCredentialRefs } from "./clear-configuration.js";
 
 export function browserWindowOptions(preloadPath: string): BrowserWindowConstructorOptions {
@@ -153,6 +154,15 @@ function publicDiagnostic(value: unknown): DiagnosticItem {
     ...((code === "profile" || code === "launcher") && status === "warning" && reason === "CLEANUP_INCOMPLETE" ? { reason } : {}) };
 }
 const publicDiagnostics = (value: unknown): DiagnosticItem[] => publicArray(value, 64, publicDiagnostic);
+function mergeDiagnostics(...groups: readonly (readonly DiagnosticItem[])[]): DiagnosticItem[] {
+  const seen = new Set<string>();
+  return groups.flat().filter(item => {
+    const key = JSON.stringify([item.code, item.target, item.status, item.reason, item.path, item.cleanupObjectKey]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function integrationDiagnostics(value: unknown): DiagnosticItem[] {
   if (value === undefined) return [];
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid integration result");
@@ -190,9 +200,12 @@ function publicResult(value: unknown): SetupResult {
 
 /** Only an incomplete startup refresh can carry a readiness-affecting warning. */
 export function reconcileStartupStatus(current: SetupResult, startup: SetupResult | undefined): SetupResult {
+  const isRollbackWarning = (item: DiagnosticItem) => startup?.configured === false && item.code === "profile" && item.path === startup.profilePath;
   const warnings = startup?.diagnostics.filter(item => item.status === "warning"
-    && (item.reason === "CLEANUP_INCOMPLETE" || (startup.configured === false && item.code === "profile"))) ?? [];
-  const profileRollbackFailed = startup?.configured === false && warnings.some(item => item.code === "profile");
+    && (item.reason === "CLEANUP_INCOMPLETE" || isRollbackWarning(item))
+    && (item.reason !== "CLEANUP_INCOMPLETE" || isRollbackWarning(item) || current.diagnostics.some(now => now.code === item.code
+      && now.path === item.path && now.target === item.target && now.reason === "CLEANUP_INCOMPLETE"))) ?? [];
+  const profileRollbackFailed = warnings.some(isRollbackWarning);
   const matches = (left: DiagnosticItem, right: DiagnosticItem) => left.code === right.code && left.path === right.path && left.target === right.target;
   return warnings.length ? { ...current, configured: current.configured && !profileRollbackFailed,
     diagnostics: [...current.diagnostics.map(item => warnings.find(warning => matches(warning, item)) ?? item),
@@ -226,12 +239,12 @@ export function createSetupController(services: SetupServices) {
       const diagnostics = publicDiagnostics(await services.diagnose());
       for (const item of diagnostics) emit({ kind: "diagnostic", item });
       emit({ kind: "stage", stage: "complete" });
-      return { ...result, diagnostics: [...result.diagnostics, ...warnings, ...diagnostics] };
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, warnings, diagnostics) };
     }),
     rerunDiagnostics: () => enqueue(async () => {
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
-      return { ...result, diagnostics: [...result.diagnostics, ...publicDiagnostics(await services.diagnose())] };
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, publicDiagnostics(await services.diagnose())) };
     }),
     refreshAgentIntegration: () => enqueue(async () => {
       emit({ kind: "stage", stage: "installing-skill" });
@@ -240,8 +253,7 @@ export function createSetupController(services: SetupServices) {
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
       // Rescanning is local maintenance: full diagnostics also resolve credentials and probe services.
-      return { ...result, diagnostics: [...result.diagnostics, ...warnings.filter(warning => !result.diagnostics.some(item =>
-        (["code", "target", "status", "path", "reason"] as const).every(key => item[key] === warning[key])))] };
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, warnings) };
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
@@ -294,7 +306,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
     desktopMediaAvailable(paths.profile), exists(paths.legacyCodexSkill), isManagedLegacyCodexSkillInstalled(paths),
   ]);
   const skillsReady = targetStates.every(({ installed }) => installed);
-  const recoveryWarnings = await skillRecoveryWarnings(paths);
+  const recoveryWarnings = [...await skillRecoveryWarnings(paths), ...await transactionRecoveryWarnings(options)];
   return { configured: profile && skillsReady && launcher && media !== false, modelCount: 0, relayVerified: false,
     profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) || recoveryWarnings.length ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
@@ -329,8 +341,8 @@ export async function refreshDesktopStatus(options: DesktopIntegrationOptions): 
   profileRollbackFailed ||= !committed && warnings.length > 0;
   const result = await readDesktopStatus(options);
   return profileRollbackFailed ? { ...result, configured: false,
-    diagnostics: [...result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), ...warnings] }
-    : { ...result, diagnostics: [...result.diagnostics, ...integrationWarnings, ...warnings] };
+    diagnostics: mergeDiagnostics(result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), warnings) }
+    : { ...result, diagnostics: mergeDiagnostics(result.diagnostics, integrationWarnings, warnings) };
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
@@ -391,7 +403,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
       const removed = await removeDesktopIntegration({ paths, platform, home });
       const status = await getStatus();
-      return { ...status, diagnostics: [...status.diagnostics, ...removed.diagnostics] };
+      return { ...status, diagnostics: mergeDiagnostics(status.diagnostics, removed.diagnostics) };
     },
   });
   const pageUrl = localPageUrl(join(bundleDirectory, "index.html"));

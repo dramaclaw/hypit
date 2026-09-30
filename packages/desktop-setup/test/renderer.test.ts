@@ -29,6 +29,16 @@ test("committed cleanup warning keeps the completed page and explains safe manua
   assert.match(root.textContent!, /恢复文件未自动清理；请检查此路径，确认无需恢复后再手动删除/);
   assert.match(root.textContent!, /recovery-path/);
 });
+
+test("bounded launcher recovery scan gives allowlisted guidance without a path", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const warned: SetupResult = { ...result, diagnostics: [{ code: "launcher", label: "命令入口",
+    status: "warning", reason: "CLEANUP_INCOMPLETE" }] };
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result: warned }), () => {});
+  assert.match(root.textContent!, /请检查命令入口或 Runtime Profile 目录的访问权限/);
+  assert.doesNotMatch(root.textContent!, /Skill 目录的访问权限/);
+});
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
 test("Agent-neutral copy and detected target summaries render as text", () => {
