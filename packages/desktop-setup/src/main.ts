@@ -9,7 +9,7 @@ import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
-import type { AgentScanResult } from "./agent-targets.js";
+import type { AgentScanResult, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
@@ -104,32 +104,70 @@ export type SetupServices = {
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
 const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
 const detectedAgentIds = ["codex", "claymore-piko", "cursor", "claude-code"] as const;
-const plainArray = (value: unknown): value is unknown[] => Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype;
-function publicDiagnostic(item: DiagnosticItem): DiagnosticItem {
-  if (typeof item.code !== "string" || typeof item.status !== "string" || !["pass", "warning", "fail"].includes(item.status)
-    || typeof item.label !== "string" || (item.path !== undefined && typeof item.path !== "string")
-    || (item.cleanupObjectKey !== undefined && typeof item.cleanupObjectKey !== "string")) throw new Error("Invalid diagnostic result");
-  if (item.code === "skill") {
-    if (typeof item.target !== "string" || !Object.hasOwn(skillLabels, item.target) || item.label !== skillLabels[item.target]) throw new Error("Invalid diagnostic result");
-    return { code: "skill", status: item.status, label: skillLabels[item.target], target: item.target,
-      ...(typeof item.path === "string" ? { path: item.path } : {}) };
+const diagnosticStatuses = ["pass", "warning", "fail"] as const;
+const isSkillTargetId = (value: unknown): value is AgentSkillTargetId => typeof value === "string" && Object.hasOwn(skillLabels, value);
+const isNonSkillCode = (value: unknown): value is keyof typeof diagnosticLabels => typeof value === "string" && Object.hasOwn(diagnosticLabels, value);
+const isDiagnosticStatus = (value: unknown): value is DiagnosticItem["status"] => typeof value === "string" && diagnosticStatuses.some(status => status === value);
+const isDetectedAgentId = (value: unknown): value is DetectedAgentId => typeof value === "string" && detectedAgentIds.some(id => id === value);
+function publicArray<T>(value: unknown, limit: number, project: (item: unknown) => T): T[] {
+  if (!Array.isArray(value)) throw new Error("Invalid setup result");
+  const length: unknown = Reflect.get(value, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > limit) throw new Error("Invalid setup result");
+  const output: T[] = [];
+  for (let index = 0; index < length; index++) {
+    if (!Object.hasOwn(value, index)) throw new Error("Invalid setup result");
+    output.push(project(Reflect.get(value, index)));
   }
-  if (!Object.hasOwn(diagnosticLabels, item.code) || item.label !== diagnosticLabels[item.code] || item.target !== undefined) throw new Error("Invalid diagnostic result");
-  const key = item.code === "oss" && typeof item.cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(item.cleanupObjectKey) ? item.cleanupObjectKey : undefined;
-  return { code: item.code, status: item.status, label: diagnosticLabels[item.code], ...(typeof item.path === "string" ? { path: item.path } : {}), ...(key ? { cleanupObjectKey: key } : {}) };
+  return output;
 }
-function publicResult(result: SetupResult): SetupResult {
-  if (typeof result.profilePath !== "string" || typeof result.launcherPath !== "string"
-    || !plainArray(result.skillTargets) || !plainArray(result.diagnostics)) throw new Error("Invalid setup result");
-  const skillTargets = result.skillTargets.map(target => {
-    if (!target || typeof target !== "object" || typeof target.id !== "string" || !Object.hasOwn(skillLabels, target.id)
-      || typeof target.label !== "string" || target.label !== skillLabels[target.id] || typeof target.path !== "string"
-      || !plainArray(target.detectedAgents) || target.detectedAgents.some(id => typeof id !== "string" || !detectedAgentIds.includes(id))) throw new Error("Invalid Skill target result");
-    return { id: target.id, label: skillLabels[target.id], path: target.path, detectedAgents: [...target.detectedAgents] };
+function publicDiagnostic(value: unknown): DiagnosticItem {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid diagnostic result");
+  const code: unknown = Reflect.get(value, "code");
+  const status: unknown = Reflect.get(value, "status");
+  const label: unknown = Reflect.get(value, "label");
+  const target: unknown = Reflect.get(value, "target");
+  const path: unknown = Reflect.get(value, "path");
+  const cleanupObjectKey: unknown = Reflect.get(value, "cleanupObjectKey");
+  if (typeof code !== "string" || !isDiagnosticStatus(status)
+    || typeof label !== "string" || (path !== undefined && typeof path !== "string")
+    || (cleanupObjectKey !== undefined && typeof cleanupObjectKey !== "string")) throw new Error("Invalid diagnostic result");
+  if (code === "skill") {
+    if (!isSkillTargetId(target) || label !== skillLabels[target]) throw new Error("Invalid diagnostic result");
+    return { code: "skill", status, label: skillLabels[target], target,
+      ...(path === undefined ? {} : { path }) };
+  }
+  if (!isNonSkillCode(code) || label !== diagnosticLabels[code] || target !== undefined) throw new Error("Invalid diagnostic result");
+  const key = code === "oss" && typeof cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(cleanupObjectKey) ? cleanupObjectKey : undefined;
+  return { code, status, label: diagnosticLabels[code], ...(path === undefined ? {} : { path }), ...(key ? { cleanupObjectKey: key } : {}) };
+}
+const publicDiagnostics = (value: unknown): DiagnosticItem[] => publicArray(value, 64, publicDiagnostic);
+function publicResult(value: unknown): SetupResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid setup result");
+  const configured: unknown = Reflect.get(value, "configured");
+  const modelCount: unknown = Reflect.get(value, "modelCount");
+  const relayVerified: unknown = Reflect.get(value, "relayVerified");
+  const profilePath: unknown = Reflect.get(value, "profilePath");
+  const targetValues: unknown = Reflect.get(value, "skillTargets");
+  const launcherPath: unknown = Reflect.get(value, "launcherPath");
+  const diagnosticValues: unknown = Reflect.get(value, "diagnostics");
+  if (typeof profilePath !== "string" || typeof launcherPath !== "string") throw new Error("Invalid setup result");
+  const skillTargets = publicArray(targetValues, 2, targetValue => {
+    if (!targetValue || typeof targetValue !== "object" || Array.isArray(targetValue)) throw new Error("Invalid Skill target result");
+    const id: unknown = Reflect.get(targetValue, "id");
+    const label: unknown = Reflect.get(targetValue, "label");
+    const path: unknown = Reflect.get(targetValue, "path");
+    const agentValues: unknown = Reflect.get(targetValue, "detectedAgents");
+    if (!isSkillTargetId(id) || typeof label !== "string"
+      || label !== skillLabels[id] || typeof path !== "string") throw new Error("Invalid Skill target result");
+    const detectedAgents = publicArray(agentValues, 4, agent => {
+      if (!isDetectedAgentId(agent)) throw new Error("Invalid Skill target result");
+      return agent;
+    });
+    return { id, label: skillLabels[id], path, detectedAgents };
   });
-  return { configured: result.configured === true, modelCount: Number.isSafeInteger(result.modelCount) && result.modelCount >= 0 ? result.modelCount : 0,
-    relayVerified: result.relayVerified === true, profilePath: result.profilePath, skillTargets, launcherPath: result.launcherPath,
-    diagnostics: result.diagnostics.map(publicDiagnostic) };
+  return { configured: configured === true, modelCount: Number.isSafeInteger(modelCount) && (modelCount as number) >= 0 ? modelCount as number : 0,
+    relayVerified: relayVerified === true, profilePath, skillTargets, launcherPath,
+    diagnostics: publicDiagnostics(diagnosticValues) };
 }
 
 /** Only an incomplete startup refresh can carry a readiness-affecting warning. */
@@ -163,7 +201,7 @@ export function createSetupController(services: SetupServices) {
       emit({ kind: "stage", stage: "installing-launcher" });
       await services.install();
       emit({ kind: "stage", stage: "diagnosing" });
-      const diagnostics = (await services.diagnose()).map(publicDiagnostic);
+      const diagnostics = publicDiagnostics(await services.diagnose());
       for (const item of diagnostics) emit({ kind: "diagnostic", item });
       emit({ kind: "stage", stage: "complete" });
       return { ...result, diagnostics: [...result.diagnostics, ...diagnostics] };
@@ -171,7 +209,7 @@ export function createSetupController(services: SetupServices) {
     rerunDiagnostics: () => enqueue(async () => {
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
-      return { ...result, diagnostics: [...result.diagnostics, ...(await services.diagnose()).map(publicDiagnostic)] };
+      return { ...result, diagnostics: [...result.diagnostics, ...publicDiagnostics(await services.diagnose())] };
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),

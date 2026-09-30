@@ -150,6 +150,79 @@ test("controller rejects array-shaped enum values and object paths before IPC cl
   }
 });
 
+test("IPC projection snapshots changing getters once and never returns later secret values", async () => {
+  let idReads = 0, pathReads = 0, statusReads = 0, profileReads = 0;
+  const target = { ...result.skillTargets[0]!,
+    get id() { idReads++; return idReads <= 3 ? "portable" : { secret: input.apiKey }; },
+    get path() { pathReads++; return pathReads === 1 ? "/skill" : { secret: input.relay.accessKeyId }; },
+  };
+  const diagnostic = { code: "newapi", label: "NewAPI",
+    get status() { statusReads++; return statusReads === 1 ? "pass" : { secret: input.relay.accessKeySecret }; },
+    get message() { throw new Error("SECRET_UNREAD_MESSAGE"); },
+    hint: { secret: input.relay.bucket },
+  };
+  const unsafe = { ...result, skillTargets: [target], diagnostics: [diagnostic],
+    get profilePath() { profileReads++; return profileReads === 1 ? "/profile" : { secret: input.baseUrl }; } } as unknown as SetupResult;
+  const controller = createSetupController({ getStatus: async () => unsafe, commit: async () => result, install: async () => {},
+    diagnose: async () => [], openConfig: async () => {}, clear: async () => result });
+  const reply = await controller.getStatus();
+  assert.equal(reply.ok, true);
+  assert.deepEqual([idReads, pathReads, statusReads, profileReads], [1, 1, 1, 1]);
+  const cloned = structuredClone(reply);
+  assert.equal(JSON.stringify(cloned).includes("secret"), false);
+  for (const secret of [input.baseUrl, input.apiKey, input.relay.bucket, input.relay.accessKeyId, input.relay.accessKeySecret]) {
+    assert.equal(JSON.stringify(cloned).includes(secret), false);
+  }
+});
+
+test("IPC projection ignores input-owned array methods and iterators on every successful response", async () => {
+  const poison = <T>(array: T[]): T[] => {
+    Object.defineProperties(array, {
+      map: { value() { throw new Error("SECRET_MAP"); } },
+      some: { value() { throw new Error("SECRET_SOME"); } },
+      [Symbol.iterator]: { value() { throw new Error("SECRET_ITERATOR"); } },
+      secret: { value: input.apiKey, enumerable: true },
+    });
+    return array;
+  };
+  const agents = poison(["codex" as const]);
+  const target = { ...result.skillTargets[0]!, detectedAgents: agents };
+  const diagnostic = { code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const, status: "pass" as const,
+    message: { secret: input.relay.endpoint }, hint: { secret: input.relay.bucket } };
+  const unsafe = { ...result, skillTargets: poison([target]), diagnostics: poison([diagnostic]) };
+  const diagnoses = poison([diagnostic]);
+  const controller = createSetupController({ getStatus: async () => unsafe, commit: async () => unsafe, install: async () => {},
+    diagnose: async () => diagnoses, openConfig: async () => {}, clear: async () => unsafe });
+  const progress: unknown[] = [];
+  controller.subscribe(item => progress.push(item));
+  const responses = [await controller.getStatus(), await controller.submit(input), await controller.rerunDiagnostics(), await controller.clearConfiguration()];
+  for (const reply of responses) {
+    assert.equal(reply.ok, true);
+    const cloned = structuredClone(reply);
+    assert.equal(JSON.stringify(cloned).includes("SECRET"), false);
+    for (const secret of [input.baseUrl, input.apiKey, input.relay.endpoint, input.relay.bucket, input.relay.accessKeyId, input.relay.accessKeySecret]) {
+      assert.equal(JSON.stringify(cloned).includes(secret), false);
+    }
+  }
+  assert.equal(JSON.stringify(structuredClone(progress)).includes("SECRET"), false);
+});
+
+test("IPC projection rejects sparse and excessive result arrays", async () => {
+  const cases = [
+    { ...result, skillTargets: new Array(1) },
+    { ...result, diagnostics: new Array(1) },
+    { ...result, skillTargets: new Array(3) },
+    { ...result, diagnostics: new Array(65) },
+  ] as SetupResult[];
+  for (const unsafe of cases) {
+    const controller = createSetupController({ getStatus: async () => unsafe, commit: async () => unsafe, install: async () => {},
+      diagnose: async () => [], openConfig: async () => {}, clear: async () => unsafe });
+    const reply = await controller.getStatus();
+    assert.equal(reply.ok, false);
+    assert.equal(JSON.stringify(structuredClone(reply)).includes("SECRET"), false);
+  }
+});
+
 test("CJS shell boots without import.meta and stages the Windows credential helper", async () => {
   const directory = new URL("../", import.meta.url);
   execFileSync(process.execPath, ["scripts/build.mjs"], { cwd: directory, stdio: "pipe" });
