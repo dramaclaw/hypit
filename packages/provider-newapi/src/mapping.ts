@@ -6,6 +6,7 @@ const NANO_BANANA: ModuleRef = { name: "@hypit/nano-banana", version: "1" };
 const SEEDREAM: ModuleRef = { name: "@hypit/seedream", version: "1" };
 const SEEDANCE: ModuleRef = { name: "@hypit/seedance", version: "1" };
 const MINIMAX_H3: ModuleRef = { name: "@hypit/minimax-h3", version: "1" };
+const MIMO_SPEECH: ModuleRef = { name: "@hypit/mimo-speech", version: "1" };
 
 const imageFields = {
   prompt: { as: "value", field: "prompt" },
@@ -89,6 +90,16 @@ export const newApiMappings: readonly GenerationWireMapping[] = [
       resolution: { as: "value", field: "resolution" },
       aspectRatio: { as: "value", field: "aspect_ratio" },
       duration: { as: "value", field: "seconds" },
+    },
+  },
+  {
+    capability: { module: MIMO_SPEECH, name: "mimo-v2.5-tts-voiceclone" },
+    result: "audio",
+    routes: [{ model: "index-tts-2" }],
+    fields: {
+      text: { as: "value", field: "input" },
+      instruction: { as: "value", field: "emotion_prompt" },
+      voiceReference: { as: "url", field: "audio_url" },
     },
   },
 ];

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assertMappingCoversPorts } from "@hypit/generation";
+import { assertMappingCoversPorts, generationTypes } from "@hypit/generation";
 import type { CanonicalValue } from "@hypit/protocol";
 import { gptImage2Ports, sealGptImage2Request } from "@hypit/gpt-image";
 import { minimaxH3Ports } from "@hypit/minimax-h3";
+import { mimoSpeechPorts, sealMimoSpeechRequest } from "@hypit/mimo-speech";
 import { nanoBananaPorts } from "@hypit/nano-banana";
 import { sealSeedanceRequest, seedancePorts } from "@hypit/seedance";
 import { seedream5LitePorts } from "@hypit/seedream";
@@ -22,6 +23,7 @@ const expectedModels = new Map([
   ["@hypit/seedance@1#seedance-2-mini", "seedance-2.0-mini"],
   ["@hypit/seedance@1#seedance-2.5", "seedance-2.5"],
   ["@hypit/minimax-h3@1#minimax-h3", "MiniMax-H3"],
+  ["@hypit/mimo-speech@1#mimo-v2.5-tts-voiceclone", "index-tts-2"],
 ]);
 
 const tables = {
@@ -30,6 +32,7 @@ const tables = {
   "seedream-5-lite": seedream5LitePorts,
   ...seedancePorts,
   "minimax-h3": minimaxH3Ports,
+  "mimo-v2.5-tts-voiceclone": mimoSpeechPorts["mimo-v2.5-tts-voiceclone"],
 };
 
 test("NewAPI maps every Hypit model supported by DramaClaw", () => {
@@ -70,5 +73,27 @@ test("NewAPI translates Seedance 2.5 adaptive framing to the gateway auto ratio"
     seconds: 8,
     generate_audio: true,
     web_search: false,
+  });
+});
+
+test("NewAPI compiles Hypit voice cloning for IndexTTS2", async () => {
+  const route = newApiRouteForCapability({
+    module: { name: "@hypit/mimo-speech", version: "1" },
+    name: "mimo-v2.5-tts-voiceclone",
+  });
+  assert.ok(route);
+  const request = sealMimoSpeechRequest("mimo-v2.5-tts-voiceclone", {
+    text: ["今天开始使用 AI 提高办公效率。"],
+    instruction: ["沉稳、自信地讲解。"],
+    voiceReference: [{
+      role: "audio",
+      artifact: { kind: "blob", resource: "res_voice", mediaType: "audio/wav", size: 3 },
+    }],
+  });
+  assert.equal(route.returns.name, generationTypes.audioSet.name);
+  assert.deepEqual(await route.prepare(constraints(request)).compile(async () => "https://relay.example/voice.wav"), {
+    input: "今天开始使用 AI 提高办公效率。",
+    emotion_prompt: "沉稳、自信地讲解。",
+    audio_url: "https://relay.example/voice.wav",
   });
 });

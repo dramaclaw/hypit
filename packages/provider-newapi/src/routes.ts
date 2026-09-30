@@ -1,6 +1,7 @@
 import {
   compileWireRequest,
   generationTypes,
+  sealGeneratedAudioSet,
   sealGeneratedImageSet,
   sealGeneratedVideoSet,
   selectWireModelForRequest,
@@ -18,7 +19,7 @@ import { newApiMappings } from "./mapping.js";
 
 export type NewApiPreparedRequest = {
   readonly model: string;
-  readonly result: "image" | "video";
+  readonly result: "audio" | "image" | "video";
   readonly compile: (resolve: GenerationArtifactUrlResolver) => Promise<Record<string, unknown>>;
 };
 
@@ -127,13 +128,14 @@ function capabilityKey(capability: CapabilityRef): string {
 export const newApiRoutes: readonly NewApiRoute[] = newApiMappings.map((mapping) => ({
   ...mapping,
   key: capabilityKey(mapping.capability),
-  returns: mapping.result === "image" ? generationTypes.imageSet : generationTypes.videoSet,
+  returns: mapping.result === "audio" ? generationTypes.audioSet
+    : mapping.result === "image" ? generationTypes.imageSet : generationTypes.videoSet,
   supports: (request) => {
     const reason = rejection(mapping, request.constraints as unknown as GenerationRequest);
     return reason === undefined ? { status: "supported" } : { status: "unsupported", reason };
   },
   prepare: (constraints) => {
-    if (mapping.result !== "image" && mapping.result !== "video") {
+    if (mapping.result !== "audio" && mapping.result !== "image" && mapping.result !== "video") {
       throw new Error(`DramaClaw NewAPI does not implement ${mapping.result} routes`);
     }
     const request = constraints as unknown as GenerationRequest;
@@ -149,9 +151,11 @@ export const newApiRoutes: readonly NewApiRoute[] = newApiMappings.map((mapping)
   },
   packageResult: (artifacts) => ({
     kind: "inline",
-    value: canonicalize(mapping.result === "image"
-      ? sealGeneratedImageSet({ images: artifacts })
-      : sealGeneratedVideoSet({ videos: artifacts })),
+    value: canonicalize(mapping.result === "audio"
+      ? sealGeneratedAudioSet({ audios: artifacts })
+      : mapping.result === "image"
+        ? sealGeneratedImageSet({ images: artifacts })
+        : sealGeneratedVideoSet({ videos: artifacts })),
   }),
 }));
 

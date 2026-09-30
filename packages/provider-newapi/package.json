@@ -18,6 +18,7 @@
     "@hypit/driver-node": "workspace:*",
     "@hypit/gpt-image": "workspace:*",
     "@hypit/minimax-h3": "workspace:*",
+    "@hypit/mimo-speech": "workspace:*",
     "@hypit/nano-banana": "workspace:*",
     "@hypit/seedance": "workspace:*",
     "@hypit/seedream": "workspace:*",

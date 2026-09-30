@@ -2558,6 +2558,9 @@ importers:
       '@hypit/gpt-image':
         specifier: workspace:*
         version: link:../gpt-image
+      '@hypit/mimo-speech':
+        specifier: workspace:*
+        version: link:../mimo-speech
       '@hypit/minimax-h3':
         specifier: workspace:*
         version: link:../minimax-h3
