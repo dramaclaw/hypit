@@ -23,6 +23,7 @@ import type { BlobRef } from "@hypit/protocol";
 import { credentialRef } from "@hypit/runtime";
 import type { CredentialRef } from "@hypit/runtime";
 
+import { normalizeNewApiBaseUrl } from "./base-url.js";
 import type { NewApiRelayConfig } from "./config.js";
 import { createOssPublisher } from "./relay.js";
 import type { AssetPublisher } from "./relay.js";
@@ -63,15 +64,6 @@ function assert(condition: unknown, message: string): asserts condition {
 function object(value: unknown, subject: string): Record<string, unknown> {
   assert(value !== null && typeof value === "object" && !Array.isArray(value), `${subject} must be an object`);
   return value as Record<string, unknown>;
-}
-
-function apiBaseUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/u, "");
-  const url = new URL(trimmed);
-  const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
-  assert(url.protocol === "https:" || (url.protocol === "http:" && loopback),
-    "DramaClaw NewAPI baseUrl must use HTTPS or loopback HTTP");
-  return trimmed;
 }
 
 function credential(credentials: Credentials, slot: string): string {
@@ -428,7 +420,7 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
   for (const [name, value] of Object.entries({ requestTimeoutMs, operationTimeoutMs })) {
     assert(Number.isSafeInteger(value) && value > 0, `DramaClaw NewAPI ${name} must be a positive integer`);
   }
-  const client = new NewApiClient(apiBaseUrl(options.baseUrl ?? "https://newapi.example/v1"), requestTimeoutMs, options.fetch ?? globalThis.fetch);
+  const client = new NewApiClient(normalizeNewApiBaseUrl(options.baseUrl ?? "https://newapi.example/v1"), requestTimeoutMs, options.fetch ?? globalThis.fetch);
   const publish = options.publish ?? (options.relay === undefined ? undefined : createOssPublisher(options.relay));
   const asyncEndpoint = videoEndpoint(client, publish, options.pollIntervalMs ?? 10_000, operationTimeoutMs);
   const imageEndpoint: ImmediateEndpointHandler = async (context) => {

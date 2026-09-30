@@ -1,5 +1,6 @@
 import type { CanonicalValue } from "@hypit/protocol";
 
+import { normalizeNewApiBaseUrl } from "./base-url.js";
 import { newApiRoutes } from "./routes.js";
 
 export type NewApiSetupInspection = {
@@ -36,15 +37,7 @@ export function inspectNewApiSetup(config: CanonicalValue): NewApiSetupInspectio
 }
 
 export function validateNewApiSetupUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/u, "");
-  let url: URL;
-  try { url = new URL(trimmed); }
-  catch { throw new Error("DramaClaw NewAPI baseUrl must be a valid HTTPS or loopback HTTP URL"); }
-  const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error("DramaClaw NewAPI baseUrl must use HTTPS or loopback HTTP");
-  }
-  return trimmed;
+  return normalizeNewApiBaseUrl(value);
 }
 
 function requiredText(value: unknown, label: string): string {

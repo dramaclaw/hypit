@@ -66,6 +66,26 @@ test("setup accepts HTTPS and loopback HTTP, trimming outer whitespace and trail
   }
 });
 
+test("setup rejects credentials embedded in the NewAPI URL", () => {
+  const base = { apiKey: "key", relay: { enabled: false as const } };
+  for (const baseUrl of [
+    "https://user@gateway.example/v1",
+    "https://user:password@gateway.example/v1",
+  ]) {
+    assert.throws(() => completeNewApiSetup({ ...base, baseUrl }), /must not contain credentials/u);
+  }
+});
+
+test("setup rejects query parameters and fragments in the NewAPI URL", () => {
+  const base = { apiKey: "key", relay: { enabled: false as const } };
+  for (const baseUrl of [
+    "https://gateway.example/v1?token=secret",
+    "https://gateway.example/v1#secret",
+  ]) {
+    assert.throws(() => completeNewApiSetup({ ...base, baseUrl }), /must not contain a query or fragment/u);
+  }
+});
+
 test("setup rejects insecure remote URLs and blank secrets", () => {
   const base = { baseUrl: "https://gateway.example/v1", apiKey: "key" };
   assert.throws(() => completeNewApiSetup({ ...base, baseUrl: "http://gateway.example/v1", relay: { enabled: false } }), /HTTPS or loopback HTTP/u);

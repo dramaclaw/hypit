@@ -88,6 +88,19 @@ test("registers four image, five video and one audio model", () => {
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.audioSet.name).length, 1);
 });
 
+test("provider rejects secrets embedded in the NewAPI base URL", () => {
+  for (const baseUrl of [
+    "https://user:password@newapi.example/v1",
+    "https://newapi.example/v1?token=secret",
+    "https://newapi.example/v1#secret",
+  ]) {
+    assert.throws(() => createNewApiProvider({
+      baseUrl,
+      apiKey: credentialRef("platform", "newapi.key"),
+    }), /must not contain/u);
+  }
+});
+
 test("text-only image generation needs no OSS and stores base64 output", async () => {
   const request = need(gptImageEndpoints.image!.capability, generationTypes.imageSet, sealGptImage2Request({
     prompt: ["black coffee on a table"], aspectRatio: ["1:1"], resolution: ["1K"], background: ["opaque"],
