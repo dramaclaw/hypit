@@ -18,6 +18,17 @@ test("backup-health warning explains restoration at the allowlisted diagnostic p
   assert.match(root.textContent!, /请恢复此路径的原 Skill 备份后重试/);
   assert.match(root.textContent!, /original-backup/);
 });
+
+test("committed cleanup warning keeps the completed page and explains safe manual recovery", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const warned: SetupResult = { ...result, diagnostics: [{ code: "skill", label: "通用 Agent Skill", target: "portable",
+    status: "warning", reason: "CLEANUP_INCOMPLETE", path: "/recovery-path" }] };
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result: warned }), () => {});
+  assert.match(root.textContent!, /Hypit 已配置/);
+  assert.match(root.textContent!, /恢复文件未自动清理；请检查此路径，确认无需恢复后再手动删除/);
+  assert.match(root.textContent!, /recovery-path/);
+});
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
 test("Agent-neutral copy and detected target summaries render as text", () => {

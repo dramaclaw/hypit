@@ -133,7 +133,8 @@ test("status distinguishes a pristine install from incomplete local artifacts", 
     await writeFile(target, "broken");
     const partial = await readDesktopStatus(f);
     assert.equal(partial.configured, false, target);
-    assert.deepEqual(partial.diagnostics.map((item) => [item.code, item.status]), [["profile", "fail"], ["skill", "fail"], ["launcher", "fail"]], target);
+    assert.deepEqual(partial.diagnostics.map((item) => [item.code, item.status]), [["profile", "fail"], ["skill", "fail"],
+      ...(target === f.paths.portableSkillBackup ? [["skill", "warning"]] : []), ["launcher", "fail"]], target);
     await rm(target);
   }
 });

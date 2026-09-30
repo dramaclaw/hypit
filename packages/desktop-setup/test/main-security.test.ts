@@ -108,6 +108,23 @@ test("only allowlisted error codes and a validated cleanup key cross IPC", () =>
   }
 });
 
+test("committed integration warnings survive submit and refresh through the safe diagnostic projection", async () => {
+  const warning = { code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const,
+    status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const, path: "/fixed/recovery" };
+  const unsafe = { ...warning, secret: "SECRET", toJSON: () => ({ secret: "SECRET" }) };
+  const controller = createSetupController({ getStatus: async () => result, commit: async () => result,
+    install: async () => ({ diagnostics: [unsafe] }), refreshAgents: async () => ({ diagnostics: [unsafe] }),
+    diagnose: async () => [], openConfig: async () => {}, clear: async () => result });
+  for (const reply of [await controller.submit(input), await controller.refreshAgentIntegration()]) {
+    assert.equal(reply.ok, true);
+    if (reply.ok) {
+      assert.equal(reply.value.configured, true);
+      assert.deepEqual(reply.value.diagnostics, [warning]);
+      assert.doesNotMatch(JSON.stringify(reply), /SECRET/);
+    }
+  }
+});
+
 test("failure serialization is total for hostile getters, revoked proxies, and primitive throws", () => {
   const fallback = { code: "SETUP_REQUEST_FAILED", message: "操作失败，请检查配置后重试" };
   const oss = new Error("SECRET_API [SETUP_OSS_FAILED]");

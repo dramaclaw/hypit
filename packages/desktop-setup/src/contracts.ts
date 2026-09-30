@@ -37,7 +37,7 @@ export type DiagnosticItem = {
   readonly target?: AgentSkillTargetId;
   readonly path?: string;
   readonly cleanupObjectKey?: string;
-  readonly reason?: "SKILL_BACKUP_UNAVAILABLE";
+  readonly reason?: "SKILL_BACKUP_UNAVAILABLE" | "CLEANUP_INCOMPLETE";
 };
 
 export type SetupStage =

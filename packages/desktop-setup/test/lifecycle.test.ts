@@ -11,6 +11,10 @@ import { desktopPaths } from "../src/paths.js";
 import { installDesktopIntegration, removeDesktopIntegration } from "../src/lifecycle.js";
 import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 import type { AgentSkillTarget } from "../src/agent-targets.js";
+import { readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
+import { createDesktopProfile } from "../src/profile.js";
+import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
+import { runDiagnostics } from "../src/diagnostics.js";
 
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), "hypit lifecycle-"));
@@ -45,6 +49,75 @@ async function seedLegacyManagedSkill(f: Awaited<ReturnType<typeof fixture>>, ba
     ...(backup === undefined ? {} : { backupDirectory: f.paths.legacyCodexSkillBackup }),
   }));
 }
+
+for (const action of ["install", "refresh", "uninstall"] as const) {
+  for (const failure of ["EACCES", "changed"] as const) {
+    test(`${action} preserves committed success and reports ${failure} cleanup recovery`, async (t) => {
+      const f = await fixture(t);
+      await mkdir(f.portable.skillDirectory, { recursive: true });
+      await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user Skill");
+      await mkdir(dirname(f.paths.profile), { recursive: true });
+      await writeFile(f.paths.profile, JSON.stringify(createDesktopProfile(completeNewApiSetup({ baseUrl: "https://api.example", apiKey: "unused",
+        relay: { enabled: true, endpoint: "oss.example", bucket: "example-bucket", accessKeyId: "unused", accessKeySecret: "unused" } }).config)));
+      if (action !== "install") await installDesktopIntegration(f);
+      let recoveryPath = "";
+      const prefix = action === "uninstall" ? `${f.portable.skillDirectory}.removed-` : `${f.portable.skillDirectory}.previous-`;
+      const originalRm = fs.rm;
+      const originalRename = fs.rename;
+      const rmMock = t.mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+        if (failure === "EACCES" && String(args[0]).startsWith(prefix)) {
+          recoveryPath = String(args[0]);
+          throw Object.assign(new Error("SECRET raw OS failure"), { code: "EACCES" });
+        }
+        return originalRm(...args);
+      });
+      const renameMock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+        await originalRename(source, destination);
+        if (failure === "changed" && destination === f.portable.skillDirectory) {
+          const previous = (await readdir(dirname(f.portable.skillDirectory))).find(name => join(dirname(f.portable.skillDirectory), name).startsWith(prefix));
+          assert.ok(previous);
+          recoveryPath = join(dirname(f.portable.skillDirectory), previous);
+          await writeFile(join(recoveryPath, "SKILL.md"), "user changed recovery artifact");
+        }
+      });
+      syncBuiltinESMExports();
+      t.after(() => { rmMock.mock.restore(); renameMock.mock.restore(); syncBuiltinESMExports(); });
+      const current = { ...f, installedVersion: "2" };
+      const result = action === "uninstall" ? await removeDesktopIntegration(f)
+        : action === "refresh" ? await refreshDesktopStatus(current) : await installDesktopIntegration(current);
+      assert.ok(recoveryPath);
+      assert.ok(result && Array.isArray(result.diagnostics), "committed operation returns structured diagnostics");
+      assert.ok(result.diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === recoveryPath));
+      assert.doesNotMatch(JSON.stringify(result), /SECRET|EACCES/);
+      const status = await readDesktopStatus(current);
+      assert.equal(status.configured, action !== "uninstall");
+      assert.ok(status.diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === recoveryPath));
+      const diagnostics = await runDiagnostics({ ...f, resources: f.sourceDirectory, arch: "arm64",
+        credentialStore: { owns: () => false, resolve: async () => undefined }, execute: async () => {} });
+      assert.ok(diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === recoveryPath));
+      assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), action === "uninstall" ? "original user Skill" : "# Skill");
+      if (failure === "changed") assert.equal(await readFile(join(recoveryPath, "SKILL.md"), "utf8"), "user changed recovery artifact");
+      rmMock.mock.restore(); renameMock.mock.restore(); syncBuiltinESMExports();
+    });
+  }
+}
+
+test("failed preparation with undeletable staging reports incomplete rollback and a recovery path", async (t) => {
+  const f = await fixture(t);
+  const originalRm = fs.rm;
+  const mock = t.mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+    if (String(args[0]).startsWith(`${f.portable.skillDirectory}.stage-`)) throw Object.assign(new Error("SECRET"), { code: "EACCES" });
+    return originalRm(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  await assert.rejects(installDesktopIntegration({ ...f, copyDirectory: async (_source, destination) => {
+    await mkdir(destination); await writeFile(join(destination, "SKILL.md"), "partial Skill");
+  } }), /INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED\]$/u);
+  const status = await readDesktopStatus(f);
+  assert.ok(status.diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path?.startsWith(`${f.portable.skillDirectory}.stage-`)));
+  mock.mock.restore(); syncBuiltinESMExports();
+});
 
 for (const backup of [undefined, "user Codex Skill"]) {
   test(`v1 Codex install migrates only after every target commits (${backup})`, async (t) => {
@@ -286,6 +359,27 @@ for (const resource of ["profile-before", "profile-after", "launcher-after", "wi
     if (resource.startsWith("windows")) assert.equal(userPath, "concurrent PATH");
   });
 }
+
+test("Windows rollback compares file content without assuming POSIX executable modes", async (t) => {
+  const f = await fixture(t);
+  let path = "original";
+  const originalLstat = fs.lstat;
+  const originalRename = fs.rename;
+  const statMock = t.mock.method(fs, "lstat", async (...args: Parameters<typeof fs.lstat>) => {
+    const info = await originalLstat(...args);
+    if (info?.isFile()) Object.defineProperty(info, "mode", { value: (Number(info.mode) & ~0o777) | 0o666 });
+    return info;
+  });
+  const renameMock = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+    if (args[1] === f.portable.skillDirectory) throw new Error("commit failure");
+    return originalRename(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { statMock.mock.restore(); renameMock.mock.restore(); syncBuiltinESMExports(); });
+  await assert.rejects(installDesktopIntegration({ ...f, platform: "win32", userPath: { read: async () => path, write: async value => { path = value; } } }), /INTEGRATION_INSTALL_FAILED\]$/u);
+  await assert.rejects(readFile(f.paths.launcher), { code: "ENOENT" });
+  assert.equal(path, "original");
+});
 
 test("failed integration restores the previous Skill and launcher with no partial installation", async (t) => {
   const f = await fixture(t);

@@ -10,7 +10,7 @@ import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
 import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
-import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings } from "./skill-install.js";
+import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
@@ -107,7 +107,7 @@ export type SetupServices = {
   readonly openConfig: () => Promise<void>;
   readonly clear: () => Promise<SetupResult>;
   readonly removeIntegration?: () => Promise<SetupResult>;
-  readonly refreshAgents?: () => Promise<void>;
+  readonly refreshAgents?: () => Promise<unknown>;
 };
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
@@ -144,7 +144,7 @@ function publicDiagnostic(value: unknown): DiagnosticItem {
   if (code === "skill") {
     if (!isSkillTargetId(target) || label !== skillLabels[target]) throw new Error("Invalid diagnostic result");
     return { code: "skill", status, label: skillLabels[target], target,
-      ...(reason === "SKILL_BACKUP_UNAVAILABLE" && status === "warning" ? { reason } : {}),
+      ...((reason === "SKILL_BACKUP_UNAVAILABLE" || reason === "CLEANUP_INCOMPLETE") && status === "warning" ? { reason } : {}),
       ...(path === undefined ? {} : { path }) };
   }
   if (!isNonSkillCode(code) || label !== diagnosticLabels[code] || target !== undefined) throw new Error("Invalid diagnostic result");
@@ -152,6 +152,12 @@ function publicDiagnostic(value: unknown): DiagnosticItem {
   return { code, status, label: diagnosticLabels[code], ...(path === undefined ? {} : { path }), ...(key ? { cleanupObjectKey: key } : {}) };
 }
 const publicDiagnostics = (value: unknown): DiagnosticItem[] => publicArray(value, 64, publicDiagnostic);
+function integrationDiagnostics(value: unknown): DiagnosticItem[] {
+  if (value === undefined) return [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid integration result");
+  const diagnostics: unknown = Reflect.get(value, "diagnostics");
+  return diagnostics === undefined ? [] : publicDiagnostics(diagnostics);
+}
 function publicResult(value: unknown): SetupResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid setup result");
   const configured: unknown = Reflect.get(value, "configured");
@@ -210,12 +216,12 @@ export function createSetupController(services: SetupServices) {
       const result = publicResult(await services.commit(validated));
       emit({ kind: "model-count", count: result.modelCount });
       emit({ kind: "stage", stage: "installing-launcher" });
-      await services.install();
+      const warnings = integrationDiagnostics(await services.install());
       emit({ kind: "stage", stage: "diagnosing" });
       const diagnostics = publicDiagnostics(await services.diagnose());
       for (const item of diagnostics) emit({ kind: "diagnostic", item });
       emit({ kind: "stage", stage: "complete" });
-      return { ...result, diagnostics: [...result.diagnostics, ...diagnostics] };
+      return { ...result, diagnostics: [...result.diagnostics, ...warnings, ...diagnostics] };
     }),
     rerunDiagnostics: () => enqueue(async () => {
       emit({ kind: "stage", stage: "diagnosing" });
@@ -225,10 +231,10 @@ export function createSetupController(services: SetupServices) {
     refreshAgentIntegration: () => enqueue(async () => {
       emit({ kind: "stage", stage: "installing-skill" });
       if (!services.refreshAgents) throw new Error("Unavailable [SETUP_UNAVAILABLE]");
-      await services.refreshAgents();
+      const warnings = integrationDiagnostics(await services.refreshAgents());
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
-      return { ...result, diagnostics: publicDiagnostics(await services.diagnose()) };
+      return { ...result, diagnostics: [...warnings, ...publicDiagnostics(await services.diagnose())] };
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
@@ -281,11 +287,13 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
     desktopMediaAvailable(paths.profile), exists(paths.legacyCodexSkill), isManagedLegacyCodexSkillInstalled(paths),
   ]);
   const skillsReady = targetStates.every(({ installed }) => installed);
+  const recoveryWarnings = await skillRecoveryWarnings(paths);
   return { configured: profile && skillsReady && launcher && media !== false, modelCount: 0, relayVerified: false,
-    profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
+    profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) || recoveryWarnings.length ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
       ...targetStates.map(({ target, installed }) => ({ code: "skill" as const, target: target.id, label: target.label, status: installed ? "pass" as const : "fail" as const, path: target.skillDirectory })),
       ...(await Promise.all(targets.map(skillBackupWarnings))).flat(),
+      ...recoveryWarnings,
       ...(legacyExists && !legacyManaged ? [{ code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const, status: "warning" as const, path: paths.legacyCodexSkill }] : []),
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
       ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),
@@ -358,8 +366,9 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     install: async () => { const result = await installDesktopIntegration(integration); startupStatus = undefined; return result; },
     refreshAgents: async () => {
       integration = { ...integration, targets: await rescanIntegrationTargets(paths) };
-      await installDesktopIntegration({ ...integration, preserveExisting: false });
+      const result = await installDesktopIntegration({ ...integration, preserveExisting: false });
       startupStatus = undefined;
+      return result;
     },
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
@@ -367,7 +376,9 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     removeIntegration: async () => {
       const targets = integrationConfirmationTargets({ paths, platform, home });
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
-      await removeDesktopIntegration({ paths, platform, home }); return getStatus();
+      const removed = await removeDesktopIntegration({ paths, platform, home });
+      const status = await getStatus();
+      return { ...status, diagnostics: [...status.diagnostics, ...removed.diagnostics] };
     },
   });
   const pageUrl = localPageUrl(join(bundleDirectory, "index.html"));

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cp, link, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AgentSkillTarget, AgentSkillTargetId } from "./agent-targets.js";
+import { supportedSkillTargets } from "./agent-targets.js";
 import type { DesktopPaths } from "./paths.js";
 import type { DiagnosticItem } from "./contracts.js";
 
@@ -93,15 +94,53 @@ async function matchesSnapshot(expected: TreeSnapshot | undefined, path: string)
   catch { return false; }
 }
 
-async function cleanupOwned(entries: readonly { readonly path: string; readonly snapshot: TreeSnapshot | undefined }[], code: string): Promise<void> {
-  for (const entry of entries) {
-    if (await exists(entry.path) && !(await matchesSnapshot(entry.snapshot, entry.path))) throw new Error(code);
+async function retainedPaths(paths: readonly string[]): Promise<string[]> {
+  const retained: string[] = [];
+  for (const path of paths) {
+    try { if (await exists(path)) retained.push(path); } catch { retained.push(path); }
   }
-  for (const entry of entries) {
-    if (!(await exists(entry.path))) continue;
-    if (!(await matchesSnapshot(entry.snapshot, entry.path))) throw new Error(code);
-    await rm(entry.path, { recursive: true, force: true }).catch(() => {});
+  return retained;
+}
+
+async function cleanupOwned(entries: readonly { readonly path: string; readonly snapshot: TreeSnapshot | undefined }[]): Promise<string[]> {
+  try {
+    for (const entry of entries) {
+      if (await exists(entry.path) && !(await matchesSnapshot(entry.snapshot, entry.path))) return retainedPaths(entries.map(item => item.path));
+    }
+  } catch { return retainedPaths(entries.map(item => item.path)); }
+  return cleanupFailedPreparation(entries);
+}
+
+function cleanupDiagnostics(target: Partial<Pick<AgentSkillTarget, "id" | "label">>, paths: readonly (string | undefined)[]): DiagnosticItem[] {
+  return paths.map(path => ({ code: "skill", label: target.label ?? "通用 Agent Skill", target: target.id ?? "portable",
+    status: "warning", ...(path === undefined ? {} : { path }), reason: "CLEANUP_INCOMPLETE" }));
+}
+
+/** Discover only fixed backup paths and UUID-named recovery siblings; never inspect their contents. */
+export async function skillRecoveryWarnings(paths: DesktopPaths): Promise<readonly DiagnosticItem[]> {
+  const warnings: DiagnosticItem[] = [];
+  const targets = [...supportedSkillTargets(paths), { id: "portable" as const, label: "通用 Agent Skill" as const,
+    skillDirectory: paths.legacyCodexSkill, backupDirectory: paths.legacyCodexSkillBackup, required: false, detectedAgents: [] }];
+  for (const target of targets) {
+    for (const root of [target.skillDirectory, target.backupDirectory]) {
+      try {
+        const prefix = `${basename(root)}.`;
+        const names = (await readdir(dirname(root))).filter(name => name.startsWith(prefix)
+          && /^(?:stage|previous|removed|restore)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(name.slice(prefix.length))).sort();
+        warnings.push(...cleanupDiagnostics(target, names.slice(0, 8).map(name => join(dirname(root), name))));
+        if (names.length > 8) warnings.push(...cleanupDiagnostics(target, [undefined]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") warnings.push(...cleanupDiagnostics(target, [undefined]));
+      }
+    }
+    try {
+      if (await exists(target.backupDirectory) && !(target.skillDirectory === paths.legacyCodexSkill
+        ? await isManagedLegacyCodexSkillInstalled(paths) : await isManagedSkillOwned(target))) {
+        warnings.push(...cleanupDiagnostics(target, [target.backupDirectory]));
+      }
+    } catch { warnings.push(...cleanupDiagnostics(target, [target.backupDirectory])); }
   }
+  return warnings.slice(0, 32);
 }
 
 async function cleanupFailedPreparation(entries: readonly { readonly path: string; readonly snapshot: TreeSnapshot | undefined }[]): Promise<string[]> {
@@ -117,7 +156,7 @@ async function cleanupFailedPreparation(entries: readonly { readonly path: strin
 }
 
 function preparationFailure(label: string, code: string, retained: readonly string[]): Error {
-  return new Error(`${label}${retained.length ? `; recovery: ${retained.join(", ")}` : ""} [${code}]`);
+  return new Error(`${label}${retained.length ? `; recovery: ${retained.join(", ")}` : ""} [${code}${retained.length ? "_ROLLBACK_FAILED" : ""}]`);
 }
 
 /** Files and links are published with atomic no-replace creation; directories use a boundary check. */
@@ -300,20 +339,20 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
         } catch { return fail(); }
       },
       async dispose(succeeded) {
+        const retained = async () => cleanupDiagnostics(target, await retainedPaths([previous, stage, backupStage]));
         if (recoveryFailed) {
-          if (succeeded) throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
-          return;
+          return retained();
         }
-        if (!succeeded && (moved || committed)) return;
+        if (!succeeded && (moved || committed)) return retained();
         if (succeeded && committed && !(await matchesSnapshot(committedSnapshot, target.skillDirectory)))
-          throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
+          return retained();
         if (succeeded && backupCreated && !(await matchesSnapshot(publishedBackupSnapshot, target.backupDirectory)))
-          throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
-        await cleanupOwned([
+          return retained();
+        return cleanupDiagnostics(target, await cleanupOwned([
           ...(succeeded && moved ? [{ path: previous, snapshot: previousSnapshot }] : []),
           { path: stage, snapshot: stageSnapshot },
           { path: backupStage, snapshot: backupStageSnapshot },
-        ], "Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
+        ]));
       },
     };
   } catch (error) {
@@ -326,18 +365,19 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
 }
 
 /** Copy, commit, and finalize a single target when no outer transaction is needed. */
-export async function installManagedSkill(options: SkillInstallOptions): Promise<ManagedSkillMarker> {
+export async function installManagedSkill(options: SkillInstallOptions): Promise<ManagedSkillMarker & { readonly diagnostics: readonly DiagnosticItem[] }> {
   const prepared = await prepareSkillInstall(options);
   let committed = false;
   try {
     await prepared.commit();
     committed = true;
-    return prepared.marker;
   } catch (error) {
-    const failed = await prepared.rollback();
+    const rollbackFailed = await prepared.rollback();
+    const failed = (await prepared.dispose(false)).length > 0 || rollbackFailed;
     if (!failed && isBackupUnavailable(error)) throw backupUnavailable();
     throw new Error(`Skill 安装失败 [SKILL_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
-  } finally { await prepared.dispose(committed); }
+  }
+  return { ...prepared.marker, diagnostics: await prepared.dispose(committed) };
 }
 
 export type PreparedRemoval = {
@@ -345,10 +385,10 @@ export type PreparedRemoval = {
   /** Return true when restoration is incomplete; retain recovery artifacts in that case. */
   readonly rollback: () => Promise<boolean>;
   /** Only discard the old installed tree and its backup after the whole operation commits. */
-  readonly dispose: (committed: boolean) => Promise<void>;
+  readonly dispose: (committed: boolean) => Promise<readonly DiagnosticItem[]>;
 };
 
-type LegacyCodexPaths = Pick<AgentSkillTarget, "skillDirectory" | "backupDirectory">;
+type LegacyCodexPaths = Pick<AgentSkillTarget, "skillDirectory" | "backupDirectory"> & Partial<Pick<AgentSkillTarget, "id" | "label">>;
 const legacyCodexPaths = (paths: DesktopPaths): LegacyCodexPaths => ({
   skillDirectory: paths.legacyCodexSkill, backupDirectory: paths.legacyCodexSkillBackup,
 });
@@ -460,24 +500,25 @@ async function prepareOwnedRemoval(target: LegacyCodexPaths,
         } catch { return fail(); }
       },
       async dispose(committed) {
+        const retained = async () => cleanupDiagnostics(target, await retainedPaths([previous, restoreStage,
+          ...(marker.backupDirectory ? [target.backupDirectory] : [])]));
         if (recoveryFailed) {
-          if (committed) throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
-          return;
+          return retained();
         }
         if (committed) {
           if (restored && !(await matchesSnapshot(restoredLiveSnapshot, target.skillDirectory)))
-            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+            return retained();
           if (marker.backupDirectory !== undefined && !(await matchesSnapshot(backupSnapshot, target.backupDirectory)))
-            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+            return retained();
           if (!(await matchesSnapshot(liveSnapshot, previous)))
-            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+            return retained();
         }
-        if (!committed && moved) return;
-        await cleanupOwned([
+        if (!committed && moved) return retained();
+        return cleanupDiagnostics(target, await cleanupOwned([
           ...(committed ? [{ path: previous, snapshot: liveSnapshot }] : []),
           ...(committed && marker.backupDirectory !== undefined ? [{ path: target.backupDirectory, snapshot: backupSnapshot }] : []),
           { path: restoreStage, snapshot: restoreStageSnapshot },
-        ], "Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+        ]));
       },
     };
   } catch (error) {
@@ -494,10 +535,13 @@ export async function removeManagedSkill(options: { readonly target: AgentSkillT
     if (!removal) return false;
     await removal.commit();
     committed = true;
-    return true;
   } catch (error) {
-    const failed = await removal?.rollback();
+    const rollbackFailed = await removal?.rollback();
+    const warnings = await removal?.dispose(false);
+    const failed = !!rollbackFailed || !!warnings?.length;
     if (!failed && isBackupUnavailable(error)) throw backupUnavailable();
     throw new Error(`Skill 卸载失败 [SKILL_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
-  } finally { await removal?.dispose(committed); }
+  }
+  await removal?.dispose(committed);
+  return true;
 }

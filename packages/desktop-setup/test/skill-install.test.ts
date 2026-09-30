@@ -289,7 +289,7 @@ test("successful install cleanup preserves a changed previous tree", async (t) =
   const previous = (await readdir(dirname(f.portable.skillDirectory))).find((name) => name.startsWith("hypit.previous-"));
   assert.ok(previous);
   await writeFile(join(dirname(f.portable.skillDirectory), previous, "SKILL.md"), "user edit to previous");
-  await assert.rejects(prepared.dispose(true), /SKILL_INSTALL_FAILED/);
+  assert.ok((await prepared.dispose(true)).some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === join(dirname(f.portable.skillDirectory), previous)));
   assert.equal(await readFile(join(dirname(f.portable.skillDirectory), previous, "SKILL.md"), "utf8"), "user edit to previous");
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
 });
@@ -300,7 +300,7 @@ test("install disposal preserves a changed prepared stage", async (t) => {
   const stage = (await readdir(dirname(f.portable.skillDirectory))).find((name) => name.startsWith("hypit.stage-"));
   assert.ok(stage);
   await writeFile(join(dirname(f.portable.skillDirectory), stage, "SKILL.md"), "user edit to stage");
-  await assert.rejects(prepared.dispose(false), /SKILL_INSTALL_FAILED/);
+  assert.ok((await prepared.dispose(false)).some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === join(dirname(f.portable.skillDirectory), stage)));
   assert.equal(await readFile(join(dirname(f.portable.skillDirectory), stage, "SKILL.md"), "utf8"), "user edit to stage");
 });
 
@@ -315,7 +315,7 @@ test("install commit and disposal preserve a changed backup stage", async (t) =>
   await writeFile(join(stagedPath, "SKILL.md"), "user edit to backup stage");
   await assert.rejects(prepared.commit());
   assert.equal(await prepared.rollback(), false);
-  await assert.rejects(prepared.dispose(false), /SKILL_INSTALL_FAILED/);
+  assert.ok((await prepared.dispose(false)).some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === stagedPath));
   assert.equal(await readFile(join(stagedPath, "SKILL.md"), "utf8"), "user edit to backup stage");
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
 });
@@ -582,7 +582,7 @@ test("successful removal cleanup preserves an original backup edited after commi
   assert.ok(prepared);
   await prepared.commit();
   await writeFile(join(f.portable.backupDirectory, "SKILL.md"), "user edit after removal");
-  await assert.rejects(prepared.dispose(true), /SKILL_REMOVE_FAILED/);
+  assert.ok((await prepared.dispose(true)).some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === f.portable.backupDirectory));
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
   assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user edit after removal");
   assert.equal((await readdir(dirname(f.portable.skillDirectory))).some((name) => name.startsWith("hypit.removed-")), true);
@@ -599,7 +599,7 @@ test("removal disposal preserves a changed restore stage", async (t) => {
   assert.ok(restore);
   const restorePath = join(dirname(f.portable.skillDirectory), restore);
   await writeFile(join(restorePath, "SKILL.md"), "user edit to restore stage");
-  await assert.rejects(prepared.dispose(false), /SKILL_REMOVE_FAILED/);
+  assert.ok((await prepared.dispose(false)).some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === restorePath));
   assert.equal(await readFile(join(restorePath, "SKILL.md"), "utf8"), "user edit to restore stage");
 });
 

@@ -10,7 +10,7 @@ import type { DiagnosticItem, SetupInput } from "./contracts.js";
 import { desktopCredentialRefs } from "./clear-configuration.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { UserPath } from "./launcher-install.js";
-import { exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings } from "./skill-install.js";
+import { exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
 import { scanAgentTargets, supportedSkillTargets } from "./agent-targets.js";
 
 export function diagnosticEnvironment(bin: string, platform: "darwin" | "win32", source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -79,6 +79,7 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
   if (await exists(paths.legacyCodexSkill) && !(await isManagedLegacyCodexSkillInstalled(paths))) {
     results.push({ code: "skill", target: "portable", label: "通用 Agent Skill", status: "warning", path: paths.legacyCodexSkill });
   }
+  results.push(...await skillRecoveryWarnings(paths));
   let config: ReturnType<typeof parseNewApiEndpointConfig> | undefined;
   await check("profile", "Runtime Profile", async () => {
     const profile = JSON.parse(await readFile(paths.profile, "utf8"));

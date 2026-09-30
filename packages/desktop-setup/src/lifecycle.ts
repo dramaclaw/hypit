@@ -4,13 +4,14 @@ import { supportedSkillTargets } from "./agent-targets.js";
 import type { AgentSkillTarget } from "./agent-targets.js";
 import { isBackupUnavailable, prepareLegacyCodexMigration, prepareSkillInstall, prepareSkillRemoval } from "./skill-install.js";
 import type { PreparedRemoval, SkillInstallOptions } from "./skill-install.js";
+import type { DiagnosticItem } from "./contracts.js";
 
 export type DesktopIntegrationOptions = LauncherOptions & Omit<SkillInstallOptions, "target"> & {
   readonly targets: readonly AgentSkillTarget[];
 };
 
 const rollbackFailed = (error: unknown) => error instanceof Error
-  && /\[(?:LAUNCHER|SKILL)_(?:INSTALL|REMOVE)_FAILED_ROLLBACK_FAILED\]$/u.test(error.message);
+  && /\[(?:(?:LAUNCHER|SKILL)_(?:INSTALL|REMOVE)_FAILED|SKILL_BACKUP_UNAVAILABLE)_ROLLBACK_FAILED\]$/u.test(error.message);
 const ordered = (targets: readonly AgentSkillTarget[]) => [...targets].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 async function rollbackAll(operations: readonly PreparedRemoval[]): Promise<boolean> {
@@ -21,16 +22,17 @@ async function rollbackAll(operations: readonly PreparedRemoval[]): Promise<bool
   return failed;
 }
 
-async function disposeAll(operations: readonly PreparedRemoval[], committed: boolean): Promise<boolean> {
-  let failed = false;
+async function disposeAll(operations: readonly PreparedRemoval[], committed: boolean): Promise<readonly DiagnosticItem[]> {
+  const warnings: DiagnosticItem[] = [];
   for (const operation of [...operations].reverse()) {
-    try { await operation.dispose(committed); } catch { failed = true; }
+    try { warnings.push(...await operation.dispose(committed)); }
+    catch { warnings.push({ code: "skill", label: "通用 Agent Skill", target: "portable", status: "warning", reason: "CLEANUP_INCOMPLETE" }); }
   }
-  return failed;
+  return warnings;
 }
 
 /** Profile and credentials belong to setup-core and are deliberately outside this lifecycle. */
-export async function installDesktopIntegration(options: DesktopIntegrationOptions): Promise<{ readonly restartMessage: string }> {
+export async function installDesktopIntegration(options: DesktopIntegrationOptions): Promise<{ readonly restartMessage: string; readonly diagnostics: readonly DiagnosticItem[] }> {
   const operations: PreparedRemoval[] = [];
   let launcher: PreparedRemoval | undefined;
   let committed = false;
@@ -53,12 +55,13 @@ export async function installDesktopIntegration(options: DesktopIntegrationOptio
     if (launcher) failed = await rollbackAll([launcher]) || failed;
     failure = !failed && isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : `INTEGRATION_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
-  if (await disposeAll(operations, committed)) failure = committed ? "INTEGRATION_INSTALL_FAILED_CLEANUP_FAILED" : "INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED";
+  const diagnostics = await disposeAll(operations, committed);
+  if (!committed && diagnostics.length) failure = "INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED";
   if (failure) throw new Error(`桌面集成安装失败 [${failure}]`);
-  return result!;
+  return { ...result!, diagnostics };
 }
 
-export async function removeDesktopIntegration(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<void> {
+export async function removeDesktopIntegration(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<{ readonly diagnostics: readonly DiagnosticItem[] }> {
   const skills: PreparedRemoval[] = [];
   let launcher: PreparedRemoval | undefined;
   let committed = false;
@@ -76,9 +79,11 @@ export async function removeDesktopIntegration(options: Pick<LauncherOptions, "p
     for (const skill of skills) await skill.commit();
     committed = true;
   } catch (error) {
-    const failed = await rollbackAll([...(launcher ? [launcher] : []), ...skills]);
+    const failed = await rollbackAll([...(launcher ? [launcher] : []), ...skills]) || rollbackFailed(error);
     failure = !failed && isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : `INTEGRATION_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
-  if (await disposeAll([...(launcher ? [launcher] : []), ...skills], committed)) failure = committed ? "INTEGRATION_REMOVE_FAILED_CLEANUP_FAILED" : "INTEGRATION_REMOVE_FAILED_ROLLBACK_FAILED";
+  const diagnostics = await disposeAll([...(launcher ? [launcher] : []), ...skills], committed);
+  if (!committed && diagnostics.length) failure = "INTEGRATION_REMOVE_FAILED_ROLLBACK_FAILED";
   if (failure) throw new Error(`桌面集成卸载失败 [${failure}]`);
+  return { diagnostics };
 }

@@ -152,18 +152,18 @@ export function renderLauncher(options: LauncherOptions): string {
   return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n${bin ? `set "PATH=${bin};%PATH%"\r\n` : ""}${reference(options.electronExecutable)} ${reference(options.cliEntry)} %*\r\nexit /b %errorlevel%\r\n`;
 }
 
-function sameFile(left: FileSnapshot, right: FileSnapshot): boolean {
+function sameFile(left: FileSnapshot, right: FileSnapshot, platform: LauncherOptions["platform"]): boolean {
   return left.bytes === undefined ? right.bytes === undefined
-    : right.bytes !== undefined && left.bytes.equals(right.bytes) && left.mode === right.mode;
+    : right.bytes !== undefined && left.bytes.equals(right.bytes) && (platform === "win32" || left.mode === right.mode);
 }
 
 /** Journal only attempted mutations, using the content at their mutation boundary. */
-function launcherTransaction(userPath: UserPath) {
+function launcherTransaction(userPath: UserPath, platform: LauncherOptions["platform"]) {
   const changes: { before: FileSnapshot; after: FileSnapshot }[] = [];
   let pathChange: { before: string; after: string } | undefined;
   return {
     async file(before: FileSnapshot, bytes?: Buffer, mode = before.mode ?? 0o600) {
-      if (!sameFile(before, await snapshotFile(before.path))) throw new Error("Launcher file changed before mutation");
+      if (!sameFile(before, await snapshotFile(before.path), platform)) throw new Error("Launcher file changed before mutation");
       changes.push({ before, after: { path: before.path, ...(bytes === undefined ? {} : { bytes, mode }) } });
       if (bytes === undefined) { if (before.bytes !== undefined) await unlink(before.path); }
       else await atomicFile(before.path, bytes, mode);
@@ -178,8 +178,8 @@ function launcherTransaction(userPath: UserPath) {
       for (const { before, after } of [...changes].reverse()) {
         try {
           const current = await snapshotFile(before.path);
-          if (sameFile(before, current)) continue;
-          if (!sameFile(after, current)) { failed = true; continue; }
+          if (sameFile(before, current, platform)) continue;
+          if (!sameFile(after, current, platform)) { failed = true; continue; }
           failed = await restoreFiles([before]) || failed;
         } catch { failed = true; }
       }
@@ -198,8 +198,8 @@ function launcherTransaction(userPath: UserPath) {
 export async function prepareLauncherInstall(options: LauncherOptions): Promise<PreparedRemoval & { readonly restartMessage: string }> {
   const snapshots: FileSnapshot[] = [];
   const userPath = options.userPath ?? windowsUserPath;
-  const transaction = launcherTransaction(userPath);
-  return { restartMessage: RESTART_MESSAGE, rollback: transaction.rollback, async dispose() {}, async commit() {
+  const transaction = launcherTransaction(userPath, options.platform);
+  return { restartMessage: RESTART_MESSAGE, rollback: transaction.rollback, async dispose() { return []; }, async commit() {
     const text = renderLauncher(options);
     if (!(await lstat(options.electronExecutable)).isFile() || !(await lstat(options.cliEntry)).isFile()) throw new Error("Missing runtime");
     for (const path of launcherFiles(options)) snapshots.push(await snapshotFile(path));
@@ -243,7 +243,7 @@ export async function installLauncher(options: LauncherOptions): Promise<{ reado
 export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<PreparedRemoval | undefined> {
   const snapshots: FileSnapshot[] = [];
   const userPath = options.userPath ?? windowsUserPath;
-  const transaction = launcherTransaction(userPath);
+  const transaction = launcherTransaction(userPath, options.platform);
   let oldPath: string | undefined;
   try {
     const state = await readState(options.paths.managedState);
@@ -272,7 +272,7 @@ export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "pat
         await transaction.file(snapshots[1]!);
       },
       rollback: transaction.rollback,
-      async dispose() {},
+      async dispose() { return []; },
     };
   } catch {
     throw new Error("命令入口卸载失败 [LAUNCHER_REMOVE_FAILED]");
