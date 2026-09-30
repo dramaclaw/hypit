@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs, { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import type { TestContext } from "node:test";
+import { promisify } from "node:util";
 import { desktopPaths } from "../src/paths.js";
 import { installDesktopIntegration, removeDesktopIntegration } from "../src/lifecycle.js";
 import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
@@ -77,6 +79,36 @@ test("unmanaged legacy Codex tree and backup stay untouched", async (t) => {
   await removeDesktopIntegration(f);
   for (const path of [f.paths.legacyCodexSkill, f.paths.legacyCodexSkillBackup]) assert.equal(await readFile(join(path, "SKILL.md"), "utf8"), path);
 });
+
+for (const marker of [undefined, { format: "hypit.desktop-managed@1", installedVersion: "1", sourceDigest: "0".repeat(64), backupDirectory: "/not-the-legacy-backup" }]) {
+  test(`unmanaged legacy FIFO is never traversed during install or uninstall (${marker ? "unproven marker" : "no marker"})`, { skip: process.platform === "win32" }, async (t) => {
+    const f = await fixture(t);
+    await mkdir(f.paths.legacyCodexSkill, { recursive: true });
+    const fifo = join(f.paths.legacyCodexSkill, "user-pipe");
+    await promisify(execFile)("mkfifo", [fifo]);
+    await writeFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "user legacy Skill");
+    if (marker) await writeFile(join(f.paths.legacyCodexSkill, SKILL_MARKER), JSON.stringify(marker));
+    const before = await stat(fifo);
+    const originalReaddir = fs.readdir;
+    let traversals = 0;
+    const mock = t.mock.method(fs, "readdir", (...args: Parameters<typeof fs.readdir>) => {
+      if (String(args[0]) === f.paths.legacyCodexSkill) traversals++;
+      return originalReaddir(...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    await installDesktopIntegration(f);
+    assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Skill");
+    await removeDesktopIntegration(f);
+    await assert.rejects(readFile(join(f.portable.skillDirectory, "SKILL.md")), { code: "ENOENT" });
+    assert.equal(traversals, 0);
+    const after = await stat(fifo);
+    assert.equal(after.isFIFO(), true);
+    assert.equal(after.ino, before.ino);
+    assert.equal(await readFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "utf8"), "user legacy Skill");
+    if (marker) assert.deepEqual(JSON.parse(await readFile(join(f.paths.legacyCodexSkill, SKILL_MARKER), "utf8")), marker);
+  });
+}
 
 for (const change of ["format", "version", "digest", "backup", "content"] as const) {
   test(`legacy migration leaves an unproven ${change} marker and backup untouched`, async (t) => {

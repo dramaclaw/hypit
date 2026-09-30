@@ -327,8 +327,8 @@ const legacyCodexPaths = (paths: DesktopPaths): LegacyCodexPaths => ({
   skillDirectory: paths.legacyCodexSkill, backupDirectory: paths.legacyCodexSkillBackup,
 });
 
-/** v1 ownership is recognized only at the two fixed legacy Codex locations. */
-async function legacyCodexMarker(paths: DesktopPaths): Promise<{ readonly backupDirectory?: string } | undefined> {
+/** Probe only the exact legacy marker before considering traversal of a user's tree. */
+async function legacyCodexMarker(paths: DesktopPaths): Promise<{ readonly sourceDigest: string; readonly backupDirectory?: string } | undefined> {
   const legacy = legacyCodexPaths(paths);
   try {
     if (!(await lstat(legacy.skillDirectory)).isDirectory()) return undefined;
@@ -338,14 +338,20 @@ async function legacyCodexMarker(paths: DesktopPaths): Promise<{ readonly backup
     if (marker?.format !== "hypit.desktop-managed@1"
       || typeof marker.installedVersion !== "string" || !marker.installedVersion.trim()
       || typeof marker.sourceDigest !== "string" || !/^[a-f0-9]{64}$/u.test(marker.sourceDigest)
-      || (marker.backupDirectory !== undefined && marker.backupDirectory !== legacy.backupDirectory)
-      || await treeDigest(legacy.skillDirectory, true) !== marker.sourceDigest) return undefined;
+      || (marker.backupDirectory !== undefined && marker.backupDirectory !== legacy.backupDirectory)) return undefined;
     return marker;
   } catch { return undefined; }
 }
 
 export async function prepareLegacyCodexMigration(paths: DesktopPaths): Promise<PreparedRemoval | undefined> {
-  return prepareOwnedRemoval(legacyCodexPaths(paths), () => legacyCodexMarker(paths));
+  if (!(await legacyCodexMarker(paths))) return undefined;
+  return prepareOwnedRemoval(legacyCodexPaths(paths), async () => {
+    // Re-read after the snapshot: the preflight alone never proves tree ownership.
+    const marker = await legacyCodexMarker(paths);
+    try {
+      return marker && await treeDigest(paths.legacyCodexSkill, true) === marker.sourceDigest ? marker : undefined;
+    } catch { return undefined; }
+  });
 }
 
 /** Validate ownership and stage restoration before changing any installed component. */
