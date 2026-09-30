@@ -1,8 +1,44 @@
 # Hypit 桌面安装包验收记录
 
-日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次 Profile 回滚防护修复”对应当前最终构建。
+日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。本次 WhisperX 构建见下一节；其余章节为保留的历史记录。
 
-## 最终文件
+## 本次 Guided WhisperX 最终集成
+
+基于 Tasks 1–5 的 `63a32201`，补充普通卸载保留 Program Home、所有模型缓存与本地 Profile 绑定的界面/原生提示和回归测试。测试也保留未知文件、共享缓存符号链接及绑定到 `newapi.personal` 的未来 Profile。最终安装包检查现在明确要求 CLI、WhisperX Provider、Python 服务、`pyproject.toml` 和冻结的 `uv.lock`。
+
+本次产物位于 `release/guided-whisperx-20260930-2110/`，未覆盖旧版根目录的 DMG/EXE/校验文件和解包应用：
+
+| 文件 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 245786518 | `c2f4c31d3902eb3433b425ab841bc3adf626545b409df04df857ab64160e553f` |
+| `Hypit-Setup-0.1.0-x64.exe` | 216387635 | `d01d31b44ec6e597d49779668e0abf5bf7d7ce8db2ae2a8bf396830345aa1c09` |
+
+| 验证 | 本次结果 |
+| --- | --- |
+| `pnpm check` / `git diff --check` | 通过 |
+| `pnpm test` | 1746 项：1721 通过、25 条件跳过、0 失败 |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts` | 407 项：405 通过、2 条件跳过、0 失败 |
+| `pnpm --filter @hypit/desktop-setup build` | 通过 |
+| `HYPIT_TEST_STAGED_MEDIA=1 node --import tsx --test packages/desktop-setup/test/media-capabilities.test.ts` | 3/3 通过，补齐上述 2 项 staging 媒体验证 |
+| `pnpm desktop:dist:mac` | 成功；实际挂载本次 DMG，应用/ASAR、清单、哈希、架构、媒体能力、完整 Skill、许可证与 WhisperX 服务锁检查通过 |
+| `pnpm desktop:dist:win` | 成功；实际解包本次 NSIS EXE 及其 `app-64.7z`，同类静态资源检查通过 |
+| 两平台 `check-artifact.mjs` | 最终 staging 资源检查通过 |
+| 相邻 `.sha256` | 从新产物目录运行，两项均 `OK` |
+| macOS 包内 CLI / uv smoke | 隔离 HOME、空 PATH、临时 hostState 下 `--version` 返回 `0.2.16`，`paths --json` 无 Profile；uv 返回 `0.12.20` |
+| 密钥检查 | `pre-commit`、`gitleaks` 均 command not found；补充变更源码模式检查及 10733 个包内文本文件、两份 ASAR 共 14 个文本文件扫描，0 命中 |
+
+25 项跳过：16 项 Chrome/浏览器或选择的 capture 环境未准备；3 项 Windows OAuth/凭据实机测试；2 项 Linux 鉴权测试；2 项 live OpenCV；2 项 staged-media（之后已单独补跑）。完整明细留在 `.superpowers/sdd/task-6-full-test-final.log`，桌面结果在 `task-6-desktop-test-final.log`。补充模式扫描仅识别私钥、AWS Key、常见 API Key 模式，不能替代未安装的专业 secret scanner。资源检查另外拒绝 Profile、credential、`.env`、私钥等敏感路径。
+
+uv 两目标均为 0.12.20：macOS 为 Mach-O arm64，SHA-256 `2dd23b7aaf10b3d709beb3fcfe6d9cc456136f0dbd0f4b0ebd4f44d4a6a299ee`；Windows 为 PE32+ x86-64，SHA-256 `a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73`。两份包包含 MIT/Apache uv 许可证、媒体许可证及与锁数据一致的资源清单。
+
+### 有意收窄与未验收范围
+
+- 本次没有自动删除语音资源：父任务明确批准安全收窄。Program Home 尚无完整归属清单，Hugging Face/torch/uv 可能使用上游共享缓存；文档如实说明 `.venv/nltk_data/logs` 与缓存位置差异，并提供停止服务、只读查看和人工检查指导。普通卸载保留全部；单独清除桌面配置会删除整个 Profile（包括绑定），仍保留模型。
+- 没有下载 WhisperX 大模型、启动真实语音服务或进行中英文逐词转写验收；只有测试夹具和包内 CLI/uv 非下载 smoke，不能称为真实服务就绪验收。
+- 没有真实 NewAPI/OSS 凭据测试、付费请求、原生 Windows 安装/准备/启停/卸载、重新安装本机 GUI 或签名/公证。未来 NewAPI 仅说明兼容契约，尚无云端对齐适配器。
+- 旧 release 与 Distribution 产物已恢复原路径；旧 staging 资源完整保留在工作区 `.superpowers/sdd/task-6-preserved-20260930-2110/packages-desktop-setup-resources/`。本次新资源仍在 `resources/`；没有生成物被 Git 跟踪。
+
+## 历史最终文件（Profile 回滚防护修复）
 
 以下文件位于本目录的 `release/`（生成物，未提交 Git）：
 

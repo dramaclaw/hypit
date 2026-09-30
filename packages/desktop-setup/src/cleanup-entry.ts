@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { desktopPaths } from "./paths.js";
+import { desktopPaths, whisperXProgramPaths } from "./paths.js";
 import { removeDesktopIntegration } from "./lifecycle.js";
 import type { DiagnosticItem } from "./contracts.js";
 
@@ -18,6 +18,7 @@ export async function startIntegrationCleanup(): Promise<void> {
   const paths = desktopPaths({ platform, home, appData });
   try {
     const result = await runIntegrationCleanup(process.argv.slice(2), () => removeDesktopIntegration({ paths, platform, home }));
+    process.stderr.write(`本地语音资源、模型缓存和 Profile 绑定已保留。Program Home：\n${whisperXProgramPaths(paths).home}\n如需释放空间，请先停止服务，再按桌面安装指南人工检查；共享缓存与未知文件不会自动删除。\n`);
     if (result?.diagnostics.length) process.stderr.write(`本机集成已卸载；部分恢复文件未清理，请检查后手动处理：\n${result.diagnostics.flatMap(item => item.path ? [item.path] : []).join("\n")}\n`);
   }
   catch {

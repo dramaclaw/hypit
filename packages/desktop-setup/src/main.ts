@@ -444,7 +444,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     if (!window || window.isDestroyed()) throw new Error("No active session [CONFIRMATION_REQUIRED]");
     const issued = confirmation.issue(action, targets);
     const response = await dialog.showMessageBox(window, { type: "warning", title: action === "clear" ? "清除本机配置和凭据" : "卸载本机集成",
-      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。",
+      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。本地语音资源、模型缓存和 Profile 绑定会保留；如需释放空间，请先停止服务，再按桌面安装指南人工检查。",
       detail: targets.join("\n"), buttons: ["取消", "确认"], defaultId: 0, cancelId: 0, noLink: true });
     if (response.response !== 1) { confirmation.invalidate(); throw new Error("Cancelled [CONFIRMATION_REQUIRED]"); }
     return issued.token;

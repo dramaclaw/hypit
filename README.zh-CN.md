@@ -63,6 +63,8 @@ npx skills add hypit-ai/hypit -g
 ```
 
 这条命令安装 Skill。首次使用时，Agent 会检查 Hypit 可执行程序，并按需协助安装。
+
+团队内部也提供[中文桌面安装包](./docs/zh/guide/desktop-installer.md)（macOS arm64 / Windows x64，未签名）。配置 NewAPI/OSS 后，可在“本地语音识别与字幕对齐（可选）”卡片主动安装 WhisperX，默认 `small / cpu / int8` 与中文、英文；跳过不会下载模型。普通卸载保留本地环境、模型缓存与 Profile 绑定。存储位置、重试、停止服务和人工检查清理见安装指南；Windows 当前仅完成交叉打包与静态验收。
 视频项目可以放在任意位置。
 
 Hypit 本身免费使用；Coding Agent 和模型服务各有自己的账号与费用。

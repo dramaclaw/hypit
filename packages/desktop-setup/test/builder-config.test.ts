@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 import { loadScript } from "./resource-fixtures.js";
@@ -45,8 +45,29 @@ test("internal installers use explicit architectures and per-user unsigned setti
   assert.equal(config.nsis.allowElevation, false);
   assert.equal(config.nsis.packElevateHelper, false);
   assert.equal(config.nsis.runAfterFinish, true);
+  assert.equal(config.nsis.deleteAppDataOnUninstall, false, "uninstall retains the Program Home and desktop Profile");
   assert.equal(config.mac.artifactName, "Hypit-Setup-${version}-${arch}.${ext}");
   assert.equal(config.nsis.artifactName, "Hypit-Setup-${version}-${arch}.${ext}");
+});
+
+test("final application inspection requires packaged WhisperX frozen lock, provider, service and CLI", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hypit-whisperx-artifact-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { checkWhisperXRuntime } = await loadScript("package.mjs");
+  assert.equal(typeof checkWhisperXRuntime, "function");
+  const paths = ["bin/hypit.mjs", "packages/provider-whisperx-local/src/program.ts",
+    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock", "services/whisperx/src/hypit_whisperx_service/application.py"];
+  for (const path of paths) {
+    const absolute = join(directory, "runtime/node_modules/@hypit/hypit", path);
+    await mkdir(dirname(absolute), { recursive: true }); await writeFile(absolute, "fixture");
+  }
+  await checkWhisperXRuntime(directory);
+  for (const path of paths) {
+    const absolute = join(directory, "runtime/node_modules/@hypit/hypit", path);
+    await writeFile(absolute, "");
+    await assert.rejects(checkWhisperXRuntime(directory), /Missing WhisperX runtime resource/);
+    await writeFile(absolute, "fixture");
+  }
 });
 
 test("main bundle resolves external dependencies from target runtime resources", async () => {

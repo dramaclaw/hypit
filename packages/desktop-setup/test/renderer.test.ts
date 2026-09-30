@@ -11,6 +11,14 @@ const result: SetupResult = { configured: true, modelCount: 2, relayVerified: tr
 const unusedWhisperX = async (): Promise<never> => { throw new Error("WhisperX is not used by this wizard fixture"); };
 const whisperXBridge = { getWhisperXStatus: unusedWhisperX, installWhisperX: unusedWhisperX, startWhisperX: unusedWhisperX, stopWhisperX: unusedWhisperX };
 
+test("integration removal copy explicitly retains speech resources and Profile bindings", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result }), () => {});
+  assert.match(root.textContent!, /本地语音资源、模型缓存和 Profile 绑定会保留/);
+  assert.match(root.textContent!, /人工检查/);
+});
+
 test("backup-health warning explains restoration at the allowlisted diagnostic path", () => {
   const { document } = parseHTML("<main id='app'></main>");
   const root = document.getElementById("app")! as unknown as HTMLElement;

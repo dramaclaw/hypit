@@ -199,7 +199,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     panel.append(targets);
   };
   const appendMaintenance = () => {
-    panel.append(button("卸载本机集成…", { type: "remove-integration" }, "text-button"), node("p", "移除命令入口、托管 Skill 和 PATH 配置；配置、凭据和视频项目会保留。卸载后可将应用移到废纸篓。", "muted"));
+    panel.append(button("卸载本机集成…", { type: "remove-integration" }, "text-button"), node("p", "移除命令入口、托管 Skill 和 PATH 配置；配置、凭据和视频项目会保留。本地语音资源、模型缓存和 Profile 绑定会保留。如需释放空间，请先停止服务，再按桌面安装指南人工检查。卸载后可将应用移到废纸篓。", "muted"));
   };
   if (state.error) {
     const warning = node("div", undefined, "warning"); warning.setAttribute("role", "alert");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,13 +7,61 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { runIntegrationCleanup } from "../src/cleanup-entry.js";
-import { desktopPaths } from "../src/paths.js";
+import { desktopPaths, whisperXProgramPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
 import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 import { removeDesktopIntegration } from "../src/lifecycle.js";
 import * as desktopMain from "../src/main.js";
 
 const require = createRequire(new URL("../package.json", import.meta.url));
+
+test("ordinary integration removal retains Program Home, shared caches and either local or future alignment binding", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-retain-whisperx-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
+  const program = whisperXProgramPaths(paths);
+  await mkdir(join(program.home, ".venv"), { recursive: true });
+  await mkdir(dirname(paths.profile), { recursive: true });
+  const shared = join(home, "shared-cache");
+  await mkdir(shared);
+  await symlink(shared, join(program.home, "user-cache"));
+  const retained = [join(program.home, ".venv", "python"), program.installationLog, program.serviceLog,
+    join(program.home, "unknown-user-file"), join(shared, "model.bin"), program.state];
+  for (const path of retained) { await mkdir(dirname(path), { recursive: true }); await writeFile(path, "retain exact bytes"); }
+  for (const binding of ["whisperx.local", "newapi.personal"]) {
+    const profile = JSON.stringify({ endpoints: { "whisperx.local": { use: "@hypit/provider-whisperx-local" } },
+      bindings: { "@hypit/whisperx@1#whisperx-alignment": binding } });
+    await writeFile(paths.profile, profile);
+    await runIntegrationCleanup(["--integration-only"], () => removeDesktopIntegration({ paths, home, platform: "darwin" }));
+    assert.equal(await readFile(paths.profile, "utf8"), profile);
+    for (const path of retained) assert.equal(await readFile(path, "utf8"), "retain exact bytes");
+    assert.equal(await readlink(join(program.home, "user-cache")), shared);
+  }
+});
+
+test("successful native cleanup prints retained local speech resources and safe manual guidance", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-cleanup-message-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const { build } = require("esbuild");
+  const built = await build({ entryPoints: [fileURLToPath(new URL("../src/cleanup-entry.ts", import.meta.url))], bundle: true, platform: "node", format: "cjs", write: false });
+  let output = "";
+  const processStub = { platform: "darwin", env: {}, argv: ["node", "cleanup.cjs", "--integration-only"], stderr: { write: (value: string) => { output += value; } }, exitCode: 0 };
+  const module = { exports: {} as { startIntegrationCleanup(): Promise<void> } };
+  runInNewContext(built.outputFiles[0].text, { module, exports: module.exports, process: processStub,
+    require: (name: string) => name === "node:os" ? { homedir: () => home } : require(name) });
+  await module.exports.startIntegrationCleanup();
+  assert.equal(processStub.exitCode, 0);
+  assert.match(output, /本地语音资源.*已保留/);
+  assert.match(output, /Program Home/);
+  assert.match(output, /人工检查/);
+});
+
+test("desktop guidance states optional preparation, upstream caches, retention and provider-neutral future binding", async () => {
+  for (const path of ["../../../docs/zh/guide/desktop-installer.md", "../README.md"]) {
+    const guide = await readFile(new URL(path, import.meta.url), "utf8");
+    for (const text of ["本地语音识别与字幕对齐（可选）", "small", "int8", "Program Home", "Hugging Face", "uv", "模型缓存", "newapi.personal", "@hypit/whisperx@1#whisperx-alignment", "逐词", "句子级", "人工检查"]) assert.ok(guide.includes(text), `${path}: missing ${text}`);
+  }
+});
 
 test("integration confirmation names every supported destination and explicit legacy recovery on both platforms", () => {
   assert.equal(typeof desktopMain.integrationConfirmationTargets, "function");
