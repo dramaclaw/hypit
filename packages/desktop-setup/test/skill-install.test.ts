@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import type { TestContext } from "node:test";
 import { desktopPaths } from "../src/paths.js";
-import { installManagedSkill, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
+import type { AgentSkillTarget } from "../src/agent-targets.js";
+import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, prepareSkillInstall, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "hypit 技能 space-"));
@@ -15,20 +16,25 @@ async function fixture(t: TestContext) {
   await mkdir(join(sourceDirectory, "references", "环境"), { recursive: true });
   await writeFile(join(sourceDirectory, "SKILL.md"), "# Hypit\n");
   await writeFile(join(sourceDirectory, "references", "环境", "guide.md"), Buffer.from([0, 255, 13, 10]));
-  return { paths, sourceDirectory, installedVersion: "1.0.0" };
+  const portable: AgentSkillTarget = { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.portableSkill,
+    backupDirectory: paths.portableSkillBackup, required: true, detectedAgents: [] };
+  const claude: AgentSkillTarget = { id: "claude", label: "Claude Code Skill", skillDirectory: paths.claudeSkill,
+    backupDirectory: paths.claudeSkillBackup, required: false, detectedAgents: [] };
+  return { paths, target: portable, portable, claude, sourceDirectory, installedVersion: "1.0.0" };
 }
 
 test("fresh Skill install validates the entire tree and writes a digest marker; upgrade is idempotent", async (t) => {
   const f = await fixture(t);
   const first = await installManagedSkill(f);
-  assert.equal(first.format, "hypit.desktop-managed@1");
+  assert.equal(first.format, "hypit.desktop-managed@2");
+  assert.equal(first.target, "portable");
   assert.match(first.sourceDigest, /^[a-f0-9]{64}$/);
   assert.equal(first.backupDirectory, undefined);
-  assert.deepEqual(await readFile(join(f.paths.skill, "references", "环境", "guide.md")), Buffer.from([0, 255, 13, 10]));
+  assert.deepEqual(await readFile(join(f.target.skillDirectory, "references", "环境", "guide.md")), Buffer.from([0, 255, 13, 10]));
   const next = await installManagedSkill({ ...f, installedVersion: "2.0.0" });
   assert.equal(next.installedVersion, "2.0.0");
   assert.equal(next.sourceDigest, first.sourceDigest);
-  assert.deepEqual(await readdir(dirname(f.paths.skill)), ["hypit"]);
+  assert.deepEqual(await readdir(dirname(f.target.skillDirectory)), ["hypit"]);
   assert.equal(await removeManagedSkill(f), true);
   assert.equal(await removeManagedSkill(f), false);
 });
@@ -38,66 +44,138 @@ test("old Skill stays intact until the complete staging tree is ready", async (t
   await installManagedSkill(f);
   await writeFile(join(f.sourceDirectory, "SKILL.md"), "# New Skill");
   await installManagedSkill({ ...f, copyDirectory: async (source, destination) => {
-    assert.equal(dirname(destination), dirname(f.paths.skill));
-    assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "# Hypit\n");
+    assert.equal(dirname(destination), dirname(f.target.skillDirectory));
+    assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
     await cp(source, destination, { recursive: true });
-    assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "# Hypit\n");
+    assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
   } });
-  assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "# New Skill");
+  assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "# New Skill");
 });
 
 test("external Skill backup survives managed upgrades and restores exact original bytes", async (t) => {
   const f = await fixture(t);
-  await mkdir(f.paths.skill, { recursive: true });
+  await mkdir(f.target.skillDirectory, { recursive: true });
   const original = Buffer.from([0, 255, 13, 10, 99]);
-  await writeFile(join(f.paths.skill, "SKILL.md"), original);
-  await writeFile(join(f.paths.skill, "user-file"), "custom");
+  await writeFile(join(f.target.skillDirectory, "SKILL.md"), original);
+  await writeFile(join(f.target.skillDirectory, "user-file"), "custom");
   const marker = await installManagedSkill(f);
-  assert.equal(marker.backupDirectory, f.paths.skillBackup);
-  assert.deepEqual(await readFile(join(f.paths.skillBackup, "SKILL.md")), original);
+  assert.equal(marker.backupDirectory, f.target.backupDirectory);
+  assert.deepEqual(await readFile(join(f.target.backupDirectory, "SKILL.md")), original);
   await installManagedSkill({ ...f, installedVersion: "2" });
   await removeManagedSkill(f);
-  assert.deepEqual(await readFile(join(f.paths.skill, "SKILL.md")), original);
-  assert.deepEqual((await readdir(f.paths.skill)).sort(), ["SKILL.md", "user-file"]);
+  assert.deepEqual(await readFile(join(f.target.skillDirectory, "SKILL.md")), original);
+  assert.deepEqual((await readdir(f.target.skillDirectory)).sort(), ["SKILL.md", "user-file"]);
   assert.equal(await removeManagedSkill(f), false);
 });
 
 test("interrupted or incomplete copy never changes an existing Skill or creates a backup", async (t) => {
   for (const interrupt of [true, false]) {
     const f = await fixture(t);
-    await mkdir(f.paths.skill, { recursive: true });
-    await writeFile(join(f.paths.skill, "SKILL.md"), "original");
+    await mkdir(f.target.skillDirectory, { recursive: true });
+    await writeFile(join(f.target.skillDirectory, "SKILL.md"), "original");
     await assert.rejects(installManagedSkill({ ...f, copyDirectory: async (_source, destination) => {
       await mkdir(destination, { recursive: true });
       await writeFile(join(destination, "SKILL.md"), "# Hypit\n");
       if (interrupt) throw new Error("submitted-secret");
     } }), /SKILL_INSTALL_FAILED/);
-    assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "original");
-    assert.deepEqual(await readdir(dirname(f.paths.skill)), ["hypit"]);
-    await assert.rejects(readFile(join(f.paths.skillBackup, "SKILL.md")), { code: "ENOENT" });
+    assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "original");
+    assert.deepEqual(await readdir(dirname(f.target.skillDirectory)), ["hypit"]);
+    await assert.rejects(readFile(join(f.target.backupDirectory, "SKILL.md")), { code: "ENOENT" });
   }
 });
 
 test("an existing backup is never overwritten and a forged backup location is never restored", async (t) => {
   const f = await fixture(t);
-  await mkdir(f.paths.skill, { recursive: true });
-  await writeFile(join(f.paths.skill, "SKILL.md"), "original");
-  await mkdir(f.paths.skillBackup, { recursive: true });
-  await writeFile(join(f.paths.skillBackup, "SKILL.md"), "previous backup");
+  await mkdir(f.target.skillDirectory, { recursive: true });
+  await writeFile(join(f.target.skillDirectory, "SKILL.md"), "original");
+  await mkdir(f.target.backupDirectory, { recursive: true });
+  await writeFile(join(f.target.backupDirectory, "SKILL.md"), "previous backup");
   await assert.rejects(installManagedSkill(f), /SKILL_INSTALL_FAILED/);
-  assert.equal(await readFile(join(f.paths.skillBackup, "SKILL.md"), "utf8"), "previous backup");
-  await writeFile(join(f.paths.skill, SKILL_MARKER), JSON.stringify({ format: "hypit.desktop-managed@1", installedVersion: "1", sourceDigest: "a".repeat(64), backupDirectory: f.sourceDirectory }));
-  await assert.rejects(removeManagedSkill(f), /SKILL_REMOVE_FAILED/);
-  assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "original");
+  assert.equal(await readFile(join(f.target.backupDirectory, "SKILL.md"), "utf8"), "previous backup");
+  await writeFile(join(f.target.skillDirectory, SKILL_MARKER), JSON.stringify({ format: "hypit.desktop-managed@2", target: "portable", installedVersion: "1", sourceDigest: "a".repeat(64), backupDirectory: f.sourceDirectory }));
+  assert.equal(await removeManagedSkill(f), false);
+  assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "original");
 });
 
 test("source symlinks are rejected; external symlink Skill is backed up and restored as a link", async (t) => {
   const f = await fixture(t);
-  await mkdir(dirname(f.paths.skill), { recursive: true });
-  await symlink(f.sourceDirectory, f.paths.skill, "dir");
+  await mkdir(dirname(f.target.skillDirectory), { recursive: true });
+  await symlink(f.sourceDirectory, f.target.skillDirectory, "dir");
   await installManagedSkill(f);
   await removeManagedSkill(f);
-  assert.equal(await readFile(join(f.paths.skill, "SKILL.md"), "utf8"), "# Hypit\n");
+  assert.equal(await readFile(join(f.target.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
   await symlink(join(f.sourceDirectory, "SKILL.md"), join(f.sourceDirectory, "references", "link"));
   await assert.rejects(installManagedSkill(f), /SKILL_INSTALL_FAILED/);
+});
+
+test("a v2 marker is owned only by its exact target", async (t) => {
+  const f = await fixture(t);
+  await installManagedSkill(f);
+  assert.equal(await isManagedSkillInstalled(f.portable), true);
+  assert.equal(await isManagedSkillInstalled({ ...f.portable, id: "claude" }), false);
+  assert.equal(await canRefreshManagedSkill({ ...f.portable, id: "claude" }), false);
+  assert.equal(await removeManagedSkill({ target: { ...f.portable, id: "claude" } }), false);
+});
+
+test("unmanaged content is backed up independently for each target", async (t) => {
+  const f = await fixture(t);
+  for (const target of [f.portable, f.claude]) {
+    await mkdir(target.skillDirectory, { recursive: true });
+    await writeFile(join(target.skillDirectory, "SKILL.md"), target.id);
+    await installManagedSkill({ target, sourceDirectory: f.sourceDirectory, installedVersion: "1" });
+    assert.equal(await readFile(join(target.backupDirectory, "SKILL.md"), "utf8"), target.id);
+  }
+});
+
+test("a v2 marker with a changed target or backup path is unmanaged", async (t) => {
+  const f = await fixture(t);
+  const marker = await installManagedSkill(f);
+  const markerPath = join(f.portable.skillDirectory, SKILL_MARKER);
+  await writeFile(markerPath, JSON.stringify({ ...marker, target: "claude" }));
+  assert.equal(await isManagedSkillInstalled(f.portable), false);
+  assert.equal(await removeManagedSkill({ target: f.portable }), false);
+  await writeFile(markerPath, JSON.stringify({ ...marker, backupDirectory: f.claude.backupDirectory }));
+  assert.equal(await isManagedSkillInstalled(f.portable), false);
+  assert.equal(await canRefreshManagedSkill(f.portable), false);
+  assert.equal(await removeManagedSkill({ target: f.portable }), false);
+});
+
+test("a v1 marker is unmanaged in a new target", async (t) => {
+  const f = await fixture(t);
+  const marker = await installManagedSkill(f);
+  await writeFile(join(f.portable.skillDirectory, SKILL_MARKER), JSON.stringify({ ...marker, format: "hypit.desktop-managed@1" }));
+  assert.equal(await isManagedSkillInstalled(f.portable), false);
+  assert.equal(await canRefreshManagedSkill(f.portable), false);
+  assert.equal(await removeManagedSkill({ target: f.portable }), false);
+  await assert.rejects(installManagedSkill({ ...f, preserveExisting: true }), /SKILL_INSTALL_FAILED/);
+});
+
+test("preparation leaves the live Skill and backup untouched until commit", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user copy");
+  const prepared = await prepareSkillInstall(f);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user copy");
+  assert.equal(await isManagedSkillInstalled(f.portable), false);
+  await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+  await prepared.commit();
+  assert.equal(await isManagedSkillInstalled(f.portable), true);
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user copy");
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user copy");
+  await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+});
+
+test("a backup created after preparation is never replaced at commit", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user copy");
+  const prepared = await prepareSkillInstall(f);
+  await mkdir(f.portable.backupDirectory, { recursive: true });
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user copy");
+  assert.deepEqual(await readdir(f.portable.backupDirectory), []);
 });

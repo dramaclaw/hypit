@@ -1,17 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { AgentSkillTarget, AgentSkillTargetId } from "./agent-targets.js";
 import type { DesktopPaths } from "./paths.js";
 
 export const SKILL_MARKER = ".hypit-desktop-managed.json";
 export type ManagedSkillMarker = {
-  readonly format: "hypit.desktop-managed@1";
+  readonly format: "hypit.desktop-managed@2";
+  readonly target: AgentSkillTargetId;
   readonly installedVersion: string;
   readonly sourceDigest: string;
   readonly backupDirectory?: string;
 };
 export type SkillInstallOptions = {
-  readonly paths: DesktopPaths;
+  readonly target: AgentSkillTarget;
   readonly sourceDirectory: string;
   readonly installedVersion: string;
   /** Automatic refresh must never take ownership of an existing user Skill. */
@@ -19,20 +21,35 @@ export type SkillInstallOptions = {
   readonly copyDirectory?: (source: string, destination: string) => Promise<void>;
 };
 
+/** @deprecated Task 4 removes the single Codex path compatibility bridge. */
+export type LegacySkillInstallOptions = Omit<SkillInstallOptions, "target"> & { readonly paths: DesktopPaths };
+
+/** @deprecated Existing lifecycle callers still address the old Codex directory. */
+function legacyTarget(paths: DesktopPaths): AgentSkillTarget {
+  return { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.skill,
+    backupDirectory: paths.skillBackup, required: true, detectedAgents: [] };
+}
+
+function asTarget(value: AgentSkillTarget | DesktopPaths): AgentSkillTarget {
+  return "skillDirectory" in value ? value : legacyTarget(value);
+}
+
 export async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
-async function markerAt(path: string): Promise<ManagedSkillMarker | undefined> {
+async function markerAt(target: AgentSkillTarget): Promise<ManagedSkillMarker | undefined> {
+  const path = target.skillDirectory;
   if (!(await exists(path)) || (await lstat(path)).isSymbolicLink()) return undefined;
   const markerPath = join(path, SKILL_MARKER);
   if (!(await exists(markerPath))) return undefined;
   if (!(await lstat(markerPath)).isFile()) return undefined;
   let marker: ManagedSkillMarker;
   try { marker = JSON.parse(await readFile(markerPath, "utf8")); } catch { return undefined; }
-  if (marker?.format !== "hypit.desktop-managed@1" || typeof marker.installedVersion !== "string"
-    || !/^[a-f0-9]{64}$/u.test(marker.sourceDigest) || (marker.backupDirectory !== undefined && typeof marker.backupDirectory !== "string")) return undefined;
+  if (marker?.format !== "hypit.desktop-managed@2" || marker.target !== target.id
+    || typeof marker.installedVersion !== "string" || !/^[a-f0-9]{64}$/u.test(marker.sourceDigest)
+    || (marker.backupDirectory !== undefined && marker.backupDirectory !== target.backupDirectory)) return undefined;
   return marker;
 }
 
@@ -56,71 +73,118 @@ async function treeDigest(root: string, installed = false): Promise<string> {
 }
 
 /** Check ownership and installed content without exposing marker data to the renderer. */
-export async function isManagedSkillInstalled(paths: DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
+export async function isManagedSkillInstalled(target: AgentSkillTarget, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean>;
+/** @deprecated Task 4 removes the DesktopPaths overload. */
+export async function isManagedSkillInstalled(paths: DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean>;
+export async function isManagedSkillInstalled(value: AgentSkillTarget | DesktopPaths, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
+  const target = asTarget(value);
   try {
-    const marker = await markerAt(paths.skill);
+    const marker = await markerAt(target);
     return !!marker?.installedVersion.trim()
-      && (marker.backupDirectory === undefined || marker.backupDirectory === paths.skillBackup)
-      && await treeDigest(paths.skill, true) === marker.sourceDigest
+      && await treeDigest(target.skillDirectory, true) === marker.sourceDigest
       && (!current || (marker.installedVersion === current.installedVersion
         && marker.sourceDigest === await treeDigest(current.sourceDirectory)));
   } catch { return false; }
 }
 
-export async function canRefreshManagedSkill(paths: DesktopPaths): Promise<boolean> {
+export async function canRefreshManagedSkill(target: AgentSkillTarget): Promise<boolean>;
+/** @deprecated Task 4 removes the DesktopPaths overload. */
+export async function canRefreshManagedSkill(paths: DesktopPaths): Promise<boolean>;
+export async function canRefreshManagedSkill(value: AgentSkillTarget | DesktopPaths): Promise<boolean> {
+  const target = asTarget(value);
   try {
-    if (!(await exists(paths.skill))) return !(await exists(paths.skillBackup));
-    if (!(await isManagedSkillInstalled(paths))) return false;
-    const marker = await markerAt(paths.skill);
-    return marker?.backupDirectory === undefined || await exists(paths.skillBackup);
+    if (!(await exists(target.skillDirectory))) return !(await exists(target.backupDirectory));
+    if (!(await isManagedSkillInstalled(target))) return false;
+    const marker = await markerAt(target);
+    return marker?.backupDirectory === undefined || await exists(target.backupDirectory);
   } catch { return false; }
 }
 
-/** Copy is staged beside the target, checked byte-for-byte, then committed with directory renames. */
-export async function installManagedSkill(options: SkillInstallOptions): Promise<ManagedSkillMarker> {
-  const { paths } = options;
-  const stage = `${paths.skill}.stage-${randomUUID()}`;
-  const previous = `${paths.skill}.previous-${randomUUID()}`;
-  const backupStage = `${paths.skillBackup}.stage-${randomUUID()}`;
+export type PreparedSkillInstall = PreparedRemoval & { readonly marker: ManagedSkillMarker };
+
+/** Stage a verified Skill and any user backup without changing the live tree. */
+export async function prepareSkillInstall(options: SkillInstallOptions): Promise<PreparedSkillInstall> {
+  const { target } = options;
+  const stage = `${target.skillDirectory}.stage-${randomUUID()}`;
+  const previous = `${target.skillDirectory}.previous-${randomUUID()}`;
+  const backupStage = `${target.backupDirectory}.stage-${randomUUID()}`;
   let moved = false;
   let backupCreated = false;
   let committed = false;
+  let prepared = false;
   try {
     if (!options.installedVersion || await exists(join(options.sourceDirectory, SKILL_MARKER))) throw new Error("Invalid source");
     const sourceDigest = await treeDigest(options.sourceDirectory);
-    await mkdir(dirname(paths.skill), { recursive: true });
+    await mkdir(dirname(target.skillDirectory), { recursive: true });
     await (options.copyDirectory ?? ((source, destination) => cp(source, destination, { recursive: true, errorOnExist: true, force: false })))(options.sourceDirectory, stage);
     if (await treeDigest(stage) !== sourceDigest) throw new Error("Incomplete Skill copy");
-    if (options.preserveExisting && !(await canRefreshManagedSkill(paths))) throw new Error("User Skill must be preserved");
-    const old = await markerAt(paths.skill);
-    if (old?.backupDirectory !== undefined && old.backupDirectory !== paths.skillBackup) throw new Error("Invalid backup location");
+    if (options.preserveExisting && !(await canRefreshManagedSkill(target))) throw new Error("User Skill must be preserved");
+    const old = await markerAt(target);
     let backupDirectory = old?.backupDirectory;
-    if (await exists(paths.skill) && !old) {
-      if (await exists(paths.skillBackup)) throw new Error("Backup already exists");
-      await mkdir(dirname(paths.skillBackup), { recursive: true });
-      await cp(paths.skill, backupStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
-      await rename(backupStage, paths.skillBackup);
-      backupCreated = true;
-      backupDirectory = paths.skillBackup;
+    if (await exists(target.skillDirectory) && !old) {
+      if (await exists(target.backupDirectory)) throw new Error("Backup already exists");
+      await mkdir(dirname(target.backupDirectory), { recursive: true });
+      await cp(target.skillDirectory, backupStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
+      backupDirectory = target.backupDirectory;
     }
-    const marker: ManagedSkillMarker = { format: "hypit.desktop-managed@1", installedVersion: options.installedVersion,
+    const marker: ManagedSkillMarker = { format: "hypit.desktop-managed@2", target: target.id, installedVersion: options.installedVersion,
       sourceDigest, ...(backupDirectory === undefined ? {} : { backupDirectory }) };
     await writeFile(join(stage, SKILL_MARKER), `${JSON.stringify(marker, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    if (await exists(paths.skill)) { await rename(paths.skill, previous); moved = true; }
-    await rename(stage, paths.skill);
-    committed = true;
-    // A cleanup failure must not turn a committed install into a failed transaction.
-    if (moved) await rm(previous, { recursive: true, force: true }).catch(() => {});
-    return marker;
+    prepared = true;
+    return {
+      marker,
+      async commit() {
+        if (await exists(backupStage)) {
+          if (await exists(target.backupDirectory)) throw new Error("Backup already exists");
+          await rename(backupStage, target.backupDirectory);
+          backupCreated = true;
+        }
+        if (await exists(target.skillDirectory)) { await rename(target.skillDirectory, previous); moved = true; }
+        await rename(stage, target.skillDirectory);
+        committed = true;
+      },
+      async rollback() {
+        try {
+          if (committed) {
+            await rename(target.skillDirectory, stage);
+            committed = false;
+          }
+          if (moved) { await rename(previous, target.skillDirectory); moved = false; }
+          if (backupCreated) { await rm(target.backupDirectory, { recursive: true, force: true }); backupCreated = false; }
+          return false;
+        } catch { return true; }
+      },
+      async dispose(succeeded) {
+        if (succeeded && moved) await rm(previous, { recursive: true, force: true }).catch(() => {});
+        if (succeeded || (!moved && !committed)) {
+          await rm(stage, { recursive: true, force: true }).catch(() => {});
+          await rm(backupStage, { recursive: true, force: true }).catch(() => {});
+        }
+      },
+    };
   } catch {
-    let rollbackFailed = false;
-    if (moved && !committed) await rename(previous, paths.skill).catch(() => { rollbackFailed = true; });
-    if (backupCreated && !committed && !rollbackFailed) await rm(paths.skillBackup, { recursive: true, force: true }).catch(() => { rollbackFailed = true; });
-    throw new Error(`Skill 安装失败 [SKILL_INSTALL_FAILED${rollbackFailed ? "_ROLLBACK_FAILED" : ""}]`);
+    throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED]");
   } finally {
-    await rm(stage, { recursive: true, force: true }).catch(() => {});
-    await rm(backupStage, { recursive: true, force: true }).catch(() => {});
+    // A successful prepare transfers ownership of these stages to dispose().
+    if (!prepared) {
+      await rm(stage, { recursive: true, force: true }).catch(() => {});
+      await rm(backupStage, { recursive: true, force: true }).catch(() => {});
+    }
   }
+}
+
+/** Copy, commit, and finalize a single target when no outer transaction is needed. */
+export async function installManagedSkill(options: SkillInstallOptions | LegacySkillInstallOptions): Promise<ManagedSkillMarker> {
+  const prepared = await prepareSkillInstall("target" in options ? options : { ...options, target: legacyTarget(options.paths) });
+  let committed = false;
+  try {
+    await prepared.commit();
+    committed = true;
+    return prepared.marker;
+  } catch {
+    const failed = await prepared.rollback();
+    throw new Error(`Skill 安装失败 [SKILL_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
+  } finally { await prepared.dispose(committed); }
 }
 
 export type PreparedRemoval = {
@@ -132,30 +196,30 @@ export type PreparedRemoval = {
 };
 
 /** Validate ownership and stage restoration before changing any installed component. */
-export async function prepareSkillRemoval(options: { readonly paths: DesktopPaths }): Promise<PreparedRemoval | undefined> {
-  const { paths } = options;
-  const previous = `${paths.skill}.removed-${randomUUID()}`;
-  const restoreStage = `${paths.skill}.restore-${randomUUID()}`;
+export async function prepareSkillRemoval(options: { readonly target: AgentSkillTarget } | { readonly paths: DesktopPaths }): Promise<PreparedRemoval | undefined> {
+  const target = "target" in options ? options.target : legacyTarget(options.paths);
+  const previous = `${target.skillDirectory}.removed-${randomUUID()}`;
+  const restoreStage = `${target.skillDirectory}.restore-${randomUUID()}`;
   let moved = false;
   let restored = false;
   try {
-    const marker = await markerAt(paths.skill);
+    const marker = await markerAt(target);
     if (!marker) return undefined;
     if (marker.backupDirectory !== undefined) {
-      if (marker.backupDirectory !== paths.skillBackup || !(await exists(paths.skillBackup))) throw new Error("Invalid backup");
-      await cp(paths.skillBackup, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
+      if (!(await exists(target.backupDirectory))) throw new Error("Invalid backup");
+      await cp(target.backupDirectory, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
     }
     return {
       async commit() {
-        await rename(paths.skill, previous);
+        await rename(target.skillDirectory, previous);
         moved = true;
-        if (marker.backupDirectory !== undefined) { await rename(restoreStage, paths.skill); restored = true; }
+        if (marker.backupDirectory !== undefined) { await rename(restoreStage, target.skillDirectory); restored = true; }
       },
       async rollback() {
         if (!moved) return false;
         try {
-          if (restored) { await rename(paths.skill, restoreStage); restored = false; }
-          await rename(previous, paths.skill);
+          if (restored) { await rename(target.skillDirectory, restoreStage); restored = false; }
+          await rename(previous, target.skillDirectory);
           moved = false;
           return false;
         } catch { return true; }
@@ -163,7 +227,7 @@ export async function prepareSkillRemoval(options: { readonly paths: DesktopPath
       async dispose(committed) {
         if (committed) {
           await rm(previous, { recursive: true, force: true }).catch(() => {});
-          if (marker.backupDirectory !== undefined) await rm(paths.skillBackup, { recursive: true, force: true }).catch(() => {});
+          if (marker.backupDirectory !== undefined) await rm(target.backupDirectory, { recursive: true, force: true }).catch(() => {});
         }
         await rm(restoreStage, { recursive: true, force: true }).catch(() => {});
       },
@@ -174,7 +238,7 @@ export async function prepareSkillRemoval(options: { readonly paths: DesktopPath
   }
 }
 
-export async function removeManagedSkill(options: { readonly paths: DesktopPaths }): Promise<boolean> {
+export async function removeManagedSkill(options: { readonly target: AgentSkillTarget } | { readonly paths: DesktopPaths }): Promise<boolean> {
   let removal: PreparedRemoval | undefined;
   let committed = false;
   try {

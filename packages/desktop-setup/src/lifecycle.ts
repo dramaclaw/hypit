@@ -1,9 +1,10 @@
 import { installLauncher, launcherFiles, prepareLauncherRemoval, restoreFiles, snapshotFile, windowsUserPath } from "./launcher-install.js";
 import type { FileSnapshot, LauncherOptions } from "./launcher-install.js";
 import { installManagedSkill, prepareSkillRemoval } from "./skill-install.js";
-import type { PreparedRemoval, SkillInstallOptions } from "./skill-install.js";
+import type { LegacySkillInstallOptions, PreparedRemoval, SkillInstallOptions } from "./skill-install.js";
 
-export type DesktopIntegrationOptions = LauncherOptions & SkillInstallOptions;
+/** @deprecated Task 4 removes LegacySkillInstallOptions after lifecycle targets are explicit. */
+export type DesktopIntegrationOptions = LauncherOptions & (SkillInstallOptions | LegacySkillInstallOptions);
 
 const rollbackFailed = (error: unknown) => error instanceof Error
   && /\[(?:LAUNCHER|SKILL)_(?:INSTALL|REMOVE)_FAILED_ROLLBACK_FAILED\]$/u.test(error.message);
