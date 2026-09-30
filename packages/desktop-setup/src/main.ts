@@ -4,10 +4,12 @@ import { mkdir, readFile } from "node:fs/promises";
 import type { BrowserWindowConstructorOptions, WebContents } from "electron";
 import { completeNewApiSetup, newApiDefaultBindings, parseNewApiEndpointConfig } from "@dramaclaw/provider-newapi";
 import { PlatformCredentialStore } from "@hypit/credential-store-platform";
-import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./contracts.js";
+import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult, WhisperXPublicStatus } from "./contracts.js";
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
-import { desktopPaths } from "./paths.js";
+import { desktopPaths, whisperXProgramPaths } from "./paths.js";
+import { createWhisperXProgramService } from "./whisperx-program.js";
+import type { WhisperXProgramService } from "./whisperx-program.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
 import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
@@ -72,7 +74,9 @@ export function validateIpcArguments(channel: string, args: readonly unknown[]):
     completeNewApiSetup(input);
     return { baseUrl: input.baseUrl, apiKey: input.apiKey, relay: { ...input.relay } };
   }
-  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.refreshAgents, IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
+  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.refreshAgents,
+    IPC_CHANNELS.whisperXStatus, IPC_CHANNELS.whisperXInstall, IPC_CHANNELS.whisperXStart, IPC_CHANNELS.whisperXStop,
+    IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
   return undefined;
 }
 
@@ -109,7 +113,31 @@ export type SetupServices = {
   readonly clear: () => Promise<SetupResult>;
   readonly removeIntegration?: () => Promise<SetupResult>;
   readonly refreshAgents?: () => Promise<unknown>;
+  readonly whisperX?: WhisperXProgramService;
+  /** Computed by the main process; service-reported paths must exactly match these local logs. */
+  readonly whisperXLogs?: readonly [installation: string, service: string];
 };
+
+const whisperXStates = ["not-installed", "preparing", "prepared", "stopped", "stopping", "starting", "ready", "mismatch", "failed"] as const;
+const whisperXStages = ["preparing-runtime", "preparing-en", "starting-service", "ready"] as const;
+const whisperXCodes = ["WHISPERX_BUNDLED_UV_INVALID", "WHISPERX_PROFILE_REQUIRED", "WHISPERX_PROFILE_INVALID", "WHISPERX_PROFILE_CONFLICT",
+  "WHISPERX_PROFILE_PREPARE_FAILED", "WHISPERX_PROFILE_COMMIT_FAILED", "WHISPERX_COMMAND_FAILED", "WHISPERX_INVALID_REPORT",
+  "WHISPERX_OUTPUT_LIMIT", "WHISPERX_TIMEOUT", "WHISPERX_NOT_READY", "WHISPERX_STATE_FAILED", "WHISPERX_CLEANUP_INCOMPLETE"] as const;
+function publicWhisperXStatus(value: unknown, logs: SetupServices["whisperXLogs"]): WhisperXPublicStatus {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid WhisperX status");
+  const rawState: unknown = Reflect.get(value, "state");
+  const rawStage: unknown = Reflect.get(value, "stage");
+  const rawCode: unknown = Reflect.get(value, "code");
+  const rawLog: unknown = Reflect.get(value, "logPath");
+  const state = whisperXStates.find(item => item === rawState);
+  const stage = whisperXStages.find(item => item === rawStage);
+  const errorCode = whisperXCodes.find(item => item === rawCode);
+  if (!state || (rawStage !== undefined && !stage) || (rawCode !== undefined && !errorCode)
+    || (rawLog !== undefined && (typeof rawLog !== "string" || rawLog.length > 4096 || /[\u0000-\u001f\u007f]/u.test(rawLog)
+      || !isAbsolute(rawLog) || (rawLog !== logs?.[0] && rawLog !== logs?.[1])))) throw new Error("Invalid WhisperX status");
+  return { state, model: "small", device: "cpu", compute: "int8", languages: ["zh", "en"],
+    ...(stage ? { stage } : {}), ...(errorCode ? { errorCode } : {}), ...(rawLog === undefined ? {} : { logPath: rawLog as string }) };
+}
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
 const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
@@ -235,7 +263,7 @@ export function createDesktopStatusLifecycle(initial: DesktopIntegrationOptions,
 export function createSetupController(services: SetupServices) {
   const listeners = new Set<(progress: SetupProgress) => void>();
   let tail: Promise<unknown> = Promise.resolve();
-  const emit = (progress: SetupProgress) => { for (const listener of listeners) { try { listener(progress); } catch { /* Closed renderer must not interrupt a transaction. */ } } };
+  const emit = (progress: SetupProgress) => { for (const listener of listeners) { try { void Promise.resolve(listener(progress)).catch(() => undefined); } catch { /* Closed renderer must not interrupt a transaction. */ } } };
   function enqueue<T>(operation: () => Promise<T>): Promise<SetupReply<T>> {
     const pending = tail.then(async (): Promise<SetupReply<T>> => {
       try { return { ok: true, value: await operation() }; }
@@ -244,9 +272,29 @@ export function createSetupController(services: SetupServices) {
     tail = pending.then(() => undefined, () => undefined);
     return pending;
   }
+  const whisperX = () => {
+    if (!services.whisperX) throw new Error("Unavailable [SETUP_UNAVAILABLE]");
+    return services.whisperX;
+  };
+  const reportWhisperX = (value: unknown) => {
+    const stage = whisperXStages.find(item => item === value);
+    if (stage) emit({ kind: "whisperx-stage", stage });
+  };
+  let installation: Promise<SetupReply<WhisperXPublicStatus>> | undefined;
   return {
+    /** Snapshot only work already queued; subsequent requests cannot extend this wait. */
+    whenIdle: () => tail.then(() => undefined),
     subscribe(listener: (progress: SetupProgress) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     getStatus: () => enqueue(async () => publicResult(await services.getStatus())),
+    getWhisperXStatus: () => enqueue(async () => publicWhisperXStatus(await whisperX().status(), services.whisperXLogs)),
+    installWhisperX: () => {
+      if (installation) return installation;
+      installation = enqueue(async () => publicWhisperXStatus(await whisperX().installAndStart(reportWhisperX), services.whisperXLogs))
+        .finally(() => { installation = undefined; });
+      return installation;
+    },
+    startWhisperX: () => enqueue(async () => publicWhisperXStatus(await whisperX().start(reportWhisperX), services.whisperXLogs)),
+    stopWhisperX: () => enqueue(async () => publicWhisperXStatus(await whisperX().stop(), services.whisperXLogs)),
     submit: (input: SetupInput) => enqueue(async () => {
       emit({ kind: "stage", stage: "validating" });
       const validated = validateIpcArguments(IPC_CHANNELS.submit, [input])!;
@@ -402,8 +450,13 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     return issued.token;
   };
   const suffix = platform === "win32" ? ".exe" : "";
+  const whisperX = createWhisperXProgramService({ paths: { profile: paths.profile, hostState: paths.hostState }, platform,
+    electronExecutable: integration.electronExecutable, cliEntry: integration.cliEntry, bundledBin: join(resources, "bin"),
+    bundledUv: join(resources, "bin", `uv${suffix}`) });
+  const whisperXPaths = whisperXProgramPaths(paths);
   const controller = createSetupController({
     getStatus,
+    whisperX, whisperXLogs: [whisperXPaths.installationLog, whisperXPaths.serviceLog],
     commit: async (input) => {
       const result = await commitDesktopSetup(input, { paths, targets: lifecycle.integration.targets, platform, credentialStore,
         media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } });
@@ -425,8 +478,10 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   });
   const pageUrl = localPageUrl(join(bundleDirectory, "index.html"));
   let unsubscribe: (() => void) | undefined;
+  let windowGeneration = 0;
   const detach = () => { unsubscribe?.(); unsubscribe = undefined; };
   const createWindow = async () => {
+    windowGeneration++;
     window = new BrowserWindow(browserWindowOptions(join(bundleDirectory, "preload.cjs")));
     hardenWebContents(window.webContents);
     window.webContents.on("destroyed", detach);
@@ -438,7 +493,9 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   };
   const operations = { [IPC_CHANNELS.status]: controller.getStatus, [IPC_CHANNELS.submit]: controller.submit,
     [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration,
-    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration };
+    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration,
+    [IPC_CHANNELS.whisperXStatus]: controller.getWhisperXStatus, [IPC_CHANNELS.whisperXInstall]: controller.installWhisperX,
+    [IPC_CHANNELS.whisperXStart]: controller.startWhisperX, [IPC_CHANNELS.whisperXStop]: controller.stopWhisperX };
   for (const channel of Object.keys(operations) as (keyof typeof operations)[]) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       try {
@@ -459,8 +516,12 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
       }
     });
   }
-  app.on("second-instance", () => { window?.show(); window?.focus(); });
+  app.on("second-instance", () => { if (!window) void createWindow(); else { window.show(); window.focus(); } });
   app.on("activate", () => { if (!window) void createWindow(); });
-  app.on("window-all-closed", () => { if (platform !== "darwin") app.quit(); });
+  app.on("window-all-closed", () => {
+    // Window lifetime owns only progress observation. Let bounded Managed Program commands finish.
+    const generation = windowGeneration;
+    if (platform !== "darwin") void controller.whenIdle().then(() => { if (!window && generation === windowGeneration) app.quit(); });
+  });
   await createWindow();
 }

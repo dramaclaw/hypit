@@ -13,6 +13,10 @@ const bridge: SetupBridge = Object.freeze({
   clearConfiguration: () => ipcRenderer.invoke(IPC_CHANNELS.clear),
   removeIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.removeIntegration),
   refreshAgentIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.refreshAgents),
+  getWhisperXStatus: () => ipcRenderer.invoke(IPC_CHANNELS.whisperXStatus),
+  installWhisperX: () => ipcRenderer.invoke(IPC_CHANNELS.whisperXInstall),
+  startWhisperX: () => ipcRenderer.invoke(IPC_CHANNELS.whisperXStart),
+  stopWhisperX: () => ipcRenderer.invoke(IPC_CHANNELS.whisperXStop),
   onProgress(listener) {
     if (typeof listener !== "function") throw new TypeError("Progress listener required");
     // Each registration is distinct, even if a caller registers the same callback twice.

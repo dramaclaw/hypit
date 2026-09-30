@@ -1,5 +1,18 @@
 import type { NewApiSetupInput } from "@dramaclaw/provider-newapi";
 import type { AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
+import type { WhisperXProgramCode, WhisperXProgramStatus, WhisperXProgressStage } from "./whisperx-program.js";
+export type { WhisperXProgressStage } from "./whisperx-program.js";
+
+export type WhisperXPublicStatus = {
+  readonly state: WhisperXProgramStatus["state"];
+  readonly model: "small";
+  readonly device: "cpu";
+  readonly compute: "int8";
+  readonly languages: readonly ["zh", "en"];
+  readonly stage?: WhisperXProgressStage;
+  readonly logPath?: string;
+  readonly errorCode?: WhisperXProgramCode;
+};
 
 /** Submitted from the wizard to the main process. Never include this in an outbound IPC event. */
 export type SetupInput = Omit<NewApiSetupInput, "relay"> & {
@@ -54,6 +67,7 @@ export type SetupStage =
 /** Every outbound variant has a fixed shape, so arbitrary errors or input cannot cross IPC. */
 export type SetupProgress =
   | { readonly kind: "stage"; readonly stage: SetupStage }
+  | { readonly kind: "whisperx-stage"; readonly stage: WhisperXProgressStage }
   | { readonly kind: "model-count"; readonly count: number }
   | { readonly kind: "diagnostic"; readonly item: DiagnosticItem };
 

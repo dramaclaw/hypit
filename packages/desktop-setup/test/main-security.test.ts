@@ -9,6 +9,9 @@ import { browserWindowOptions, createSetupController, isTrustedSender, localPage
 import { IPC_CHANNELS } from "../src/ipc.js";
 import { desktopPaths } from "../src/paths.js";
 import type { SetupInput, SetupResult } from "../src/contracts.js";
+import type { WhisperXProgramService, WhisperXProgramStatus } from "../src/whisperx-program.js";
+
+const whisperXChannels = ["setup:whisperx-status", "setup:whisperx-install", "setup:whisperx-start", "setup:whisperx-stop"];
 
 const input: SetupInput = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", relay: { enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" } };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
@@ -23,7 +26,7 @@ test("window uses isolated sandbox with no Node or webview and only absolute loc
 });
 
 test("IPC channels are closed and arguments cannot smuggle keys or invalid values", () => {
-  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:remove-integration", "setup:refresh-agents", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe"].sort());
+  assert.deepEqual(Object.values(IPC_CHANNELS).sort(), ["setup:clear", "setup:remove-integration", "setup:refresh-agents", "setup:diagnostics", "setup:open-config", "setup:progress", "setup:status", "setup:submit", "setup:subscribe", "setup:unsubscribe", ...whisperXChannels].sort());
   assert.deepEqual(validateIpcArguments("setup:submit", [input]), input);
   for (const invalid of [{ ...input, extra: true }, { ...input, apiKey: "" }, { ...input, relay: { ...input.relay, extra: true } }, { ...input, relay: { enabled: false } }, { ...input, baseUrl: "https://key:secret@api.example" }, { ...input, baseUrl: "https://api.example?apiKey=secret" }]) {
     assert.throws(() => validateIpcArguments("setup:submit", [invalid]));
@@ -35,6 +38,152 @@ test("IPC channels are closed and arguments cannot smuggle keys or invalid value
   assert.equal(validateIpcArguments(IPC_CHANNELS.refreshAgents, []), undefined);
   assert.throws(() => validateIpcArguments(IPC_CHANNELS.refreshAgents, [{ apiKey: "SECRET" }]));
   assert.throws(() => validateIpcArguments("arbitrary", []));
+});
+
+test("every WhisperX action accepts exactly zero IPC arguments", () => {
+  for (const channel of whisperXChannels) {
+    assert.equal(validateIpcArguments(channel, []), undefined);
+    for (const args of [[undefined], [{ apiKey: input.apiKey }], [input], ["/profile"], ["small", "cpu"]]) {
+      assert.throws(() => validateIpcArguments(channel, args), channel);
+    }
+  }
+});
+
+const whisperXLogs = ["/local/program/logs/install.log", "/local/program/logs/service.log"] as const;
+const publicWhisperX = { state: "ready", model: "small", device: "cpu", compute: "int8", languages: ["zh", "en"] };
+function whisperXController(service: WhisperXProgramService) {
+  const forbidden = async () => { throw new Error("SECRET: credential/NewAPI/OSS dependent services must not run"); };
+  return createSetupController({ getStatus: forbidden, commit: forbidden, diagnose: forbidden, install: forbidden,
+    openConfig: forbidden, clear: forbidden, whisperX: service, whisperXLogs });
+}
+function whisperXService(value: unknown): WhisperXProgramService {
+  const run = async () => value as WhisperXProgramStatus;
+  return { status: run, installAndStart: run, start: run, stop: run };
+}
+
+test("WhisperX operations project fresh fixed settings without reading credential-bearing extras", async () => {
+  const reads = new Map<PropertyKey, number>();
+  const status = new Proxy({ state: "ready", stage: "ready", logPath: whisperXLogs[1], code: "WHISPERX_CLEANUP_INCOMPLETE",
+    model: { secret: input.apiKey }, languages: new Array(1_000_000), toJSON() { throw new Error("SECRET"); } }, {
+    get(target, key, receiver) {
+      reads.set(key, (reads.get(key) ?? 0) + 1);
+      if (["credentials", "apiKey", "relay", "model", "languages", "toJSON"].includes(String(key))) throw new Error("SECRET_GETTER");
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const controller = whisperXController(whisperXService(status));
+  for (const action of [controller.getWhisperXStatus, controller.installWhisperX, controller.startWhisperX, controller.stopWhisperX]) {
+    reads.clear();
+    const reply = await action();
+    assert.deepEqual(reply, { ok: true, value: { ...publicWhisperX, stage: "ready", logPath: whisperXLogs[1], errorCode: "WHISPERX_CLEANUP_INCOMPLETE" } });
+    assert.ok([...reads.values()].every(count => count === 1));
+    assert.equal(JSON.stringify(structuredClone(reply)).includes("SECRET"), false);
+    if (reply.ok) (reply.value.languages as string[])[0] = "SECRET";
+  }
+});
+
+test("WhisperX states and stages preserve the Managed Program contract", async () => {
+  for (const state of ["not-installed", "preparing", "prepared", "stopped", "stopping", "starting", "ready", "mismatch", "failed"]) {
+    const reply = await whisperXController(whisperXService({ state })).getWhisperXStatus();
+    assert.deepEqual(reply, { ok: true, value: { ...publicWhisperX, state } });
+  }
+  for (const stage of ["preparing-runtime", "preparing-en", "starting-service", "ready"]) {
+    const reply = await whisperXController(whisperXService({ state: "preparing", stage })).getWhisperXStatus();
+    assert.deepEqual(reply, { ok: true, value: { ...publicWhisperX, state: "preparing", stage } });
+  }
+});
+
+test("WhisperX rejects hostile enums and paths and its queue recovers after every malformed result", async () => {
+  const revoked = Proxy.revocable({}, {}); revoked.revoke();
+  const hostile = new Error("SECRET");
+  Object.defineProperty(hostile, "message", { get() { throw revoked.proxy; } });
+  for (const value of [revoked.proxy, null, [], { state: ["ready"] }, { state: "SECRET" },
+    { state: "ready", stage: ["ready"] }, { state: "ready", stage: "SECRET" },
+    { state: "ready", code: ["WHISPERX_COMMAND_FAILED"] }, { state: "ready", code: "SECRET" },
+    { state: "ready", logPath: { secret: input.apiKey } }, { state: "ready", logPath: "SECRET" },
+    { state: "ready", logPath: "/arbitrary/SECRET.log" }, { state: "ready", logPath: "x".repeat(5000) },
+    { get state() { throw hostile; } }]) {
+    let calls = 0;
+    const controller = whisperXController({ ...whisperXService({ state: "stopped" }), status: async () => ++calls === 1 ? value as WhisperXProgramStatus : { state: "ready" } });
+    const invalid = await controller.getWhisperXStatus();
+    assert.equal(invalid.ok, false);
+    assert.doesNotMatch(JSON.stringify(structuredClone(invalid)), /SECRET/);
+    assert.equal((await controller.getWhisperXStatus()).ok, true);
+    assert.equal((await controller.stopWhisperX()).ok, true);
+  }
+});
+
+test("WhisperX projection takes each status getter exactly once", async () => {
+  const counts = { state: 0, stage: 0, code: 0, logPath: 0 };
+  const reply = await whisperXController(whisperXService({
+    get state() { return ++counts.state === 1 ? "ready" : input.apiKey; },
+    get stage() { return ++counts.stage === 1 ? "ready" : input.apiKey; },
+    get code() { return ++counts.code === 1 ? "WHISPERX_PROFILE_REQUIRED" : input.apiKey; },
+    get logPath() { return ++counts.logPath === 1 ? whisperXLogs[1] : input.apiKey; },
+  })).getWhisperXStatus();
+  assert.deepEqual(counts, { state: 1, stage: 1, code: 1, logPath: 1 });
+  assert.equal(reply.ok, true);
+  assert.doesNotMatch(JSON.stringify(structuredClone(reply)), /SECRET/);
+});
+
+test("WhisperX shares the setup queue, coalesces installs, and outlives removed or failed observers", async () => {
+  const calls: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let report!: (stage: any) => void;
+  let begin!: () => void;
+  const begun = new Promise<void>(resolve => { begin = resolve; });
+  const controller = createSetupController({
+    getStatus: async () => { calls.push("setup-status"); return result; }, commit: async () => result,
+    install: async () => {}, diagnose: async () => [], openConfig: async () => {}, clear: async () => { calls.push("clear"); return result; },
+    whisperX: {
+      installAndStart: async (...args) => { assert.equal(args.length, 1); report = args[0]!; calls.push("install"); begin(); await gate; report("ready"); return { state: "ready" }; },
+      status: async (...args) => { assert.equal(args.length, 0); calls.push("status"); return { state: "ready" }; },
+      start: async (...args) => { assert.equal(args.length, 1); calls.push("start"); return { state: "ready" }; },
+      stop: async (...args) => { assert.equal(args.length, 0); calls.push("stop"); return { state: "stopped" }; },
+    }, whisperXLogs,
+  });
+  const events: unknown[] = [];
+  const detach = controller.subscribe(value => events.push(value));
+  controller.subscribe(() => { throw new Error("Closed renderer SECRET"); });
+  controller.subscribe(async () => { throw new Error("Detached async observer SECRET"); });
+  const install = controller.installWhisperX();
+  const duplicate = controller.installWhisperX();
+  await begun;
+  report("preparing-runtime"); report(["ready"]); report("SECRET");
+  assert.deepEqual(events, [{ kind: "whisperx-stage", stage: "preparing-runtime" }]);
+  detach();
+  const queued = [controller.clearConfiguration(), controller.getWhisperXStatus(), controller.startWhisperX(), controller.stopWhisperX(), controller.getStatus()];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ["install"]);
+  release();
+  const replies = await Promise.all([install, duplicate, ...queued]);
+  assert.ok(replies.every(reply => reply.ok));
+  assert.deepEqual(calls, ["install", "clear", "status", "start", "stop", "setup-status"]);
+  assert.equal(events.length, 1);
+  assert.equal((await controller.installWhisperX()).ok, true);
+  assert.equal(calls.filter(call => call === "install").length, 2);
+});
+
+test("whenIdle snapshots already queued work without being extended by later requests", async () => {
+  let releaseFirst!: () => void, releaseSecond!: () => void;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const controller = whisperXController({ ...whisperXService({ state: "ready" }),
+    installAndStart: async () => { await firstGate; return { state: "ready" }; },
+    stop: async () => { await secondGate; return { state: "stopped" }; },
+  });
+  const first = controller.installWhisperX();
+  let idle = false, secondDone = false;
+  const wait = controller.whenIdle().then(() => { idle = true; });
+  const second = controller.stopWhisperX().then(() => { secondDone = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(idle, false);
+  releaseFirst();
+  await first; await wait;
+  assert.equal(idle, true);
+  assert.equal(secondDone, false);
+  releaseSecond(); await second;
 });
 
 test("Agent refresh joins the controller queue and returns projected status plus diagnostics", async () => {
@@ -386,7 +535,10 @@ test("CJS shell boots without import.meta and stages the Windows credential help
   runInNewContext(await readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8"), { require: (name: string) => {
     assert.equal(name, "electron"); return { ipcRenderer: renderer, contextBridge: { exposeInMainWorld: (name: string, bridge: unknown) => { assert.equal(name, "hypitSetup"); exposed = bridge; } } };
   } });
-  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "onProgress", "openConfigDirectory", "refreshAgentIntegration", "removeIntegration", "rerunDiagnostics", "submit"]);
+  assert.deepEqual(Object.keys(exposed).sort(), ["clearConfiguration", "getStatus", "getWhisperXStatus", "installWhisperX", "onProgress", "openConfigDirectory", "refreshAgentIntegration", "removeIntegration", "rerunDiagnostics", "startWhisperX", "stopWhisperX", "submit"]);
+  for (const name of ["getWhisperXStatus", "installWhisperX", "startWhisperX", "stopWhisperX"]) await exposed[name](input);
+  assert.deepEqual(calls, whisperXChannels.map(channel => [channel]));
+  calls.length = 0;
   await exposed.refreshAgentIntegration();
   assert.deepEqual(calls, [["setup:refresh-agents"]]);
   calls.length = 0;
@@ -401,4 +553,104 @@ test("CJS shell boots without import.meta and stages the Windows credential help
   second();
   assert.equal(callbacks.size, 0);
   assert.deepEqual(calls, [["setup:subscribe"], ["setup:unsubscribe"]]);
+});
+
+for (const platform of ["darwin", "win32"] as const) test(`packaged ${platform} WhisperX IPC verifies sender, uses no credentials, and survives window closure`, async () => {
+  execFileSync(process.execPath, ["scripts/build.mjs"], { cwd: new URL("../", import.meta.url), stdio: "pipe" });
+  const entry = new URL("../dist/main.cjs", import.meta.url);
+  const actualRequire = createRequire(entry);
+  const handlers = new Map<string, (...args: any[]) => Promise<any>>();
+  const subscriptions = new Map<string, (...args: any[]) => void>();
+  const calls: string[] = [];
+  const options: unknown[] = [];
+  const appEvents = new Map<string, () => void>();
+  let quits = 0, windows = 0;
+  let gate: Promise<void> | undefined;
+  let startGate: Promise<void> | undefined;
+  let currentWindow: FakeWindow;
+  class FakeWindow {
+    webContents = { mainFrame: { url: "" }, on() {}, setWindowOpenHandler() {}, isDestroyed: () => false, send() {},
+      session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } };
+    events = new Map<string, () => void>();
+    constructor() { currentWindow = this; windows++; }
+    on(name: string, listener: () => void) { this.events.set(name, listener); }
+    isDestroyed() { return false; }
+    show() {} focus() {}
+    async loadURL(url: string) { this.webContents.mainFrame.url = url; }
+  }
+  const service = Object.fromEntries(["status", "installAndStart", "start", "stop"].map(name => [name, async (...args: unknown[]) => {
+    calls.push(name); assert.equal(args.length, name === "status" || name === "stop" ? 0 : 1);
+    if (name === "installAndStart") await gate;
+    if (name === "start") await startGate;
+    return { state: "ready" };
+  }]));
+  const sandbox: any = { require: (name: string) => name === "electron" ? {
+    app: { requestSingleInstanceLock: () => true, whenReady: async () => {}, getPath: () => "/local/home", getVersion: () => "1.0", on: (name: string, fn: () => void) => appEvents.set(name, fn), quit() { quits++; } },
+    BrowserWindow: FakeWindow, ipcMain: { handle: (channel: string, handler: any) => handlers.set(channel, handler), on: (channel: string, handler: any) => subscriptions.set(channel, handler) },
+  } : actualRequire(name), module: { exports: {}, paths: [] }, __dirname: "/bundle", URL, Buffer, console,
+    process: { ...process, platform, resourcesPath: "/resources" }, fixture: result, service,
+    recordOptions: (value: unknown) => options.push(value) };
+  const source = (await readFile(entry, "utf8")).replace("startElectronShell(__dirname).catch", `
+    scanAgentTargets = async () => ({ targets: [], detectedAgents: [] });
+    refreshDesktopStatus = async () => fixture;
+    createDesktopStatusLifecycle = () => ({ integration: {}, getStatus: async () => fixture, profileCommitted() {}, refreshAgents: async () => {} });
+    createWhisperXProgramService = (options) => { recordOptions(options); return service; };
+    globalThis.boot = startElectronShell(__dirname).catch`);
+  runInNewContext(source, sandbox);
+  await sandbox.boot;
+  const contents = currentWindow!.webContents;
+  const trusted = { sender: contents, senderFrame: contents.mainFrame };
+  for (const channel of whisperXChannels) {
+    const handler = handlers.get(channel);
+    assert.equal(typeof handler, "function", channel);
+    for (const event of [{ ...trusted, sender: {} }, { ...trusted, senderFrame: { ...contents.mainFrame } }]) assert.equal((await handler!(event)).ok, false);
+    assert.equal((await handler!(trusted, input)).ok, false);
+  }
+  assert.deepEqual(calls, []);
+  for (const channel of whisperXChannels) assert.equal((await handlers.get(channel)!(trusted)).ok, true);
+  assert.deepEqual(calls, ["status", "installAndStart", "start", "stop"]);
+  assert.equal(options.length, 1);
+  const captured = options[0] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(captured).sort(), ["bundledBin", "bundledUv", "cliEntry", "electronExecutable", "paths", "platform"]);
+  assert.equal(captured.bundledUv, platform === "win32" ? "/resources/bin/uv.exe" : "/resources/bin/uv");
+  assert.deepEqual(Object.keys(captured.paths as object).sort(), ["hostState", "profile"]);
+  assert.doesNotMatch(JSON.stringify(options), /SECRET/);
+  for (const reopen of [true, false]) {
+    let release!: () => void;
+    let releaseStart!: () => void;
+    let queuedStart: Promise<any> | undefined;
+    gate = new Promise<void>(resolve => { release = resolve; });
+    const contents = currentWindow!.webContents;
+    const install = handlers.get("setup:whisperx-install")!({ sender: contents, senderFrame: contents.mainFrame });
+    await new Promise(resolve => setImmediate(resolve));
+    currentWindow!.events.get("closed")!();
+    appEvents.get("window-all-closed")!();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(quits, 0, "closing an observer must not quit during preparation");
+    if (reopen) {
+      appEvents.get("second-instance")!();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(windows, 2, "second launch reattaches to the retained main-process service");
+      assert.equal(options.length, 1);
+      startGate = new Promise<void>(resolve => { releaseStart = resolve; });
+      const reopenedContents = currentWindow!.webContents;
+      queuedStart = handlers.get("setup:whisperx-start")!({ sender: reopenedContents, senderFrame: reopenedContents.mainFrame });
+      currentWindow!.events.get("closed")!();
+      appEvents.get("window-all-closed")!();
+    }
+    release();
+    assert.equal((await install).ok, true);
+    await new Promise(resolve => setImmediate(resolve));
+    if (reopen) {
+      assert.equal(quits, 0, "a stale close wait must not quit work queued by a reopened window");
+      releaseStart();
+      assert.equal((await queuedStart!).ok, true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(quits, platform === "win32" ? 1 : 0);
+      // Simulate macOS activation / another Windows launch for the independent final-close case.
+      appEvents.get("activate")!();
+      await new Promise(resolve => setImmediate(resolve));
+      quits = 0;
+    } else assert.equal(quits, platform === "win32" ? 1 : 0);
+  }
 });

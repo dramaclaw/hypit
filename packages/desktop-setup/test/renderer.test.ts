@@ -8,6 +8,8 @@ import type { SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
+const unusedWhisperX = async (): Promise<never> => { throw new Error("WhisperX is not used by this wizard fixture"); };
+const whisperXBridge = { getWhisperXStatus: unusedWhisperX, installWhisperX: unusedWhisperX, startWhisperX: unusedWhisperX, stopWhisperX: unusedWhisperX };
 
 test("backup-health warning explains restoration at the allowlisted diagnostic path", () => {
   const { document } = parseHTML("<main id='app'></main>");
@@ -65,6 +67,7 @@ test("refresh button calls only the no-argument bridge operation and blocks muta
   const pending = new Promise<SetupReply<SetupResult>>(resolve => { release = resolve; });
   const calls: unknown[][] = [];
   const dispose = mountWizard(root, {
+    ...whisperXBridge,
     getStatus: async () => ({ ok: true, value: result }),
     submit: async () => { calls.push(["submit"]); return { ok: true, value: result }; },
     refreshAgentIntegration: (...args: unknown[]) => { calls.push(["refresh", ...args]); return pending; },
@@ -201,7 +204,7 @@ test("typing then submitting sends current fields and unsubscribes on disposal",
   let submitted: unknown;
   let detached = false;
   const draft: string[] = [];
-  const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: { ...result, configured: false } }),
+  const dispose = mountWizard(root, { ...whisperXBridge, getStatus: async () => ({ ok: true, value: { ...result, configured: false } }),
     submit: async (input) => { submitted = input; return { ok: true, value: result }; }, rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }),
     openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
     onProgress: () => () => { detached = true; } }, { getItem: () => null, setItem: (_key, value) => { draft.push(value); }, removeItem: () => {} });
@@ -227,7 +230,7 @@ test("late initial status cannot discard early edits or submitted secrets", asyn
   let resolveStatus!: (reply: SetupReply<SetupResult>) => void;
   const pending = new Promise<SetupReply<SetupResult>>((resolve) => { resolveStatus = resolve; });
   let submitted: unknown;
-  const dispose = mountWizard(root, { getStatus: () => pending,
+  const dispose = mountWizard(root, { ...whisperXBridge, getStatus: () => pending,
     submit: async (input) => { submitted = input; return { ok: true, value: result }; },
     rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }), openConfigDirectory: async () => ({ ok: true, value: undefined }),
     clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }), onProgress: () => () => {} },
@@ -254,7 +257,7 @@ test("startup stays on welcome for pristine status and opens recovery for partia
   ] as const) {
     const { document } = parseHTML("<main id='app'></main>");
     const root = document.getElementById("app")! as unknown as HTMLElement;
-    const dispose = mountWizard(root, { getStatus: async () => ({ ok: true, value: status }),
+    const dispose = mountWizard(root, { ...whisperXBridge, getStatus: async () => ({ ok: true, value: status }),
       submit: async () => ({ ok: true, value: result }), rerunDiagnostics: async () => ({ ok: true, value: result }), refreshAgentIntegration: async () => ({ ok: true, value: result }),
       openConfigDirectory: async () => ({ ok: true, value: undefined }), clearConfiguration: async () => ({ ok: true, value: result }), removeIntegration: async () => ({ ok: true, value: result }),
       onProgress: () => () => {} }, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
