@@ -3,8 +3,8 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { parseHTML } from "linkedom";
 import { canSubmit, initialWizardState, persistedWizardState, renderWizard, mountWizard, stageCopy, wizardReducer, EXAMPLE_PROMPT } from "../src/renderer.js";
-import type { SetupResult } from "../src/contracts.js";
-import type { SetupReply } from "../src/ipc.js";
+import type { SetupProgress, SetupResult, WhisperXPublicStatus } from "../src/contracts.js";
+import type { SetupBridge, SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
@@ -160,7 +160,7 @@ test("Chinese stages, cleanup warning and literal example render safely", () => 
   renderWizard(root, wizardReducer(filled(), { type: "success", result }), () => {});
   assert.ok(root.textContent?.includes(EXAMPLE_PROMPT));
   assert.equal(EXAMPLE_PROMPT, "请使用 $hypit，把我的参考视频改编成新版本；使用本机已配置的 NewAPI 和 OSS。");
-  assert.match(root.textContent!, /Chrome.*WhisperX.*下载/);
+  assert.match(root.textContent!, /Chrome.*下载/);
 });
 
 test("cleanup-only warning appears on the completed page with the exact object key", () => {
@@ -304,4 +304,180 @@ test("internal build notices explain platform-specific unsigned launch and Windo
   assert.match(root.textContent!, /SmartScreen.*更多信息.*仍要运行/);
   assert.match(root.textContent!, /跨平台构建.*未经 Windows 实机验证/);
   assert.doesNotMatch(root.textContent!, /Gatekeeper/);
+});
+
+const localStatus = (state: WhisperXPublicStatus["state"], extra: Partial<WhisperXPublicStatus> = {}): WhisperXPublicStatus =>
+  ({ state, model: "small", device: "cpu", compute: "int8", languages: ["zh", "en"], ...extra });
+const tick = () => new Promise<void>(resolve => setImmediate(resolve));
+const storage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+function localBridge(overrides: Partial<SetupBridge> = {}): SetupBridge {
+  const setup = async (): Promise<SetupReply<SetupResult>> => ({ ok: true, value: result });
+  const status = async (): Promise<SetupReply<WhisperXPublicStatus>> => ({ ok: true, value: localStatus("not-installed") });
+  return { getStatus: setup, submit: setup, rerunDiagnostics: setup, refreshAgentIntegration: setup,
+    clearConfiguration: setup, removeIntegration: setup, openConfigDirectory: async () => ({ ok: true, value: undefined }),
+    getWhisperXStatus: status, installWhisperX: status, startWhisperX: status, stopWhisperX: status,
+    onProgress: () => () => {}, ...overrides };
+}
+
+test("optional local card renders all public states and fixed Chinese actions", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const copies: Record<WhisperXPublicStatus["state"], [string, string | undefined]> = {
+    "not-installed": ["尚未安装", "安装并启动"], preparing: ["正在准备", undefined],
+    prepared: ["已准备，尚未启动", "启动服务"], stopped: ["服务已停止", "启动服务"],
+    starting: ["正在启动服务", undefined], stopping: ["正在停止服务", undefined],
+    ready: ["服务已就绪", "停止服务"], mismatch: ["本地配置需要检查", "重试安装"], failed: ["本地操作失败", "重试安装"],
+  };
+  for (const [name, [copy, action]] of Object.entries(copies)) {
+    const state = wizardReducer(wizardReducer(initialWizardState(), { type: "success", result }),
+      { type: "whisperx-result", status: localStatus(name as WhisperXPublicStatus["state"]) });
+    assert.ok(state, "reducer accepts local status");
+    renderWizard(root, state, () => {});
+    const card = root.querySelector("[data-whisperx]")!;
+    assert.ok(card, name);
+    for (const text of ["本地语音识别与字幕对齐（可选）", "small · CPU · int8", "中文和英文", "检查状态", copy]) assert.ok(card.textContent?.includes(text), text);
+    assert.equal(card.querySelectorAll("ol li").length, 4);
+    if (action) assert.ok(Array.from(card.querySelectorAll("button")).some(button => button.textContent === action), action);
+  }
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result }), () => {});
+  for (const text of ["下载量较大", "较长时间", "不收取 NewAPI 模型费用", "不访问 NewAPI 或 OSS 凭据"]) assert.ok(root.textContent?.includes(text), text);
+  renderWizard(root, initialWizardState(), () => {});
+  assert.equal(root.querySelector("[data-whisperx]"), null);
+});
+
+test("local reducer preserves status while pending and keeps progress separate from setup fields", () => {
+  let state = wizardReducer(filled(), { type: "whisperx-result", status: localStatus("failed", { errorCode: "WHISPERX_TIMEOUT" }) });
+  assert.ok(state, "reducer accepts local status");
+  state = wizardReducer(state, { type: "whisperx-failure" });
+  state = wizardReducer(state, { type: "whisperx-request", operation: "install" });
+  assert.equal(state.whisperX.status?.state, "failed");
+  assert.equal(state.whisperX.error, undefined);
+  assert.equal(state.whisperX.pending, "install");
+  for (const stage of ["preparing-runtime", "preparing-en", "starting-service", "ready"] as const) {
+    state = wizardReducer(state, { type: "progress", progress: { kind: "whisperx-stage", stage } });
+    assert.equal(state.whisperX.stage, stage);
+    assert.equal(state.stage, "validating");
+    assert.deepEqual(state.fields, fields);
+  }
+  assert.equal(JSON.stringify(persistedWizardState(state)).includes("whisperX"), false);
+});
+
+test("local paths are literal text and all failure codes use fixed public guidance", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const hostile = "/logs/<img src=x onerror=alert(1)>";
+  const codes = ["WHISPERX_BUNDLED_UV_INVALID", "WHISPERX_PROFILE_REQUIRED", "WHISPERX_PROFILE_INVALID", "WHISPERX_PROFILE_CONFLICT",
+    "WHISPERX_PROFILE_PREPARE_FAILED", "WHISPERX_PROFILE_COMMIT_FAILED", "WHISPERX_COMMAND_FAILED", "WHISPERX_INVALID_REPORT",
+    "WHISPERX_OUTPUT_LIMIT", "WHISPERX_TIMEOUT", "WHISPERX_NOT_READY", "WHISPERX_STATE_FAILED", "WHISPERX_CLEANUP_INCOMPLETE"] as const;
+  for (const errorCode of codes) {
+    const status = { ...localStatus("failed", { logPath: hostile, errorCode }), message: "SECRET_MESSAGE", rawError: "SECRET_ERROR" };
+    const state = wizardReducer(wizardReducer(initialWizardState(), { type: "success", result: { ...result,
+      skillTargets: [{ ...result.skillTargets[0]!, path: hostile }] } }), { type: "whisperx-result", status });
+    assert.ok(state, "reducer accepts local status");
+    renderWizard(root, state, () => {});
+    assert.equal(root.querySelector("img"), null);
+    assert.ok(Array.from(root.querySelectorAll("code")).filter(node => node.textContent === hostile).length >= 2);
+    assert.ok(root.querySelector("[data-whisperx] [role='alert']")?.textContent);
+    assert.doesNotMatch(root.textContent!, /SECRET_|WHISPERX_/);
+  }
+});
+
+test("local install is explicit, credential-free, deduplicated and refreshes after terminal progress", async () => {
+  const { document, window } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const calls: unknown[][] = [];
+  let progress!: (value: SetupProgress) => void;
+  let release!: (reply: SetupReply<WhisperXPublicStatus>) => void;
+  let current = localStatus("not-installed");
+  const dispose = mountWizard(root, localBridge({
+    getWhisperXStatus: async (...args: unknown[]) => { calls.push(["status", ...args]); return { ok: true, value: current }; },
+    installWhisperX: (...args: unknown[]) => { calls.push(["install", ...args]); return new Promise(resolve => { release = resolve; }); },
+    onProgress: listener => { progress = listener; return () => {}; },
+  }), storage);
+  await tick();
+  assert.deepEqual(calls, [["status"]]);
+  const button = root.querySelector<HTMLButtonElement>("[data-whisperx-action='install']")!;
+  button.click(); button.click();
+  button.dispatchEvent(new window.Event("click"));
+  assert.deepEqual(calls, [["status"], ["install"]]);
+  assert.equal(root.querySelectorAll("button:not([disabled])").length, 0);
+  for (const [stage, copy] of [["preparing-runtime", "正在准备运行环境与中文模型"], ["preparing-en", "正在准备英文模型"], ["starting-service", "正在启动服务"], ["ready", "服务已就绪"]] as const) {
+    progress({ kind: "whisperx-stage", stage });
+    assert.ok(root.querySelector("[data-whisperx] [role='status']")?.textContent?.includes(copy), copy);
+    assert.equal(root.querySelectorAll("button:not([disabled])").length, 0);
+  }
+  current = localStatus("ready"); release({ ok: true, value: current }); await tick();
+  assert.deepEqual(calls, [["status"], ["install"], ["status"]]);
+  assert.equal(root.querySelector<HTMLButtonElement>("[data-whisperx-action='stop']")?.disabled, false);
+  dispose();
+});
+
+test("start, stop and status are no-argument actions and failures refresh without exposing raw messages", async () => {
+  for (const operation of ["start", "stop", "status"] as const) {
+    const { document } = parseHTML("<main id='app'></main>");
+    const root = document.getElementById("app")! as unknown as HTMLElement;
+    const calls: unknown[][] = [];
+    let statusCalls = 0;
+    const status = localStatus(operation === "stop" ? "ready" : "stopped");
+    const failed = async (...args: unknown[]): Promise<SetupReply<WhisperXPublicStatus>> => { calls.push([operation, ...args]); throw new Error("SECRET_RAW_ERROR"); };
+    const dispose = mountWizard(root, localBridge({ getWhisperXStatus: async (...args: unknown[]) => {
+      calls.push(["status", ...args]); statusCalls++;
+      if (operation === "status" && statusCalls > 1) return { ok: false, error: { code: "SECRET_CODE", message: "SECRET_MESSAGE" } };
+      return { ok: true, value: status };
+    }, startWhisperX: failed, stopWhisperX: failed }), storage);
+    await tick();
+    const action = root.querySelector<HTMLButtonElement>(`[data-whisperx-action='${operation}']`);
+    assert.ok(action, "local action is available"); action.click(); await tick();
+    assert.deepEqual(calls, operation === "status" ? [["status"], ["status"]] : [["status"], [operation], ["status"]]);
+    assert.match(root.querySelector("[data-whisperx]")!.textContent!, /操作未完成，请检查状态后重试/);
+    assert.doesNotMatch(root.textContent!, /SECRET_/);
+    dispose();
+  }
+});
+
+test("closing only detaches progress and reopening queries bridge state without automatic installation", async () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  let detached = 0, installs = 0, stops = 0, queries = 0;
+  let release!: (reply: SetupReply<WhisperXPublicStatus>) => void;
+  let current = localStatus("not-installed");
+  const bridge = localBridge({
+    getWhisperXStatus: async () => { queries++; return { ok: true, value: current }; },
+    installWhisperX: () => { installs++; return new Promise(resolve => { release = resolve; }); },
+    stopWhisperX: async () => { stops++; return { ok: true, value: current }; },
+    onProgress: () => () => { detached++; },
+  });
+  const dispose = mountWizard(root, bridge, storage); await tick();
+  const install = root.querySelector<HTMLButtonElement>("[data-whisperx-action='install']");
+  assert.ok(install, "local installation is available"); install.click(); dispose();
+  assert.equal(detached, 1); assert.equal(stops, 0); assert.equal(root.childNodes.length, 0);
+  current = localStatus("ready"); release({ ok: true, value: current }); await tick();
+  const close = mountWizard(root, bridge, storage); await tick();
+  assert.equal(installs, 1); assert.ok(queries >= 2); assert.match(root.textContent!, /服务已就绪/);
+  close();
+});
+
+test("pending stop announces stopping instead of the previous ready stage", async () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  let release!: (reply: SetupReply<WhisperXPublicStatus>) => void;
+  const dispose = mountWizard(root, localBridge({
+    getWhisperXStatus: async () => ({ ok: true, value: localStatus("ready", { stage: "ready" }) }),
+    stopWhisperX: () => new Promise(resolve => { release = resolve; }),
+  }), storage);
+  await tick(); root.querySelector<HTMLButtonElement>("[data-whisperx-action='stop']")!.click();
+  assert.equal(root.querySelector("[data-whisperx] [role='status']")?.textContent, "正在停止服务");
+  release({ ok: true, value: localStatus("stopped") }); await tick(); dispose();
+});
+
+test("terminal service failure remains visible after a fresh status loses its error code", async () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const dispose = mountWizard(root, localBridge({ installWhisperX: async () => ({ ok: true,
+    value: localStatus("failed", { errorCode: "WHISPERX_TIMEOUT" }) }) }), storage);
+  await tick(); root.querySelector<HTMLButtonElement>("[data-whisperx-action='install']")!.click(); await tick();
+  assert.match(root.querySelector("[data-whisperx] [role='alert']")!.textContent!, /等待超时/);
+  root.querySelector<HTMLButtonElement>("[data-whisperx-action='status']")!.click();
+  assert.equal(root.querySelector("[data-whisperx] [role='alert']"), null);
+  await tick(); assert.equal(root.querySelector("[data-whisperx] [role='alert']"), null); dispose();
 });

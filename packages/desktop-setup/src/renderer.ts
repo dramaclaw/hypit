@@ -1,4 +1,4 @@
-import type { SetupInput, SetupProgress, SetupResult, SetupStage } from "./contracts.js";
+import type { SetupInput, SetupProgress, SetupResult, SetupStage, WhisperXProgressStage, WhisperXPublicStatus } from "./contracts.js";
 import type { SetupBridge, SetupFailure } from "./ipc.js";
 
 export const EXAMPLE_PROMPT = "请使用 $hypit，把我的参考视频改编成新版本；使用本机已配置的 NewAPI 和 OSS。";
@@ -9,6 +9,31 @@ export const stageCopy: Readonly<Record<SetupStage, string>> = {
 };
 type Fields = { baseUrl: string; apiKey: string; endpoint: string; bucket: string; accessKeyId: string; accessKeySecret: string };
 type SecretField = "apiKey" | "accessKeyId" | "accessKeySecret";
+type WhisperXOperation = "status" | "install" | "start" | "stop";
+const whisperXRequestFailure = "操作未完成，请检查状态后重试。";
+const whisperXStageCopy: Record<WhisperXProgressStage, string> = {
+  "preparing-runtime": "正在准备运行环境与中文模型", "preparing-en": "正在准备英文模型",
+  "starting-service": "正在启动服务", ready: "服务已就绪",
+};
+const whisperXStateCopy: Record<WhisperXPublicStatus["state"], string> = {
+  "not-installed": "尚未安装", preparing: "正在准备", prepared: "已准备，尚未启动", stopped: "服务已停止",
+  starting: "正在启动服务", stopping: "正在停止服务", ready: "服务已就绪", mismatch: "本地配置需要检查", failed: "本地操作失败",
+};
+const whisperXErrorCopy: Record<NonNullable<WhisperXPublicStatus["errorCode"]>, string> = {
+  WHISPERX_BUNDLED_UV_INVALID: "安装资源不完整，请重新安装 Hypit 后重试。",
+  WHISPERX_PROFILE_REQUIRED: "请先完成本机配置，再启动本地服务。",
+  WHISPERX_PROFILE_INVALID: "运行配置无法读取，请检查本机配置后重试。",
+  WHISPERX_PROFILE_CONFLICT: "已有本地服务配置与此安装不一致，请检查运行配置。",
+  WHISPERX_PROFILE_PREPARE_FAILED: "无法准备运行配置，请检查配置目录的访问权限后重试。",
+  WHISPERX_PROFILE_COMMIT_FAILED: "服务配置未能保存，请检查配置目录的访问权限后重试。",
+  WHISPERX_COMMAND_FAILED: "本地准备或服务操作失败，请检查网络和日志后重试。",
+  WHISPERX_INVALID_REPORT: "无法确认本地服务结果，请检查状态和日志后重试。",
+  WHISPERX_OUTPUT_LIMIT: "本地操作输出超出限制，请检查日志后重试。",
+  WHISPERX_TIMEOUT: "本地操作等待超时，请检查网络和日志后重试。",
+  WHISPERX_NOT_READY: "服务尚未就绪，请检查状态和日志后重试。",
+  WHISPERX_STATE_FAILED: "无法读取或保存本地状态，请检查目录的访问权限后重试。",
+  WHISPERX_CLEANUP_INCOMPLETE: "临时文件清理未完成，请检查日志和配置目录后重试。",
+};
 export type WizardState = {
   readonly screen: "welcome" | "settings" | "working" | "complete";
   readonly fields: Fields;
@@ -18,6 +43,8 @@ export type WizardState = {
   readonly error?: SetupFailure;
   readonly confirmClear: boolean;
   readonly returnScreen: "settings" | "complete";
+  readonly whisperX: { readonly status?: WhisperXPublicStatus; readonly pending?: WhisperXOperation;
+    readonly stage?: WhisperXProgressStage; readonly error?: string };
 };
 export type WizardAction =
   | { type: "begin" | "working" | "refresh-agents" | "edit" | "confirm-clear" | "cancel-clear" }
@@ -25,8 +52,12 @@ export type WizardAction =
   | { type: "toggle-secret"; field: SecretField }
   | { type: "progress"; progress: SetupProgress }
   | { type: "success"; result: SetupResult }
+  | { type: "whisperx-request"; operation: WhisperXOperation }
+  | { type: "whisperx-result"; status: WhisperXPublicStatus }
+  | { type: "whisperx-failure" | "whisperx-settled" }
   | { type: "failure"; error: SetupFailure };
-type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" | "remove-integration" };
+type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" | "remove-integration"
+  | "whisperx-status" | "whisperx-install" | "whisperx-start" | "whisperx-stop" };
 const agentLabels = { codex: "Codex", "claymore-piko": "Claymore Piko", cursor: "Cursor", "claude-code": "Claude Code" } as const;
 const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId: false, accessKeySecret: false });
 
@@ -44,7 +75,7 @@ export function initialWizardState(draft: unknown = {}): WizardState {
   return { screen: item.screen === "settings" ? "settings" : "welcome", fields: {
     baseUrl: resumableAddress(item.baseUrl), apiKey: "", endpoint: resumableAddress(item.endpoint, true),
     bucket: typeof item.bucket === "string" && /^[a-z0-9-]{1,63}$/u.test(item.bucket) ? item.bucket : "", accessKeyId: "", accessKeySecret: "",
-  }, visible: hidden(), stage: "validating", confirmClear: false, returnScreen: "settings" };
+  }, visible: hidden(), stage: "validating", confirmClear: false, returnScreen: "settings", whisperX: {} };
 }
 
 export function persistedWizardState(state: WizardState) {
@@ -72,7 +103,18 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         fields: { ...state.fields, apiKey: "", accessKeyId: "", accessKeySecret: "" },
         returnScreen: state.screen === "complete" ? "complete" : "settings" };
     }
-    case "progress": return action.progress.kind === "stage" ? { ...state, stage: action.progress.stage } : state;
+    case "progress": return action.progress.kind === "stage" ? { ...state, stage: action.progress.stage }
+      : action.progress.kind === "whisperx-stage" ? { ...state, whisperX: { ...state.whisperX, stage: action.progress.stage } } : state;
+    case "whisperx-request": return { ...state, whisperX: { ...(state.whisperX.status ? { status: state.whisperX.status } : {}), pending: action.operation } };
+    case "whisperx-result": {
+      const { stage: _stage, ...rest } = state.whisperX;
+      return { ...state, whisperX: { ...rest, status: action.status, ...(action.status.stage ? { stage: action.status.stage } : {}) } };
+    }
+    case "whisperx-failure": return { ...state, whisperX: { ...state.whisperX, error: whisperXRequestFailure } };
+    case "whisperx-settled": {
+      const { pending: _pending, ...rest } = state.whisperX;
+      return { ...state, whisperX: rest };
+    }
     case "success": {
       const { error: _error, ...rest } = state;
       return { ...rest, screen: action.result.configured ? "complete" : "settings", result: action.result, stage: "complete", confirmClear: false,
@@ -100,8 +142,8 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   };
   const button = (text: string, action: UiAction, className = "secondary") => {
     const element = node("button", text, className); element.type = "button";
-    element.disabled = pending || state.screen === "working";
-    element.addEventListener("click", () => { dispatch(action); });
+    element.disabled = pending || !!state.whisperX.pending || state.screen === "working";
+    element.addEventListener("click", () => { if (!element.disabled) dispatch(action); });
     return element;
   };
   root.replaceChildren();
@@ -226,7 +268,46 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   panel.append(node("p", "完成 / 诊断", "eyebrow"), node("h1", failed ? "配置已保存，需要检查" : "Hypit 已配置"),
     node("p", "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。", "intro"));
   if (state.result) { appendAgentTargets(); appendDiagnostics(); }
-  panel.append(node("p", "在你的 Agent 中试试", "eyebrow"), node("blockquote", EXAMPLE_PROMPT), node("p", "Chrome 和 WhisperX 及模型权重可能在以后首次使用时下载。", "muted"));
+  panel.append(node("p", "在你的 Agent 中试试", "eyebrow"), node("blockquote", EXAMPLE_PROMPT), node("p", "Chrome 可能在以后首次使用时下载。", "muted"));
+  const local = state.whisperX;
+  const card = node("section", undefined, "local-capability"); card.setAttribute("data-whisperx", "");
+  card.setAttribute("aria-labelledby", "whisperx-title"); card.setAttribute("aria-busy", String(!!local.pending));
+  const title = node("h2", "本地语音识别与字幕对齐（可选）"); title.id = "whisperx-title";
+  card.append(node("p", "本机能力 · WhisperX", "eyebrow"), title,
+    node("p", "small · CPU · int8", "local-spec"), node("p", "支持中文和英文，在本机识别语音并对齐字幕。", "muted"));
+  const current = local.status?.state;
+  const progressStage = local.stage ?? (!local.pending || local.pending === "status" ? local.status?.stage : undefined);
+  const statusCopy = local.pending && local.pending !== "status"
+    ? progressStage ? whisperXStageCopy[progressStage] : { install: "正在准备安装", start: "正在启动服务", stop: "正在停止服务" }[local.pending]
+    : current ? whisperXStateCopy[current] : local.pending ? "正在检查本地状态" : "请检查本地状态";
+  const localStatus = node("p", statusCopy, "local-status"); localStatus.setAttribute("role", "status"); localStatus.setAttribute("aria-live", "polite");
+  card.append(localStatus);
+  const trajectory = node("ol", undefined, "steps local-steps"); trajectory.setAttribute("aria-label", "本地准备过程");
+  const stages: WhisperXProgressStage[] = ["preparing-runtime", "preparing-en", "starting-service", "ready"];
+  ["环境与中文模型", "英文模型", "启动服务", "就绪"].forEach((label, index) => {
+    const step = node("li", label);
+    if (stages[index] === progressStage) step.setAttribute("aria-current", "step");
+    trajectory.append(step);
+  });
+  card.append(trajectory, node("p", "首次准备的下载量较大，可能需要较长时间，具体取决于网络和本机性能。不收取 NewAPI 模型费用；本地准备不访问 NewAPI 或 OSS 凭据。", "muted"));
+  if (!local.pending) {
+    const error = local.error ?? (local.status?.errorCode ? whisperXErrorCopy[local.status.errorCode] : undefined);
+    if (error) { const warning = node("p", error, "warning"); warning.setAttribute("role", "alert"); card.append(warning); }
+  }
+  if (local.status?.logPath) {
+    const log = node("details"); log.append(node("summary", "查看日志位置"), node("code", local.status.logPath)); card.append(log);
+  }
+  const localActions = node("div", undefined, "actions");
+  const localButton = (label: string, operation: WhisperXOperation, style = "secondary") => {
+    const control = button(label, { type: `whisperx-${operation}` }, style); control.setAttribute("data-whisperx-action", operation); return control;
+  };
+  if (current === "not-installed") localActions.append(localButton("安装并启动", "install", "primary"));
+  else if (current === "failed" || current === "mismatch") localActions.append(localButton("重试安装", "install", "primary"));
+  else if (current === "prepared" || current === "stopped") localActions.append(localButton("启动服务", "start", "primary"));
+  else if (current === "ready") localActions.append(localButton("停止服务", "stop"));
+  localActions.append(localButton("检查状态", "status"));
+  card.append(localActions, node("p", "此项可稍后设置。关闭窗口不会取消正在进行的本地准备。", "muted"));
+  panel.append(card);
   const actions = node("div", undefined, "actions");
   actions.append(button("重新扫描 Agent", { type: "refresh-agents" }, "primary"), button("重新运行诊断", { type: "diagnostics" }), button("打开配置目录", { type: "open-config" }), button("修改配置", { type: "edit" }));
   panel.append(actions);
@@ -251,9 +332,41 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
   const render = () => { if (!disposed) renderWizard(root, state, dispatch, busy); };
   const persist = () => { try { storage.setItem(draftKey, JSON.stringify(persistedWizardState(state))); } catch { /* Storage may be disabled; setup still works. */ } };
   const failure: SetupFailure = { code: "SETUP_REQUEST_FAILED", message: "操作失败，请检查配置后重试" };
+  async function refreshWhisperX(): Promise<void> {
+    try {
+      const reply = await bridge.getWhisperXStatus();
+      if (!disposed) state = reply.ok ? wizardReducer(state, { type: "whisperx-result", status: reply.value })
+        : wizardReducer(state, { type: "whisperx-failure" });
+    } catch { if (!disposed) state = wizardReducer(state, { type: "whisperx-failure" }); }
+  }
   async function dispatch(action: UiAction): Promise<void> {
     if (disposed || busy && !["progress"].includes(action.type)) return;
     if (action.type !== "progress") interactionGeneration++;
+    if (action.type === "whisperx-status" || action.type === "whisperx-install" || action.type === "whisperx-start" || action.type === "whisperx-stop") {
+      if (state.screen !== "complete") return;
+      const operation: WhisperXOperation = action.type === "whisperx-install" ? "install" : action.type === "whisperx-start" ? "start" : action.type === "whisperx-stop" ? "stop" : "status";
+      busy = true;
+      state = wizardReducer(state, { type: "whisperx-request", operation }); render();
+      try {
+        if (operation === "status") await refreshWhisperX();
+        else {
+          try {
+            const reply = operation === "install" ? await bridge.installWhisperX() : operation === "start" ? await bridge.startWhisperX() : await bridge.stopWhisperX();
+            if (!disposed) {
+              state = reply.ok ? wizardReducer(state, { type: "whisperx-result", status: reply.value }) : wizardReducer(state, { type: "whisperx-failure" });
+              // A later status probe may no longer carry a failed operation's code.
+              if (reply.ok && reply.value.errorCode) state = { ...state, whisperX: { ...state.whisperX, error: whisperXErrorCopy[reply.value.errorCode] } };
+            }
+          } catch { if (!disposed) state = wizardReducer(state, { type: "whisperx-failure" }); }
+          if (!disposed) await refreshWhisperX();
+        }
+      } finally {
+        busy = false;
+        if (!disposed) state = wizardReducer(state, { type: "whisperx-settled" });
+        render();
+      }
+      return;
+    }
     if (["submit", "diagnostics", "clear", "open-config", "remove-integration", "refresh-agents"].includes(action.type)) {
       if (action.type === "submit" && !canSubmit(state)) return;
       if (action.type === "clear" && !state.confirmClear && state.screen !== "settings") return;
@@ -271,7 +384,10 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
           if (action.type === "clear" && reply.ok) { state = { ...initialWizardState(), screen: "settings", result: reply.value }; try { storage.removeItem(draftKey); } catch {} }
         }
       } catch { state = wizardReducer(state, { type: "failure", error: failure }); }
-      finally { busy = false; persist(); render(); }
+      finally {
+        busy = false; persist(); render();
+        if (!disposed && state.screen === "complete" && action.type !== "open-config") await dispatch({ type: "whisperx-status" });
+      }
       return;
     }
     state = wizardReducer(state, action as WizardAction);
@@ -289,6 +405,7 @@ export function mountWizard(root: HTMLElement, bridge: SetupBridge, storage: Pic
     if (disposed || busy || interactionGeneration !== 0) return;
     if (reply.ok && (reply.value.configured || reply.value.diagnostics.length > 0)) {
       state = wizardReducer(state, { type: "success", result: reply.value }); render();
+      if (state.screen === "complete") void dispatch({ type: "whisperx-status" });
     }
     else if (!reply.ok) { state = wizardReducer(state, { type: "failure", error: reply.error }); render(); }
   }).catch(() => { if (!disposed && !busy && interactionGeneration === 0) { state = wizardReducer(state, { type: "failure", error: failure }); render(); } });
