@@ -256,6 +256,37 @@ test("integration installs, upgrades and removes owned files while retaining pro
   await assert.rejects(readFile(f.paths.launcher), { code: "ENOENT" });
 });
 
+for (const resource of ["profile-before", "profile-after", "launcher-after", "windows-before", "windows-after"] as const) {
+  test(`failed target commit preserves concurrent ${resource} edits`, async (t) => {
+    const f = await fixture(t);
+    const profile = join(f.home, ".zprofile");
+    let userPath = "original PATH";
+    const options = { ...f, platform: resource.startsWith("windows") ? "win32" as const : "darwin" as const,
+      userPath: { read: async () => userPath, write: async (value: string) => { userPath = value; } } };
+    await writeFile(profile, "original profile\n");
+    const rename = fs.rename;
+    const mock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+      if (destination === f.portable.skillDirectory) {
+        if (resource === "profile-after") await writeFile(profile, "concurrent profile\n");
+        if (resource === "launcher-after") await writeFile(f.paths.launcher, "concurrent launcher\n");
+        if (resource === "windows-after") userPath = "concurrent PATH";
+        throw new Error("private failure");
+      }
+      return rename(source, destination);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    await assert.rejects(installDesktopIntegration({ ...options, copyDirectory: async (source, destination) => {
+      await cp(source, destination, { recursive: true });
+      if (resource === "profile-before") await writeFile(profile, "concurrent profile\n");
+      if (resource === "windows-before") userPath = "concurrent PATH";
+    } }), resource.endsWith("after") ? /INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED\]$/u : /INTEGRATION_INSTALL_FAILED\]$/u);
+    if (resource.startsWith("profile")) assert.equal(await readFile(profile, "utf8"), "concurrent profile\n");
+    if (resource === "launcher-after") assert.equal(await readFile(f.paths.launcher, "utf8"), "concurrent launcher\n");
+    if (resource.startsWith("windows")) assert.equal(userPath, "concurrent PATH");
+  });
+}
+
 test("failed integration restores the previous Skill and launcher with no partial installation", async (t) => {
   const f = await fixture(t);
   await mkdir(f.paths.portableSkill, { recursive: true });

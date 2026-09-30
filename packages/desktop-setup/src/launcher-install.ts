@@ -152,12 +152,54 @@ export function renderLauncher(options: LauncherOptions): string {
   return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n${bin ? `set "PATH=${bin};%PATH%"\r\n` : ""}${reference(options.electronExecutable)} ${reference(options.cliEntry)} %*\r\nexit /b %errorlevel%\r\n`;
 }
 
-export async function installLauncher(options: LauncherOptions): Promise<{ readonly restartMessage: string }> {
+function sameFile(left: FileSnapshot, right: FileSnapshot): boolean {
+  return left.bytes === undefined ? right.bytes === undefined
+    : right.bytes !== undefined && left.bytes.equals(right.bytes) && left.mode === right.mode;
+}
+
+/** Journal only attempted mutations, using the content at their mutation boundary. */
+function launcherTransaction(userPath: UserPath) {
+  const changes: { before: FileSnapshot; after: FileSnapshot }[] = [];
+  let pathChange: { before: string; after: string } | undefined;
+  return {
+    async file(before: FileSnapshot, bytes?: Buffer, mode = before.mode ?? 0o600) {
+      if (!sameFile(before, await snapshotFile(before.path))) throw new Error("Launcher file changed before mutation");
+      changes.push({ before, after: { path: before.path, ...(bytes === undefined ? {} : { bytes, mode }) } });
+      if (bytes === undefined) { if (before.bytes !== undefined) await unlink(before.path); }
+      else await atomicFile(before.path, bytes, mode);
+    },
+    async path(before: string, after: string) {
+      if (await userPath.read() !== before) throw new Error("User PATH changed before mutation");
+      pathChange = { before, after };
+      await userPath.write(after);
+    },
+    async rollback() {
+      let failed = false;
+      for (const { before, after } of [...changes].reverse()) {
+        try {
+          const current = await snapshotFile(before.path);
+          if (sameFile(before, current)) continue;
+          if (!sameFile(after, current)) { failed = true; continue; }
+          failed = await restoreFiles([before]) || failed;
+        } catch { failed = true; }
+      }
+      if (pathChange) {
+        try {
+          const current = await userPath.read();
+          if (current !== pathChange.after && current !== pathChange.before) failed = true;
+          else await userPath.write(pathChange.before);
+        } catch { failed = true; }
+      }
+      return failed;
+    },
+  };
+}
+
+export async function prepareLauncherInstall(options: LauncherOptions): Promise<PreparedRemoval & { readonly restartMessage: string }> {
   const snapshots: FileSnapshot[] = [];
-  let oldPath: string | undefined;
-  let pathAttempted = false;
   const userPath = options.userPath ?? windowsUserPath;
-  try {
+  const transaction = launcherTransaction(userPath);
+  return { restartMessage: RESTART_MESSAGE, rollback: transaction.rollback, async dispose() {}, async commit() {
     const text = renderLauncher(options);
     if (!(await lstat(options.electronExecutable)).isFile() || !(await lstat(options.cliEntry)).isFile()) throw new Error("Missing runtime");
     for (const path of launcherFiles(options)) snapshots.push(await snapshotFile(path));
@@ -170,25 +212,30 @@ export async function installLauncher(options: LauncherOptions): Promise<{ reado
     await mkdir(pathEntry, { recursive: true, mode: 0o700 });
     if (options.platform === "darwin") {
       await chmod(pathEntry, 0o700);
-      const profile = join(options.home, ".zprofile");
       const content = snapshots[2]!.bytes ?? Buffer.alloc(0);
       const core = pathBlock(pathEntry);
       const block = oldState?.zprofileBlock ?? `${content.length && content.at(-1) !== 10 ? "\n" : ""}${core}`;
       if (oldState?.zprofileBlock && !content.includes(block)) throw new Error("PATH block was edited");
-      if (!content.includes(block)) await atomicFile(profile, Buffer.concat([content, Buffer.from(block)]), snapshots[2]!.mode ?? 0o600);
+      if (!content.includes(block)) await transaction.file(snapshots[2]!, Buffer.concat([content, Buffer.from(block)]));
       state = { ...state, zprofileBlock: block };
     } else {
-      oldPath = await userPath.read();
+      const oldPath = await userPath.read();
       const present = oldPath.split(";").some((entry) => normalizeEntry(entry) === normalizeEntry(pathEntry));
       state = { ...state, pathAdded: oldState?.pathAdded === true || !present };
-      if (!present) { pathAttempted = true; await userPath.write(`${oldPath}${oldPath ? ";" : ""}${pathEntry}`); }
+      if (!present) await transaction.path(oldPath, `${oldPath}${oldPath ? ";" : ""}${pathEntry}`);
     }
-    await atomicFile(options.paths.launcher, text, 0o755);
-    await atomicFile(options.paths.managedState, `${JSON.stringify(state, null, 2)}\n`);
+    await transaction.file(snapshots[0]!, Buffer.from(text), 0o755);
+    await transaction.file(snapshots[1]!, Buffer.from(`${JSON.stringify(state, null, 2)}\n`), 0o600);
+  } };
+}
+
+export async function installLauncher(options: LauncherOptions): Promise<{ readonly restartMessage: string }> {
+  const transaction = await prepareLauncherInstall(options);
+  try {
+    await transaction.commit();
     return { restartMessage: RESTART_MESSAGE };
   } catch {
-    let failed = await restoreFiles(snapshots);
-    if (pathAttempted && oldPath !== undefined) await userPath.write(oldPath).catch(() => { failed = true; });
+    const failed = await transaction.rollback();
     throw new Error(`命令入口安装失败 [LAUNCHER_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
   }
 }
@@ -196,9 +243,8 @@ export async function installLauncher(options: LauncherOptions): Promise<{ reado
 export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath">): Promise<PreparedRemoval | undefined> {
   const snapshots: FileSnapshot[] = [];
   const userPath = options.userPath ?? windowsUserPath;
+  const transaction = launcherTransaction(userPath);
   let oldPath: string | undefined;
-  let pathAttempted = false;
-  let filesAttempted = false;
   try {
     const state = await readState(options.paths.managedState);
     if (!state) return undefined;
@@ -220,17 +266,12 @@ export async function prepareLauncherRemoval(options: Pick<LauncherOptions, "pat
     }
     return {
       async commit() {
-        if (nextPath !== undefined) { pathAttempted = true; await userPath.write(nextPath); }
-        filesAttempted = true;
-        if (profileBytes !== undefined) await atomicFile(join(options.home, ".zprofile"), profileBytes, snapshots[2]!.mode);
-        if (snapshots[0]!.bytes !== undefined) await unlink(options.paths.launcher);
-        await unlink(options.paths.managedState);
+        if (nextPath !== undefined) await transaction.path(oldPath!, nextPath);
+        if (profileBytes !== undefined) await transaction.file(snapshots[2]!, profileBytes);
+        if (snapshots[0]!.bytes !== undefined) await transaction.file(snapshots[0]!);
+        await transaction.file(snapshots[1]!);
       },
-      async rollback() {
-        let failed = filesAttempted && await restoreFiles(snapshots);
-        if (pathAttempted && oldPath !== undefined) await userPath.write(oldPath).catch(() => { failed = true; });
-        return failed;
-      },
+      rollback: transaction.rollback,
       async dispose() {},
     };
   } catch {

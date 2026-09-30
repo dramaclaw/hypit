@@ -1,5 +1,5 @@
-import { installLauncher, launcherFiles, prepareLauncherRemoval, restoreFiles, snapshotFile, windowsUserPath } from "./launcher-install.js";
-import type { FileSnapshot, LauncherOptions } from "./launcher-install.js";
+import { prepareLauncherInstall, prepareLauncherRemoval } from "./launcher-install.js";
+import type { LauncherOptions } from "./launcher-install.js";
 import { supportedSkillTargets } from "./agent-targets.js";
 import type { AgentSkillTarget } from "./agent-targets.js";
 import { prepareLegacyCodexMigration, prepareSkillInstall, prepareSkillRemoval } from "./skill-install.js";
@@ -31,32 +31,26 @@ async function disposeAll(operations: readonly PreparedRemoval[], committed: boo
 
 /** Profile and credentials belong to setup-core and are deliberately outside this lifecycle. */
 export async function installDesktopIntegration(options: DesktopIntegrationOptions): Promise<{ readonly restartMessage: string }> {
-  const snapshots: FileSnapshot[] = [];
   const operations: PreparedRemoval[] = [];
-  let oldPath: string | undefined;
-  let launcherInstalled = false;
+  let launcher: PreparedRemoval | undefined;
   let committed = false;
   let failure: string | undefined;
   let result: { readonly restartMessage: string } | undefined;
-  const userPath = options.userPath ?? windowsUserPath;
   try {
     if (!options.targets.some(target => target.id === "portable")
       || new Set(options.targets.map(target => target.id)).size !== options.targets.length) throw new Error("Invalid targets");
-    for (const path of launcherFiles(options)) snapshots.push(await snapshotFile(path));
-    if (options.platform === "win32") oldPath = await userPath.read();
     for (const target of ordered(options.targets)) operations.push(await prepareSkillInstall({ ...options, target }));
     const legacy = await prepareLegacyCodexMigration(options.paths);
     if (legacy) operations.push(legacy);
-    result = await installLauncher(options);
-    launcherInstalled = true;
+    const preparedLauncher = await prepareLauncherInstall(options);
+    launcher = preparedLauncher;
+    await launcher.commit();
+    result = { restartMessage: preparedLauncher.restartMessage };
     for (const operation of operations) await operation.commit();
     committed = true;
   } catch (error) {
     let failed = await rollbackAll(operations) || rollbackFailed(error);
-    if (launcherInstalled) {
-      failed = (await restoreFiles(snapshots)) || failed;
-      if (oldPath !== undefined) await userPath.write(oldPath).catch(() => { failed = true; });
-    }
+    if (launcher) failed = await rollbackAll([launcher]) || failed;
     failure = `INTEGRATION_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
   if (await disposeAll(operations, committed)) failure = committed ? "INTEGRATION_INSTALL_FAILED_CLEANUP_FAILED" : "INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED";
