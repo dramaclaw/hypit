@@ -10,8 +10,8 @@ import type { DiagnosticItem, SetupInput } from "./contracts.js";
 import { desktopCredentialRefs } from "./clear-configuration.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { UserPath } from "./launcher-install.js";
-import { isManagedSkillInstalled } from "./skill-install.js";
-import { scanAgentTargets } from "./agent-targets.js";
+import { exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
+import { scanAgentTargets, supportedSkillTargets } from "./agent-targets.js";
 
 export function diagnosticEnvironment(bin: string, platform: "darwin" | "win32", source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -68,10 +68,16 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
   const requireBundle = () => { if (results[0]?.status !== "pass") throw new Error("Resources failed verification"); };
   await check("version", "Hypit 版本", () => { requireBundle(); return run(options.electronExecutable, [path.join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), "--version"], processOptions); });
   await check("ffmpeg", "FFmpeg", async () => { requireBundle(); await run(path.join(bin, `ffmpeg${suffix}`), ["-version"], processOptions); await run(path.join(bin, `ffprobe${suffix}`), ["-version"], processOptions); });
-  await check("skill", "Codex Skill", async () => {
-    const { targets } = await scanAgentTargets({ paths });
-    return (await Promise.all(targets.map(target => isManagedSkillInstalled(target)))).every(Boolean);
-  }, paths.portableSkill);
+  const { targets: activeTargets } = await scanAgentTargets({ paths });
+  const retained = await Promise.all(supportedSkillTargets(paths).filter(target => !activeTargets.some(active => active.id === target.id))
+    .map(async target => ({ target, managed: await isManagedSkillInstalled(target) })));
+  for (const target of [...activeTargets, ...retained.filter(item => item.managed).map(item => item.target)]) {
+    results.push({ code: "skill", target: target.id, label: target.label,
+      status: await isManagedSkillInstalled(target) ? "pass" : "fail", path: target.skillDirectory });
+  }
+  if (await exists(paths.legacyCodexSkill) && !(await isManagedLegacyCodexSkillInstalled(paths))) {
+    results.push({ code: "skill", target: "portable", label: "通用 Agent Skill", status: "warning", path: paths.legacyCodexSkill });
+  }
   let config: ReturnType<typeof parseNewApiEndpointConfig> | undefined;
   await check("profile", "Runtime Profile", async () => {
     const profile = JSON.parse(await readFile(paths.profile, "utf8"));

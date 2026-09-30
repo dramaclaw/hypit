@@ -9,6 +9,7 @@ import type { CredentialValue, WritableCredentialStore } from "@hypit/runtime";
 
 import type { SetupInput } from "../src/contracts.js";
 import { desktopPaths } from "../src/paths.js";
+import { supportedSkillTargets, targetSummary } from "../src/agent-targets.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
 import type { DesktopSetupDependencies } from "../src/setup-core.js";
 
@@ -35,7 +36,7 @@ function fixture(existing = false) {
     async delete(ref) { events.push(`delete:${ref.key}`); return values.delete(ref.key); },
   };
   const dependencies: DesktopSetupDependencies = {
-    paths, credentialStore: store, platform: "darwin",
+    paths, targets: supportedSkillTargets(paths), credentialStore: store, platform: "darwin",
     connectionTest: {
       async fetch(url) {
         events.push(String(url).endsWith("/models") ? "test-newapi" : "test-oss-download");
@@ -82,7 +83,7 @@ for (const existing of [false, true]) {
       ...keys.map((key) => `resolve:${key}`), ...keys.map((key) => `put:${key}`), "write-profile"]);
     assert.equal(f.documents.length, 1);
     assert.deepEqual(result, { configured: true, modelCount: 2, relayVerified: true,
-      profilePath: paths.profile, skillPath: paths.skill, launcherPath: paths.launcher,
+      profilePath: paths.profile, skillTargets: f.dependencies.targets.map(targetSummary), launcherPath: paths.launcher,
       diagnostics: [
         { code: "newapi", status: "pass", label: "NewAPI" },
         { code: "oss", status: "pass", label: "OSS" },

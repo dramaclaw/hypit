@@ -8,7 +8,7 @@ import { parseHTML } from "linkedom";
 import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { createDesktopProfile } from "../src/profile.js";
 import { desktopPaths } from "../src/paths.js";
-import { scanAgentTargets } from "../src/agent-targets.js";
+import { scanAgentTargets, supportedSkillTargets } from "../src/agent-targets.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
 import { createSetupController, readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
@@ -75,6 +75,33 @@ test("status distinguishes a pristine install from incomplete local artifacts", 
   }
 });
 
+test("status projects each active and retained managed Skill target separately", async (t) => {
+  const f = await fixture(t);
+  const targets = supportedSkillTargets(f.paths);
+  await writeFile(f.paths.profile, JSON.stringify(profile()));
+  await installDesktopIntegration({ ...f, targets });
+  const status = await readDesktopStatus({ ...f, targets: [targets[0]!] }, { detectedAgents: [], targets: [targets[0]!] });
+  assert.equal(status.configured, true);
+  assert.deepEqual(status.skillTargets.map(target => target.id), ["portable", "claude"]);
+  assert.deepEqual(status.diagnostics.filter(item => item.code === "skill").map(item => item.target), ["portable", "claude"]);
+  assert.deepEqual(status.diagnostics.filter(item => item.code === "skill").map(item => item.label), ["通用 Agent Skill", "Claude Code Skill"]);
+  assert.equal(JSON.stringify(status).includes("SECRET"), false);
+  await rm(join(f.paths.claudeSkill, SKILL_MARKER));
+  const stale = await readDesktopStatus({ ...f, targets: [targets[0]!] }, { detectedAgents: [], targets: [targets[0]!] });
+  assert.equal(stale.configured, true);
+  assert.deepEqual(stale.skillTargets.map(target => target.id), ["portable"]);
+});
+
+test("unmanaged legacy Codex Skill reports a portable warning and remains untouched", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.paths.legacyCodexSkill, { recursive: true });
+  await writeFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "user-owned SECRET legacy content");
+  const status = await readDesktopStatus(f);
+  assert.ok(status.diagnostics.some(item => item.code === "skill" && item.target === "portable" && item.status === "warning" && item.path === f.paths.legacyCodexSkill));
+  assert.equal(await readFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "utf8"), "user-owned SECRET legacy content");
+  assert.equal(JSON.stringify(status).includes("SECRET"), false);
+});
+
 test("completion requires a valid profile, intact managed Skill, launcher and managed state", async (t) => {
   const f = await fixture(t);
   await writeFile(f.paths.profile, JSON.stringify(profile()));
@@ -98,7 +125,7 @@ test("profile committed then real integration failure reopens setup with failed 
   const f = await fixture(t);
   const controller = createSetupController({
     getStatus: () => readDesktopStatus(f),
-    commit: (value) => commitDesktopSetup(value, { paths: f.paths, platform: f.platform,
+    commit: (value) => commitDesktopSetup(value, { paths: f.paths, targets: f.targets, platform: f.platform,
       credentialStore: { owns: () => true, resolve: async () => undefined, put: async () => {}, delete: async () => false },
       connectionTest: { fetch: async (url) => String(url).endsWith("/models") ? Response.json({ data: [{ id: "model" }] }) : new Response("HY"),
         randomUUID: () => "00000000-0000-4000-8000-000000000001",
@@ -116,7 +143,7 @@ test("profile committed then real integration failure reopens setup with failed 
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(root.textContent!, /安装尚未完成/);
   assert.match(root.textContent!, /命令入口.*失败/);
-  assert.match(root.textContent!, /Codex Skill.*失败/);
+  assert.match(root.textContent!, /通用 Agent Skill.*失败/);
   assert.doesNotMatch(root.textContent!, /Hypit 已配置|SECRET/);
   assert.equal(root.querySelectorAll("input[required]").length, 6);
   dispose();

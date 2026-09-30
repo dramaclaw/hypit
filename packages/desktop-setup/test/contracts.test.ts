@@ -110,7 +110,6 @@ test("public results and progress do not echo any submitted setup value", () => 
     modelCount: 3,
     relayVerified: true,
     profilePath: diagnostic.path!,
-    skillPath: "/Users/tester/.codex/skills/hypit",
     skillTargets: [{
       id: "portable",
       label: "通用 Agent Skill",

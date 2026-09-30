@@ -4,19 +4,53 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { runDiagnostics, diagnosticEnvironment, verifyInstalledResources } from "../src/diagnostics.js";
 import { desktopPaths } from "../src/paths.js";
+import { supportedSkillTargets } from "../src/agent-targets.js";
+import { installManagedSkill } from "../src/skill-install.js";
 import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { createDesktopProfile } from "../src/profile.js";
 
-async function bundle(root: string) {
+async function bundle(root: string, cli = "verified") {
   const files: Record<string, { bytes: number; sha256: string }> = {};
   for (const path of ["bin/ffmpeg", "bin/ffprobe", "runtime/node_modules/@hypit/hypit/bin/hypit.mjs", "skill/hypit/SKILL.md"]) {
-    const bytes = Buffer.from("verified"); await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), bytes);
+    const bytes = Buffer.from(path.endsWith("hypit.mjs") ? cli : "verified"); await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), bytes);
     files[path] = { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
   }
   await writeFile(join(root, "resource-manifest.json"), JSON.stringify({ schemaVersion: 1, platform: "darwin", arch: "arm64", files }));
 }
+
+test("diagnostics checks every active Skill target and executes the bundled CLI by absolute path", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-diagnostic-targets-")); t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: home });
+  const resources = join(home, "resources");
+  await bundle(resources, "console.log('hypit-test-version')");
+  const sourceDirectory = join(resources, "skill", "hypit");
+  await mkdir(join(sourceDirectory, "references"));
+  await writeFile(join(sourceDirectory, "references", "guide.md"), "guide");
+  await mkdir(paths.agentProbePaths["claude-code"][0]!, { recursive: true });
+  const targets = supportedSkillTargets(paths);
+  for (const target of targets) await installManagedSkill({ target, sourceDirectory, installedVersion: "1" });
+  const calls: string[] = [];
+  const results = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,
+    credentialStore: { owns: () => true, resolve: async () => undefined },
+    execute: async (file, args, options) => {
+      if (args.includes("--version")) {
+        assert.equal(file, process.execPath);
+        assert.equal(options.env.PATH?.includes(join(home, ".local", "bin")), false);
+        const output = await promisify(execFile)(file, args, options);
+        assert.match(output.stdout, /hypit-test-version/);
+        calls.push("cli");
+      }
+    },
+  });
+  assert.deepEqual(calls, ["cli"]);
+  assert.equal(results.find(item => item.code === "version")?.status, "pass");
+  assert.deepEqual(results.filter(item => item.code === "skill").map(item => item.target), ["portable", "claude"]);
+  assert.deepEqual(results.filter(item => item.code === "skill").map(item => item.status), ["pass", "pass"]);
+});
 
 test("resource verification detects missing and corrupt resources", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "hypit-diagnostic-")); t.after(() => rm(root, { recursive: true, force: true }));

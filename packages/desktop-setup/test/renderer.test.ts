@@ -7,7 +7,7 @@ import type { SetupResult } from "../src/contracts.js";
 import type { SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
-const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillPath: "/skill", launcherPath: "/launcher", diagnostics: [] };
+const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
 test("integration removal stays accessible after clearing configuration and lists preservation intent", () => {
@@ -192,12 +192,12 @@ test("incomplete installation renders setup with explicit failed integration dia
   const incomplete: SetupResult = { ...result, configured: false, diagnostics: [
     { code: "profile", label: "Runtime Profile", status: "pass" },
     { code: "launcher", label: "命令入口", status: "fail" },
-    { code: "skill", label: "Codex Skill", status: "fail" },
+    { code: "skill", target: "portable", label: "通用 Agent Skill", status: "fail" },
   ] };
   renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result: incomplete }), () => {});
   assert.match(root.textContent!, /安装尚未完成/);
   assert.match(root.textContent!, /命令入口.*失败/);
-  assert.match(root.textContent!, /Codex Skill.*失败/);
+  assert.match(root.textContent!, /通用 Agent Skill.*失败/);
   assert.equal(root.querySelectorAll("input[required]").length, 6);
 });
 

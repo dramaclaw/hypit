@@ -10,9 +10,12 @@ import type { CredentialRef, CredentialValue, WritableCredentialStore } from "@h
 import type { SetupInput, SetupResult } from "./contracts.js";
 import type { DesktopPaths } from "./paths.js";
 import { createDesktopProfile } from "./profile.js";
+import { targetSummary } from "./agent-targets.js";
+import type { AgentSkillTarget } from "./agent-targets.js";
 
 export type DesktopSetupDependencies = {
   readonly paths: DesktopPaths;
+  readonly targets: readonly AgentSkillTarget[];
   readonly credentialStore: WritableCredentialStore;
   readonly platform?: NodeJS.Platform;
   readonly media?: { readonly ffmpegPath: string; readonly ffprobePath: string };
@@ -129,7 +132,7 @@ export async function commitDesktopSetup(input: SetupInput, dependencies: Deskto
     modelCount: connection.modelCount,
     relayVerified: connection.relayVerified,
     profilePath: dependencies.paths.profile,
-    skillPath: dependencies.paths.skill,
+    skillTargets: dependencies.targets.map(targetSummary),
     launcherPath: dependencies.paths.launcher,
     diagnostics: [
       { code: "newapi", status: "pass", label: "NewAPI" },

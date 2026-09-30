@@ -10,7 +10,7 @@ import { IPC_CHANNELS } from "../src/ipc.js";
 import type { SetupInput, SetupResult } from "../src/contracts.js";
 
 const input: SetupInput = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", relay: { enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" } };
-const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillPath: "/skill", launcherPath: "/launcher", diagnostics: [] };
+const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
 
 test("window uses isolated sandbox with no Node or webview and only absolute local page", () => {
   const options = browserWindowOptions("/local/preload.cjs");
@@ -104,12 +104,24 @@ test("failed operations release the queue and preserve cleanup warnings", async 
 
 test("outbound results and diagnostics project only public contract fields", async () => {
   const diagnostic = { code: "newapi", label: "NewAPI", status: "pass", secret: "SECRET_DIAGNOSTIC" } as const;
-  const unsafeResult = { ...result, apiKey: "SECRET_API", diagnostics: [diagnostic] };
-  const controller = createSetupController({ getStatus: async () => unsafeResult, commit: async () => unsafeResult, install: async () => {}, diagnose: async () => [diagnostic], openConfig: async () => {}, clear: async () => unsafeResult });
+  const skillDiagnostic = { code: "skill", target: "claude", label: "Claude Code Skill", status: "pass", path: "/claude", secret: "SECRET_SKILL" } as const;
+  const unsafeResult = { ...result, apiKey: "SECRET_API", skillTargets: [{ ...result.skillTargets[0]!, extra: "SECRET_TARGET", detectedAgents: ["codex" as const] },
+    { id: "claude" as const, label: "Claude Code Skill" as const, path: "/claude", detectedAgents: ["claude-code" as const], secret: "SECRET_CLAUDE" }], diagnostics: [diagnostic, skillDiagnostic] };
+  const controller = createSetupController({ getStatus: async () => unsafeResult, commit: async () => unsafeResult, install: async () => {}, diagnose: async () => [diagnostic, skillDiagnostic], openConfig: async () => {}, clear: async () => unsafeResult });
   const sent: unknown[] = [];
   controller.subscribe((item) => sent.push(item));
   sent.push(await controller.getStatus(), await controller.submit(input), await controller.rerunDiagnostics(), await controller.clearConfiguration());
   assert.equal(JSON.stringify(sent).includes("SECRET"), false);
+  const status = await controller.getStatus();
+  assert.equal(status.ok, true);
+  if (status.ok) {
+    assert.deepEqual(status.value.skillTargets.map(target => target.id), ["portable", "claude"]);
+    assert.deepEqual(status.value.diagnostics.filter(item => item.code === "skill").map(item => item.target), ["claude"]);
+    assert.equal("extra" in status.value.skillTargets[0]!, false);
+  }
+  const invalid = createSetupController({ getStatus: async () => ({ ...result, diagnostics: [{ code: "skill", target: "portable", label: "Claude Code Skill", status: "pass" }] }),
+    commit: async () => result, install: async () => {}, diagnose: async () => [], openConfig: async () => {}, clear: async () => result });
+  assert.equal((await invalid.getStatus()).ok, false);
 });
 
 test("CJS shell boots without import.meta and stages the Windows credential helper", async () => {

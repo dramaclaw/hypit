@@ -25,8 +25,6 @@ export type DiagnosticLabel =
   | "Agent Skill"
   | "通用 Agent Skill"
   | "Claude Code Skill"
-  /** @deprecated Task 5 migrates existing diagnostic producers. */
-  | "Codex Skill"
   | "Runtime Profile"
   | "平台凭据"
   | "NewAPI"
@@ -70,10 +68,7 @@ export type SetupResult = {
   readonly modelCount: number;
   readonly relayVerified: boolean;
   readonly profilePath: string;
-  /** @deprecated Task 5 replaces this with required skillTargets. */
-  readonly skillPath: string;
-  /** Optional until Task 5 migrates all setup/status result producers. */
-  readonly skillTargets?: readonly AgentSkillTargetSummary[];
+  readonly skillTargets: readonly AgentSkillTargetSummary[];
   readonly launcherPath: string;
   readonly diagnostics: readonly DiagnosticItem[];
 };

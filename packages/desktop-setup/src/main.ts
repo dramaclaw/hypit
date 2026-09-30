@@ -8,8 +8,9 @@ import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./c
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
-import { scanAgentTargets } from "./agent-targets.js";
-import { canRefreshManagedSkill, exists, isManagedSkillInstalled } from "./skill-install.js";
+import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
+import type { AgentScanResult } from "./agent-targets.js";
+import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
@@ -100,15 +101,27 @@ export type SetupServices = {
   readonly removeIntegration?: () => Promise<SetupResult>;
 };
 
-const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", skill: "Codex Skill", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
+const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
+const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
 function publicDiagnostic(item: DiagnosticItem): DiagnosticItem {
-  if (!Object.hasOwn(diagnosticLabels, item.code) || !["pass", "warning", "fail"].includes(item.status)) throw new Error("Invalid diagnostic result");
+  if (!["pass", "warning", "fail"].includes(item.status)) throw new Error("Invalid diagnostic result");
+  if (item.code === "skill") {
+    if (!item.target || !Object.hasOwn(skillLabels, item.target) || item.label !== skillLabels[item.target]) throw new Error("Invalid diagnostic result");
+    return { code: "skill", status: item.status, label: skillLabels[item.target], target: item.target,
+      ...(typeof item.path === "string" ? { path: item.path } : {}) };
+  }
+  if (!Object.hasOwn(diagnosticLabels, item.code) || item.label !== diagnosticLabels[item.code] || item.target !== undefined) throw new Error("Invalid diagnostic result");
   const key = item.code === "oss" && typeof item.cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(item.cleanupObjectKey) ? item.cleanupObjectKey : undefined;
   return { code: item.code, status: item.status, label: diagnosticLabels[item.code], ...(typeof item.path === "string" ? { path: item.path } : {}), ...(key ? { cleanupObjectKey: key } : {}) };
 }
 function publicResult(result: SetupResult): SetupResult {
+  const skillTargets = result.skillTargets.map(target => {
+    if (!Object.hasOwn(skillLabels, target.id) || target.label !== skillLabels[target.id] || typeof target.path !== "string"
+      || !Array.isArray(target.detectedAgents) || target.detectedAgents.some(id => !["codex", "claymore-piko", "cursor", "claude-code"].includes(id))) throw new Error("Invalid Skill target result");
+    return { id: target.id, label: skillLabels[target.id], path: target.path, detectedAgents: [...target.detectedAgents] };
+  });
   return { configured: result.configured === true, modelCount: Number.isSafeInteger(result.modelCount) && result.modelCount >= 0 ? result.modelCount : 0,
-    relayVerified: result.relayVerified === true, profilePath: result.profilePath, skillPath: result.skillPath, launcherPath: result.launcherPath,
+    relayVerified: result.relayVerified === true, profilePath: result.profilePath, skillTargets, launcherPath: result.launcherPath,
     diagnostics: result.diagnostics.map(publicDiagnostic) };
 }
 
@@ -152,9 +165,12 @@ export function createSetupController(services: SetupServices) {
   };
 }
 
-export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>): Promise<SetupResult> {
+export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>, scan?: AgentScanResult): Promise<SetupResult> {
   const { paths } = options;
-  const targets = options.targets ?? (await scanAgentTargets({ paths })).targets;
+  const activeTargets = scan?.targets ?? options.targets ?? (await scanAgentTargets({ paths })).targets;
+  const retained = await Promise.all(supportedSkillTargets(paths).filter(target => !activeTargets.some(active => active.id === target.id))
+    .map(async target => ({ target, managed: await isManagedSkillInstalled(target) })));
+  const targets = [...activeTargets, ...retained.filter(item => item.managed).map(item => item.target)];
   const profileValid = async () => {
     try {
       const profile = JSON.parse(await readFile(paths.profile, "utf8"));
@@ -177,16 +193,18 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
       return true;
     } catch { return false; }
   };
-  const [profile, skill, launcher, evidence, media] = await Promise.all([
-    profileValid(), Promise.all(targets.map(target => isManagedSkillInstalled(target, options.sourceDirectory && options.installedVersion
-      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined))).then(results => results.every(Boolean)), isManagedLauncherInstalled(options),
-    Promise.all([paths.profile, ...targets.flatMap(target => [target.skillDirectory, target.backupDirectory]), paths.launcher, paths.managedState].map(exists)),
-    desktopMediaAvailable(paths.profile),
+  const [profile, targetStates, launcher, evidence, media, legacyExists, legacyManaged] = await Promise.all([
+    profileValid(), Promise.all(targets.map(async target => ({ target, installed: await isManagedSkillInstalled(target, options.sourceDirectory && options.installedVersion
+      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined) }))), isManagedLauncherInstalled(options),
+    Promise.all([paths.profile, ...targets.flatMap(target => [target.skillDirectory, target.backupDirectory]), paths.launcher, paths.managedState, paths.legacyCodexSkill].map(exists)),
+    desktopMediaAvailable(paths.profile), exists(paths.legacyCodexSkill), isManagedLegacyCodexSkillInstalled(paths),
   ]);
-  return { configured: profile && skill && launcher && media !== false, modelCount: 0, relayVerified: false,
-    profilePath: paths.profile, skillPath: paths.portableSkill, launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
+  const skillsReady = targetStates.every(({ installed }) => installed);
+  return { configured: profile && skillsReady && launcher && media !== false, modelCount: 0, relayVerified: false,
+    profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
-      { code: "skill", label: "Codex Skill", status: skill ? "pass" : "fail", path: paths.portableSkill },
+      ...targetStates.map(({ target, installed }) => ({ code: "skill" as const, target: target.id, label: target.label, status: installed ? "pass" as const : "fail" as const, path: target.skillDirectory })),
+      ...(legacyExists && !legacyManaged ? [{ code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const, status: "warning" as const, path: paths.legacyCodexSkill }] : []),
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
       ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),
     ] : [] };
@@ -233,7 +251,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const getStatus = async () => {
     const result = await readDesktopStatus(integration);
     return refreshWarnings.length ? { ...result, configured: false,
-      diagnostics: result.diagnostics.map(item => refreshWarnings.find(warning => warning.code === item.code) ?? item) } : result;
+      diagnostics: result.diagnostics.map(item => refreshWarnings.find(warning => warning.code === item.code && warning.target === item.target && warning.path === item.path) ?? item) } : result;
   };
   const confirmation = createConfirmationSession();
   let window: InstanceType<typeof BrowserWindow> | undefined;
@@ -249,7 +267,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const suffix = platform === "win32" ? ".exe" : "";
   const controller = createSetupController({
     getStatus,
-    commit: (input) => commitDesktopSetup(input, { paths, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
+    commit: (input) => commitDesktopSetup(input, { paths, targets: integration.targets, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
     install: async () => { const result = await installDesktopIntegration(integration); refreshWarnings = []; return result; },
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },

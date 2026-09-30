@@ -343,6 +343,14 @@ async function legacyCodexMarker(paths: DesktopPaths): Promise<{ readonly source
   } catch { return undefined; }
 }
 
+/** A valid legacy marker alone is insufficient; the tree must still match its digest. */
+export async function isManagedLegacyCodexSkillInstalled(paths: DesktopPaths): Promise<boolean> {
+  const marker = await legacyCodexMarker(paths);
+  if (!marker) return false;
+  try { return await treeDigest(paths.legacyCodexSkill, true) === marker.sourceDigest; }
+  catch { return false; }
+}
+
 export async function prepareLegacyCodexMigration(paths: DesktopPaths): Promise<PreparedRemoval | undefined> {
   if (!(await legacyCodexMarker(paths))) return undefined;
   return prepareOwnedRemoval(legacyCodexPaths(paths), async () => {
