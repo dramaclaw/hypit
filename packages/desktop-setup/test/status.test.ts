@@ -11,7 +11,7 @@ import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets, supportedSkillTargets } from "../src/agent-targets.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
-import { createSetupController, readDesktopStatus, refreshDesktopStatus } from "../src/main.js";
+import { createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
 import { renderLauncher } from "../src/launcher-install.js";
 import { mountWizard } from "../src/renderer.js";
 import { SKILL_MARKER } from "../src/skill-install.js";
@@ -100,6 +100,29 @@ test("unmanaged legacy Codex Skill reports a portable warning and remains untouc
   assert.ok(status.diagnostics.some(item => item.code === "skill" && item.target === "portable" && item.status === "warning" && item.path === f.paths.legacyCodexSkill));
   assert.equal(await readFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "utf8"), "user-owned SECRET legacy content");
   assert.equal(JSON.stringify(status).includes("SECRET"), false);
+});
+
+test("startup controller keeps a ready install configured when legacy Codex tree only adds a warning", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.profile, JSON.stringify(profile()));
+  await installDesktopIntegration(f);
+  await mkdir(f.paths.legacyCodexSkill, { recursive: true });
+  await writeFile(join(f.paths.legacyCodexSkill, "SKILL.md"), "user legacy Skill");
+  const refreshed = await refreshDesktopStatus(f);
+  assert.equal(refreshed.configured, true);
+  const controller = createSetupController({ getStatus: async () => reconcileStartupStatus(await readDesktopStatus(f), refreshed),
+    commit: async () => refreshed, install: async () => {}, diagnose: async () => [], openConfig: async () => {}, clear: async () => refreshed });
+  const reply = await controller.getStatus();
+  assert.equal(reply.ok, true);
+  if (reply.ok) {
+    assert.equal(reply.value.configured, true);
+    assert.ok(reply.value.diagnostics.some(item => item.code === "skill" && item.target === "portable" && item.status === "warning" && item.path === f.paths.legacyCodexSkill));
+  }
+  const rollbackWarning = { code: "profile" as const, label: "Runtime Profile" as const, status: "warning" as const, path: f.paths.profile };
+  const failedRefresh = { ...refreshed, configured: false, diagnostics: [...refreshed.diagnostics, rollbackWarning] };
+  const guarded = reconcileStartupStatus(await readDesktopStatus(f), failedRefresh);
+  assert.equal(guarded.configured, false);
+  assert.deepEqual(guarded.diagnostics.find(item => item.code === "profile"), rollbackWarning);
 });
 
 test("completion requires a valid profile, intact managed Skill, launcher and managed state", async (t) => {

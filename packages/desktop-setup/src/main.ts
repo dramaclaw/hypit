@@ -103,10 +103,14 @@ export type SetupServices = {
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
 const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
+const detectedAgentIds = ["codex", "claymore-piko", "cursor", "claude-code"] as const;
+const plainArray = (value: unknown): value is unknown[] => Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype;
 function publicDiagnostic(item: DiagnosticItem): DiagnosticItem {
-  if (!["pass", "warning", "fail"].includes(item.status)) throw new Error("Invalid diagnostic result");
+  if (typeof item.code !== "string" || typeof item.status !== "string" || !["pass", "warning", "fail"].includes(item.status)
+    || typeof item.label !== "string" || (item.path !== undefined && typeof item.path !== "string")
+    || (item.cleanupObjectKey !== undefined && typeof item.cleanupObjectKey !== "string")) throw new Error("Invalid diagnostic result");
   if (item.code === "skill") {
-    if (!item.target || !Object.hasOwn(skillLabels, item.target) || item.label !== skillLabels[item.target]) throw new Error("Invalid diagnostic result");
+    if (typeof item.target !== "string" || !Object.hasOwn(skillLabels, item.target) || item.label !== skillLabels[item.target]) throw new Error("Invalid diagnostic result");
     return { code: "skill", status: item.status, label: skillLabels[item.target], target: item.target,
       ...(typeof item.path === "string" ? { path: item.path } : {}) };
   }
@@ -115,14 +119,24 @@ function publicDiagnostic(item: DiagnosticItem): DiagnosticItem {
   return { code: item.code, status: item.status, label: diagnosticLabels[item.code], ...(typeof item.path === "string" ? { path: item.path } : {}), ...(key ? { cleanupObjectKey: key } : {}) };
 }
 function publicResult(result: SetupResult): SetupResult {
+  if (typeof result.profilePath !== "string" || typeof result.launcherPath !== "string"
+    || !plainArray(result.skillTargets) || !plainArray(result.diagnostics)) throw new Error("Invalid setup result");
   const skillTargets = result.skillTargets.map(target => {
-    if (!Object.hasOwn(skillLabels, target.id) || target.label !== skillLabels[target.id] || typeof target.path !== "string"
-      || !Array.isArray(target.detectedAgents) || target.detectedAgents.some(id => !["codex", "claymore-piko", "cursor", "claude-code"].includes(id))) throw new Error("Invalid Skill target result");
+    if (!target || typeof target !== "object" || typeof target.id !== "string" || !Object.hasOwn(skillLabels, target.id)
+      || typeof target.label !== "string" || target.label !== skillLabels[target.id] || typeof target.path !== "string"
+      || !plainArray(target.detectedAgents) || target.detectedAgents.some(id => typeof id !== "string" || !detectedAgentIds.includes(id))) throw new Error("Invalid Skill target result");
     return { id: target.id, label: skillLabels[target.id], path: target.path, detectedAgents: [...target.detectedAgents] };
   });
   return { configured: result.configured === true, modelCount: Number.isSafeInteger(result.modelCount) && result.modelCount >= 0 ? result.modelCount : 0,
     relayVerified: result.relayVerified === true, profilePath: result.profilePath, skillTargets, launcherPath: result.launcherPath,
     diagnostics: result.diagnostics.map(publicDiagnostic) };
+}
+
+/** Only an incomplete startup refresh can carry a readiness-affecting warning. */
+export function reconcileStartupStatus(current: SetupResult, startup: SetupResult | undefined): SetupResult {
+  const warnings = startup?.configured === false ? startup.diagnostics.filter(item => item.code === "profile" && item.status === "warning") : [];
+  return warnings.length ? { ...current, configured: false,
+    diagnostics: current.diagnostics.map(item => warnings.find(warning => warning.code === item.code && warning.path === item.path) ?? item) } : current;
 }
 
 export function createSetupController(services: SetupServices) {
@@ -247,11 +261,10 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
   // Refresh once per app launch so explicit removal in this session stays removed.
   const refreshed = await refreshDesktopStatus(integration);
-  let refreshWarnings = refreshed.diagnostics.filter(item => item.status === "warning");
+  let startupStatus: SetupResult | undefined = refreshed;
   const getStatus = async () => {
     const result = await readDesktopStatus(integration);
-    return refreshWarnings.length ? { ...result, configured: false,
-      diagnostics: result.diagnostics.map(item => refreshWarnings.find(warning => warning.code === item.code && warning.target === item.target && warning.path === item.path) ?? item) } : result;
+    return reconcileStartupStatus(result, startupStatus);
   };
   const confirmation = createConfirmationSession();
   let window: InstanceType<typeof BrowserWindow> | undefined;
@@ -268,10 +281,10 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const controller = createSetupController({
     getStatus,
     commit: (input) => commitDesktopSetup(input, { paths, targets: integration.targets, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
-    install: async () => { const result = await installDesktopIntegration(integration); refreshWarnings = []; return result; },
+    install: async () => { const result = await installDesktopIntegration(integration); startupStatus = undefined; return result; },
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
-    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); refreshWarnings = []; return getStatus(); },
+    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); startupStatus = undefined; return getStatus(); },
     removeIntegration: async () => {
       const targets = [paths.launcher, paths.skill, paths.managedState, platform === "darwin" ? join(home, ".zprofile") : "HKCU\\Environment\\Path"];
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);

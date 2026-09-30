@@ -124,6 +124,32 @@ test("outbound results and diagnostics project only public contract fields", asy
   assert.equal((await invalid.getStatus()).ok, false);
 });
 
+test("controller rejects array-shaped enum values and object paths before IPC cloning", async () => {
+  const disguised = (value: string, secret: string) => Object.assign([value], { secret });
+  const cases: readonly [string, SetupResult][] = [
+    ["target id", { ...result, skillTargets: [{ ...result.skillTargets[0]!, id: disguised("portable", input.baseUrl) }] } as unknown as SetupResult],
+    ["skill diagnostic target", { ...result, diagnostics: [{ code: "skill", target: disguised("portable", input.apiKey), label: "通用 Agent Skill", status: "pass" }] } as unknown as SetupResult],
+    ["diagnostic code", { ...result, diagnostics: [{ code: disguised("newapi", input.relay.endpoint), label: "NewAPI", status: "pass" }] } as unknown as SetupResult],
+    ["profile path", { ...result, profilePath: { secret: input.relay.bucket } } as unknown as SetupResult],
+    ["launcher path", { ...result, launcherPath: { secret: input.relay.accessKeyId } } as unknown as SetupResult],
+    ["target label", { ...result, skillTargets: [{ ...result.skillTargets[0]!, label: disguised("通用 Agent Skill", input.relay.accessKeySecret) }] } as unknown as SetupResult],
+    ["detected Agent", { ...result, skillTargets: [{ ...result.skillTargets[0]!, detectedAgents: [disguised("codex", input.apiKey)] }] } as unknown as SetupResult],
+    ["target path", { ...result, skillTargets: [{ ...result.skillTargets[0]!, path: { secret: input.apiKey } }] } as unknown as SetupResult],
+    ["diagnostic path", { ...result, diagnostics: [{ code: "newapi", label: "NewAPI", status: "pass", path: { secret: input.apiKey } }] } as unknown as SetupResult],
+    ["diagnostic status", { ...result, diagnostics: [{ code: "newapi", label: "NewAPI", status: disguised("pass", input.apiKey) }] } as unknown as SetupResult],
+  ];
+  for (const [name, unsafe] of cases) {
+    const controller = createSetupController({ getStatus: async () => unsafe, commit: async () => unsafe, install: async () => {},
+      diagnose: async () => unsafe.diagnostics, openConfig: async () => {}, clear: async () => unsafe });
+    const reply = await controller.getStatus();
+    assert.equal(reply.ok, false, name);
+    const cloned = structuredClone(reply);
+    for (const secret of [input.baseUrl, input.apiKey, input.relay.endpoint, input.relay.bucket, input.relay.accessKeyId, input.relay.accessKeySecret]) {
+      assert.equal(JSON.stringify(cloned).includes(secret), false, name);
+    }
+  }
+});
+
 test("CJS shell boots without import.meta and stages the Windows credential helper", async () => {
   const directory = new URL("../", import.meta.url);
   execFileSync(process.execPath, ["scripts/build.mjs"], { cwd: directory, stdio: "pipe" });
