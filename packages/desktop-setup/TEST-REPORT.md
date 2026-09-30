@@ -1,6 +1,6 @@
 # Hypit 桌面安装包验收记录
 
-日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次恢复警告持久化修复”对应当前最终构建。
+日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。下方保留此前验收记录；本节文件和“本次 Profile 回滚防护修复”对应当前最终构建。
 
 ## 最终文件
 
@@ -8,10 +8,29 @@
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |
-| `Hypit-Setup-0.1.0-arm64.dmg` | 228849797 | `12cca8110c4dea04e0f6c9d0f18854d74c7dd2f19818aa5dd732994438d244f2` |
-| `Hypit-Setup-0.1.0-x64.exe` | 204609700 | `5e84ea2dfd6ab858d4790a9f32d7286b3ac3f5475ebab45e7ba0bc4d499bd79e` |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 228850849 | `ec9281dd542b7d4cbc876dbf971d487a65cf5fbddc9246150ae0cdf0732773c3` |
+| `Hypit-Setup-0.1.0-x64.exe` | 204610176 | `75d8a708d55b5b21fd4f3c1223fc5f504344fab9892f743818859d156a736041` |
 
 在 `packages/desktop-setup/release/` 目录运行 `shasum -a 256 -c Hypit-Setup-0.1.0-arm64.dmg.sha256` 和 `shasum -a 256 -c Hypit-Setup-0.1.0-x64.exe.sha256`，两项均输出 `OK`。校验文件中的文件名是相对文件名，因此应从 `release/` 目录运行。
+
+## 本次 Profile 回滚防护修复（2026-09-30）
+
+启动媒体刷新若已发布 Profile，而并发编辑使回滚拒绝覆盖，安装向导会保留未就绪状态及 Profile 警告。显式重新扫描 Agent 只修复 Skill、命令入口等集成，不会清除此防护；本地恢复目录仍由状态读取发现，避免重复或已清除警告滞留。成功提交新 Profile 的显式设置流程会清除旧防护。重新扫描不运行凭据或网络诊断。
+
+macOS 与 Windows 路径上的生产状态生命周期回归通过真实文件事务重现并发编辑与 Skill 失败，确认重新扫描前后均未就绪、Profile 警告保留，随后实际提交新 Profile 后恢复就绪。临时恢复旧版无条件清空行为时，两平台回归都在扫描后的就绪断言失败；修复版本通过。
+
+| 命令 | 本次结果 |
+| --- | --- |
+| `pnpm check` | TypeScript 检查通过 |
+| `pnpm test` | 1646 项：1621 通过、25 条件跳过、0 失败；首次并行构建时 runtime-local JSON 读取竞态失败 1 项，单项及顺序全量复跑均通过 |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts` | 307 项：305 通过、2 项 staged-media 条件跳过、0 失败 |
+| `pnpm desktop:build` | 桌面 bundle 构建通过 |
+| `HYPIT_TEST_STAGED_MEDIA=1 node --import tsx --test packages/desktop-setup/test/media-capabilities.test.ts` | 3/3 通过 |
+| 两平台 `check-artifact.mjs` | staging 资源与媒体校验通过 |
+| `pnpm desktop:dist:mac` / `pnpm desktop:dist:win` | 重建成功；分别挂载 DMG、解包 EXE 并检查应用和资源 |
+| 两项 `shasum -a 256 -c` | 均为 `OK` |
+
+本次包仍未签名、公证或发布；未在真实 Windows x64 上安装，也未使用真实平台凭据或服务连接。
 
 ## 本次恢复警告持久化修复（2026-09-30）
 

@@ -10,8 +10,9 @@ import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
 import { createDesktopProfile, prepareDesktopMediaRefresh } from "../src/profile.js";
 import { installDesktopIntegration } from "../src/lifecycle.js";
-import { createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
+import { createDesktopStatusLifecycle, createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
 import { runDiagnostics } from "../src/diagnostics.js";
+import { commitDesktopSetup } from "../src/setup-core.js";
 import { SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext, platform: "darwin" | "win32") {
@@ -152,6 +153,67 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(result.configured, false);
     assert.equal(result.diagnostics.find(item => item.code === "profile")?.status, "warning");
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
+  });
+
+  test(`${platform} Agent rescan preserves the startup Profile rollback guard until Profile setup succeeds`, async (t) => {
+    const f = await fixture(t, platform);
+    let edited = "";
+    const startup = await refreshDesktopStatus({ ...f.current, copyDirectory: async () => {
+      const published = JSON.parse(await readFile(f.paths.profile, "utf8"));
+      edited = JSON.stringify({ ...published, userSetting: "concurrent edit" });
+      await writeFile(f.paths.profile, edited);
+      throw new Error("fixture-secret");
+    } });
+    assert.equal(startup.configured, false);
+    assert.equal(startup.diagnostics.find(item => item.code === "profile" && item.path === f.paths.profile)?.status, "warning");
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+
+    const lifecycle = createDesktopStatusLifecycle(f.current, startup);
+    let diagnosticsCalls = 0;
+    const controller = createSetupController({ getStatus: lifecycle.getStatus,
+      commit: async value => {
+        const result = await commitDesktopSetup(value, { paths: f.paths, targets: lifecycle.integration.targets, platform,
+          credentialStore: { owns: () => true, resolve: async () => undefined, put: async () => {}, delete: async () => false },
+          media: f.current.media,
+          connectionTest: { fetch: async url => String(url).endsWith("/models") ? Response.json({ data: [{ id: "model" }] }) : new Response("HY"),
+            randomUUID: () => "00000000-0000-4000-8000-000000000001",
+            createOssClient: () => ({ put: async () => {}, signatureUrl: () => "https://oss.example/probe", delete: async () => {} }) } });
+        lifecycle.profileCommitted();
+        return result;
+      },
+      install: () => installDesktopIntegration(lifecycle.integration),
+      refreshAgents: lifecycle.refreshAgents,
+      diagnose: async () => { diagnosticsCalls++; return []; },
+      openConfig: async () => {}, clear: lifecycle.getStatus });
+    const before = await controller.getStatus();
+    assert.equal(before.ok, true);
+    if (!before.ok) return;
+    assert.equal(before.value.configured, false);
+    assert.equal(before.value.diagnostics.find(item => item.code === "profile" && item.path === f.paths.profile)?.status, "warning");
+    const refreshed = await controller.refreshAgentIntegration();
+    assert.equal(refreshed.ok, true);
+    if (!refreshed.ok) return;
+    assert.equal(refreshed.value.configured, false);
+    assert.equal(refreshed.value.diagnostics.find(item => item.code === "profile" && item.path === f.paths.profile)?.status, "warning");
+    assert.equal(diagnosticsCalls, 0);
+    const stillGuarded = await controller.getStatus();
+    assert.equal(stillGuarded.ok, true);
+    if (stillGuarded.ok) assert.equal(stillGuarded.value.configured, false);
+    assert.equal(await readFile(f.paths.profile, "utf8"), edited);
+    for (const item of refreshed.value.diagnostics.filter(item => item.reason === "CLEANUP_INCOMPLETE" && item.path?.includes(".recovery-"))) {
+      assert.equal(refreshed.value.diagnostics.filter(other => other.code === item.code && other.path === item.path && other.reason === item.reason).length, 1);
+    }
+    const repaired = await controller.submit({ baseUrl: "https://api.example/v1", apiKey: "replacement-key", relay: {
+      enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "replacement-id", accessKeySecret: "replacement-secret",
+    } });
+    assert.equal(repaired.ok, true, JSON.stringify(repaired));
+    assert.equal(diagnosticsCalls, 1);
+    const afterRepair = await controller.getStatus();
+    assert.equal(afterRepair.ok, true);
+    if (afterRepair.ok) {
+      assert.equal(afterRepair.value.configured, true);
+      assert.equal(afterRepair.value.diagnostics.find(item => item.code === "profile" && item.path === f.paths.profile)?.status, "pass");
+    }
   });
 
   test(`${platform} moved app refresh replaces proven managed media paths after the old app is gone`, async (t) => {

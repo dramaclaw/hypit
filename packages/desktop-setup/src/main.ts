@@ -212,6 +212,26 @@ export function reconcileStartupStatus(current: SetupResult, startup: SetupResul
       ...warnings.filter(warning => !current.diagnostics.some(item => matches(warning, item)))] } : current;
 }
 
+/** Keep startup Profile rollback uncertainty until an operation actually commits a new Profile. */
+export function createDesktopStatusLifecycle(initial: DesktopIntegrationOptions, refreshed: SetupResult) {
+  let integration = initial;
+  let startupStatus: SetupResult | undefined = refreshed;
+  return {
+    get integration() { return integration; },
+    getStatus: async () => reconcileStartupStatus(await readDesktopStatus(integration), startupStatus),
+    profileCommitted: () => { startupStatus = undefined; },
+    refreshAgents: async () => {
+      integration = { ...integration, targets: await rescanIntegrationTargets(integration.paths) };
+      const result = await installDesktopIntegration({ ...integration, preserveExisting: false });
+      // A rescan repairs only integration. Fresh status rediscovers surviving recovery siblings.
+      const guard = startupStatus?.configured === false ? startupStatus.diagnostics.filter(item => item.code === "profile"
+        && item.status === "warning" && item.path === startupStatus?.profilePath) : [];
+      startupStatus = guard.length && startupStatus ? { ...startupStatus, diagnostics: guard } : undefined;
+      return result;
+    },
+  };
+}
+
 export function createSetupController(services: SetupServices) {
   const listeners = new Set<(progress: SetupProgress) => void>();
   let tail: Promise<unknown> = Promise.resolve();
@@ -363,16 +383,13 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     agentData: app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
-  let integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
+  const integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
     cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"),
     sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
   // Refresh once per app launch so explicit removal in this session stays removed.
   const refreshed = await refreshDesktopStatus(integration);
-  let startupStatus: SetupResult | undefined = refreshed;
-  const getStatus = async () => {
-    const result = await readDesktopStatus(integration);
-    return reconcileStartupStatus(result, startupStatus);
-  };
+  const lifecycle = createDesktopStatusLifecycle(integration, refreshed);
+  const getStatus = lifecycle.getStatus;
   const confirmation = createConfirmationSession();
   let window: InstanceType<typeof BrowserWindow> | undefined;
   const confirm = async (action: "clear" | "integration", targets: readonly string[]) => {
@@ -387,17 +404,17 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   const suffix = platform === "win32" ? ".exe" : "";
   const controller = createSetupController({
     getStatus,
-    commit: (input) => commitDesktopSetup(input, { paths, targets: integration.targets, platform, credentialStore, media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } }),
-    install: async () => { const result = await installDesktopIntegration(integration); startupStatus = undefined; return result; },
-    refreshAgents: async () => {
-      integration = { ...integration, targets: await rescanIntegrationTargets(paths) };
-      const result = await installDesktopIntegration({ ...integration, preserveExisting: false });
-      startupStatus = undefined;
+    commit: async (input) => {
+      const result = await commitDesktopSetup(input, { paths, targets: lifecycle.integration.targets, platform, credentialStore,
+        media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } });
+      lifecycle.profileCommitted();
       return result;
     },
+    install: () => installDesktopIntegration(lifecycle.integration),
+    refreshAgents: lifecycle.refreshAgents,
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
-    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); startupStatus = undefined; return getStatus(); },
+    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); lifecycle.profileCommitted(); return getStatus(); },
     removeIntegration: async () => {
       const targets = integrationConfirmationTargets({ paths, platform, home });
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
