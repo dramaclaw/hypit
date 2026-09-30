@@ -25,12 +25,20 @@ Core 只规划和推进依赖，不需要知道作品是一条视频。新组件
 ```bash
 hypit paths
 hypit runtime init
+hypit runtime up
 ```
 
 `runtime init` 写入可编辑的起始 `hypit.runtime.json`，通过项目的 `.hypit/runtime`
 文件选择它。已有 Profile 会保留；此操作不安装、不登录、不执行。
-起始配置提供 HypiHub 托管生成和 WhisperX，以及本地媒体处理、渲染。先按作品需要选择服务，
-再准备它们。本地推理、项目 Provider 可以走同一条路径，也可以与 HypiHub 混合使用。
+起始配置保留 HypiHub，并提供本地媒体处理和渲染；九项已支持的图片、视频能力默认绑定
+`newapi.personal`（DramaClaw NewAPI）。首次 `runtime up` 会先要求配置 NewAPI 地址和 API Key，
+再询问是否配置 OSS 中转；没有参考素材时可以暂不配置 OSS。之后准备本地依赖并启动 Worker。
+本地推理、项目 Provider 可以走同一条路径，也可以与 HypiHub 混合使用。
+
+NewAPI 地址保存到 Profile 的 `baseUrl`，密钥写入选定的 CredentialStore；Profile 仅保存
+凭据引用。起始 Profile 选用 `platform` Store，也可以在首次配置前明确改用其他可写 Store。
+非交互运行首次 `runtime up` 时，如果 `baseUrl` 缺失，命令会列出缺项并要求在交互终端配置；
+已有地址但所需凭据缺失时也会报错，不会带着缺失凭据启动。只读凭据来源需要在该来源中设置。
 
 `hypit runtime use <profile>` 选择已有配置；`--runtime <profile>` 只覆盖当前命令。
 命令只读取当前项目的选择，不继承其他项目的 Runtime。命令行相对路径以当前目录为基准。
@@ -69,12 +77,15 @@ hypit runtime init
 
 ## 按当前需要准备服务
 
-本地媒体处理可以直接准备所选工具并启动 Worker：
+在只配置本地媒体处理的 Profile 中，可以直接准备所选工具并启动 Worker：
 
 ```bash
 hypit runtime up --endpoint media.local
 hypit runtime status
 ```
+
+起始 Profile 包含尚未配置的 NewAPI 时，即使 `--endpoint` 只选择 `media.local`，
+`runtime up` 也会先完成 NewAPI 首次配置。
 
 只准备资源、暂不启动助手或 Worker 时，使用 `hypit programs prepare --endpoint media.local`。
 通过 `hypit programs status --endpoint media.local` 查看就绪情况；检查配置或排查失败时，
@@ -83,12 +94,28 @@ hypit runtime status
 本地媒体处理没有凭据要求。选中的服务若声明了凭据槽，再单独使用
 `hypit auth status <endpoint>` 检查。例如，选择 HypiHub 后使用
 `hypit auth status hypihub.default`，需要连接账户时执行 `hypit auth login hypihub.default`。
+默认 NewAPI 的凭据状态可用 `hypit auth status newapi.personal` 检查。
+
+如首次跳过 OSS，之后需要参考素材时，编辑 `hypit.runtime.json` 中
+`endpoints["newapi.personal"].config`：一起加入非密钥的 `relayEndpoint`、`relayBucket`
+和 `relayAccessKeyId`、`relayAccessKeySecret` 的 CredentialRef。两个引用指向 Profile
+所选 Store，再通过安全输入保存密钥：
+
+```bash
+hypit auth login newapi.personal --slot relayAccessKeyId
+hypit auth login newapi.personal --slot relayAccessKeySecret
+hypit runtime up
+```
+
+具体字段示例见 [NewAPI Provider](../../../packages/provider-newapi/README.md)。
 
 使用 Profile 里的实际 Endpoint 名称，可重复 `--endpoint` 选择多个；省略时覆盖整个 Profile。
 `doctor` 读取配置、运行 Provider 的诊断，不提交生成。除了错误，也要阅读警告：有凭据或能读取
 模型目录，不代表每种请求一定成功。没有选定 Runtime 时，doctor 只检查项目 Result。
 
-`runtime up` 准备所选本地依赖和 Managed Program，再启动 Worker；它不登录或启动托管服务。
+`runtime up` 检查起始 NewAPI 配置和必需凭据，准备所选本地依赖和 Managed Program，再启动 Worker；
+它不会启动托管服务。首次 NewAPI 问答仅在其地址尚未配置时进行；已有地址而缺少可写凭据时，
+交互运行会只询问缺失的凭据。
 `programs prepare|up|status|down` 单独管理这些本地资源和助手。首次推理环境准备可能涉及大量下载，
 应先比较本地准备成本和托管方式，再选择执行路径。
 

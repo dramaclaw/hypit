@@ -1,0 +1,27 @@
+{
+  "name": "@dramaclaw/provider-newapi",
+  "version": "0.0.0-dev",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "hypit": { "activation": "./src/activation.ts" },
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@hypit/endpoint-kit": "workspace:*",
+    "@hypit/generation": "workspace:*",
+    "@hypit/protocol": "workspace:*",
+    "@hypit/runtime": "workspace:*",
+    "@hypit/runtime-kit": "workspace:*",
+    "ali-oss": "^6.23.0"
+  },
+  "devDependencies": {
+    "@hypit/driver-node": "workspace:*",
+    "@hypit/gpt-image": "workspace:*",
+    "@hypit/minimax-h3": "workspace:*",
+    "@hypit/mimo-speech": "workspace:*",
+    "@hypit/nano-banana": "workspace:*",
+    "@hypit/seedance": "workspace:*",
+    "@hypit/seedream": "workspace:*",
+    "@types/ali-oss": "^6.16.11"
+  }
+}

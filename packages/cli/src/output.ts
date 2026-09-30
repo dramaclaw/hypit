@@ -14,12 +14,16 @@ export type CliTerminal = {
 
 export type CliIo = {
   readonly write: (text: string) => void;
+  /** True only when the input channel supports interactive terminal prompts. */
+  readonly inputIsTTY?: boolean;
   /** Human progress that may use stderr while `write` remains a stable machine-output channel. */
   readonly writeProgress?: (text: string) => void;
   /** Concrete command shells expose process status without coupling the engine to Node globals. */
   readonly setExitCode?: (code: number) => void;
   /** Interactive secret input supplied by the concrete CLI shell; never echoed or logged. */
   readonly readSecret?: (prompt: string) => Promise<string>;
+  /** Interactive plain-text input supplied by the concrete CLI shell. */
+  readonly readText?: (prompt: string) => Promise<string>;
   readonly terminal?: CliTerminal;
 };
 

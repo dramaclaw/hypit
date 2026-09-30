@@ -70,7 +70,7 @@ export function resolveDistributionPackageImport(root: string, specifier: string
   if (specifier.startsWith("@hypit/")) {
     return distributionPublicEntry(resolve(root), specifier) ?? distributionPackageEntry(resolve(root), specifier);
   }
-  return undefined;
+  return distributionPackageEntry(resolve(root), specifier);
 }
 
 /**
@@ -104,6 +104,16 @@ export function installDistributionPackageResolution(roots: readonly string[]): 
           if (entry !== undefined) return nextResolve(pathToFileURL(entry).href, context);
         }
         throw new Error(`Active Hypit Distribution does not provide ${specifier}`);
+      }
+      // A Distribution-owned package can use another npm scope (for example the bundled
+      // NewAPI Provider). Resolve its imports from the same installed Distribution tree.
+      // Imports made by project packages retain ordinary project dependency resolution.
+      if (barePackageSpecifier(specifier) && context.parentURL !== undefined
+        && rootUrls.some((root) => context.parentURL!.startsWith(root))) {
+        for (const root of installed) {
+          const entry = resolveDistributionPackageImport(root, specifier);
+          if (entry !== undefined) return nextResolve(pathToFileURL(entry).href, context);
+        }
       }
       return nextResolve(specifier, context);
     },

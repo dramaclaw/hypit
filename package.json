@@ -186,6 +186,7 @@
     "node": ">=22.15.0"
   },
   "devDependencies": {
+    "@dramaclaw/provider-newapi": "workspace:*",
     "@hypit/artifact": "workspace:*",
     "@hypit/audio-track": "workspace:*",
     "@hypit/audio-track-studio": "workspace:*",
@@ -291,6 +292,7 @@
   },
   "dependencies": {
     "@puppeteer/browsers": "3.2.2",
+    "ali-oss": "^6.23.0",
     "koffi": "3.2.1",
     "puppeteer-core": "25.10.0",
     "sharp": "0.35.4",

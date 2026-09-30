@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -9,6 +9,116 @@ import { runCli } from "../src/main.js";
 import type { CliCredentialControl, CliRuntimeControl } from "../src/runtime-port.js";
 import { createLocalCredentialControl } from "@hypit/runtime-local";
 import { commandHint } from "../src/command-hint.js";
+
+test("configures a selected Runtime before up", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-runtime-setup-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profile = join(root, "runtime.json");
+  await writeFile(profile, `${JSON.stringify({ format: "hypit.runtime-local@1" })}\n`);
+  const events: string[] = [];
+  const output: string[] = [];
+  const secret = "private-test-key";
+  const distribution = {
+    async configureRuntimeProfileBeforeUp(context: { readonly profilePath: string; readonly profile: { readonly format: string } }) {
+      events.push("configure");
+      assert.equal(context.profilePath, profile);
+      assert.equal(context.profile.format, "hypit.runtime-local@1");
+      return {
+        profile: { ...context.profile, configured: true },
+        changed: true,
+        credentials: [{ endpoint: "service", slot: "apiKey", secret }],
+      };
+    },
+    async openRuntimeHost() {
+      assert.equal(JSON.parse(await readFile(profile, "utf8")).configured, true);
+      return {
+        openCredentials: async () => ({
+          async putCredential(_endpoint: string, slot: string, value: string) {
+            assert.equal(value, secret);
+            events.push(`credential:${slot}`);
+          },
+          async close() {},
+        }),
+        async prepare() {
+          events.push("prepare");
+          assert.equal(JSON.parse(await readFile(profile, "utf8")).configured, true);
+          assert.ok(events.includes("credential:apiKey"));
+          return [];
+        },
+        async createRuntime() { return { async close() {} }; },
+        async controller() { return {
+          programs: { async up() { return { programs: [] }; } },
+          worker: { async up() { return { state: "running" }; } },
+        }; },
+      };
+    },
+  } as unknown as CliDistribution;
+
+  await runCli(["runtime", "up", profile, "--workspace", root, "--json"], {
+    write(text) { output.push(text); },
+  }, distribution);
+
+  assert.deepEqual(events, ["configure", "credential:apiKey", "prepare"]);
+  assert.equal(JSON.parse(await readFile(profile, "utf8")).configured, true);
+  assert.doesNotMatch(await readFile(profile, "utf8"), /private-test-key/u);
+  assert.doesNotMatch(output.join(""), /private-test-key/u);
+});
+
+test("runtime setup rejects a Profile containing a returned credential secret", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-runtime-secret-profile-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profile = join(root, "runtime.json");
+  await writeFile(profile, '{"format":"hypit.runtime-local@1"}\n');
+  const distribution = {
+    async configureRuntimeProfileBeforeUp() { return {
+      profile: { format: "hypit.runtime-local@1", unsafe: "private-test-key" },
+      changed: true,
+      credentials: [{ endpoint: "service", slot: "apiKey", secret: "private-test-key" }],
+    }; },
+    async openRuntimeHost() { throw new Error("Host must not open with an unsafe Profile"); },
+  } as unknown as CliDistribution;
+
+  await assert.rejects(
+    runCli(["runtime", "up", profile, "--workspace", root], { write() {} }, distribution),
+    (error: Error) => {
+      assert.doesNotMatch(error.message, /private-test-key/u);
+      assert.match(error.message, /Profile.*credential/u);
+      return true;
+    },
+  );
+  assert.doesNotMatch(await readFile(profile, "utf8"), /private-test-key/u);
+});
+
+test("runtime setup does not expose a credential Store error", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-runtime-secret-error-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const profile = join(root, "runtime.json");
+  await writeFile(profile, '{"format":"hypit.runtime-local@1"}\n');
+  let closed = false;
+  const distribution = {
+    async configureRuntimeProfileBeforeUp() { return {
+      profile: { format: "hypit.runtime-local@1" }, changed: false,
+      credentials: [{ endpoint: "service", slot: "apiKey", secret: "private-test-key" }],
+    }; },
+    async openRuntimeHost() { return {
+      async openCredentials() { return {
+        async putCredential() { throw new Error("store failed for private-test-key"); },
+        async close() { closed = true; },
+      }; },
+      async controller() { throw new Error("Startup must stop after credential failure"); },
+    }; },
+  } as unknown as CliDistribution;
+
+  await assert.rejects(
+    runCli(["runtime", "up", profile, "--workspace", root], { write() {} }, distribution),
+    (error: Error) => {
+      assert.doesNotMatch(error.message, /private-test-key/u);
+      assert.match(error.message, /credential/u);
+      return true;
+    },
+  );
+  assert.equal(closed, true);
+});
 
 test("activity opens Runtime control without constructing execution Providers", async () => {
   const calls: string[] = [];

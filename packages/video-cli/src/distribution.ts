@@ -1,4 +1,5 @@
 import type { CliDistribution } from "@hypit/cli";
+import { newApiDefaultBindings } from "@dramaclaw/provider-newapi";
 import {
   doctorProjectBuildResultRepository,
   openLocalRuntimeHost,
@@ -9,6 +10,7 @@ import { resolve } from "node:path";
 import {
   createVideoCompiler,
 } from "./compiler.js";
+import { configureNewApiRuntimeBeforeUp } from "./newapi-setup.js";
 
 // The Distribution root is the replaceable Hypit tool checkout, not this
 // package's source directory and never the author's project.
@@ -31,12 +33,21 @@ export const videoCliDistribution: CliDistribution = {
     credentials: {
       platform: { use: "@hypit/credential-store-platform" },
     },
+    bindings: newApiDefaultBindings,
     endpoints: {
       "hypihub.default": {
         use: "@hypit/provider-hypihub",
         config: {
           baseUrl: "https://hypit.ai",
           apiKey: { store: "platform", key: "hypihub.oauth" },
+        },
+      },
+      "newapi.personal": {
+        use: "@dramaclaw/provider-newapi",
+        pool: "newapi.personal",
+        config: {
+          baseUrl: "",
+          apiKey: { store: "platform", key: "newapi.personal.api-key" },
         },
       },
       "media.local": {
@@ -47,6 +58,7 @@ export const videoCliDistribution: CliDistribution = {
       },
     },
   },
+  configureRuntimeProfileBeforeUp: configureNewApiRuntimeBeforeUp,
   createCompiler: createVideoCompiler,
   discoverSourcePackages: async (path, options) => {
     const { discoverVideoSourcePackages } = await import("./package-selection.js");

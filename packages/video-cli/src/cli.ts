@@ -8,6 +8,7 @@ import { writeSnapshotHelp } from "./snapshot.js";
 import { writeCaptureHelp } from "./capture.js";
 import { runVersionCli, writeVersionHelp } from "./version.js";
 import { acceptSecretBytes } from "./secret-input.js";
+import { createInterface } from "node:readline/promises";
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
@@ -19,6 +20,12 @@ const colorMode = argv.includes("--no-color")
 const color = !json && colorMode !== "never" && process.env.TERM !== "dumb"
   && (colorMode === "always" || (process.env.NO_COLOR === undefined && process.stdout.isTTY === true));
 const unicode = process.env.TERM !== "dumb";
+
+async function readText(prompt: string): Promise<string> {
+  const terminal = createInterface({ input: process.stdin, output: process.stderr });
+  try { return await terminal.question(prompt); }
+  finally { terminal.close(); }
+}
 
 async function readSecret(prompt: string): Promise<string> {
   if (process.stdin.isTTY !== true || typeof process.stdin.setRawMode !== "function") {
@@ -49,10 +56,12 @@ async function readSecret(prompt: string): Promise<string> {
 }
 
 const io: CliIo = {
+  inputIsTTY: process.stdin.isTTY === true,
   write: (text) => process.stdout.write(text),
   writeProgress: (text) => process.stderr.write(text),
   setExitCode: (code) => { process.exitCode = code; },
   readSecret,
+  readText,
   terminal: {
     isTTY: process.stdout.isTTY === true,
     color,

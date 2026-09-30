@@ -1,9 +1,12 @@
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
+import { replaceFile } from "@hypit/file-io-node";
 import { distributionPackageDeclaring, locateNodePackage } from "@hypit/package-loader-node";
 import type { NodeRuntimeHost } from "@hypit/runtime-host-node";
 import { hypitHostPackageRoot, inspectHostPackage, parseRegistryPackageSpec, prepareHostPackages } from "@hypit/runtime-host-node";
+import type { CanonicalValue } from "@hypit/protocol";
 
 import type { CliCommand, EnvironmentCommand } from "../command.js";
 import { commandHint } from "../command-hint.js";
@@ -22,6 +25,16 @@ type PackageStatus = {
   readonly installedVersion?: string;
   readonly detail?: string;
 };
+
+async function replaceJsonFile(path: string, value: CanonicalValue): Promise<void> {
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+    await replaceFile(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
 
 /**
  * Whether `specifier` will resolve when a Build needs it.
@@ -327,10 +340,94 @@ export async function runEnvironmentCommand(input: {
       throw new Error("runtime requires a Runtime; run hypit runtime init, select one with runtime use, or pass --runtime <profile>");
     }
     const profile = resolve(runtimeProfile);
-    const controller = await runtimeController(profile);
     if (args.action === "up") {
       const packageRoot = await packageRootForProject();
+      const setup = distribution.configureRuntimeProfileBeforeUp === undefined
+        ? undefined
+        : await distribution.configureRuntimeProfileBeforeUp({
+          profilePath: profile,
+          profile: JSON.parse(await readFile(profile, "utf8")) as CanonicalValue,
+          interactive: !args.presentation.json && io.terminal?.isTTY === true && io.inputIsTTY === true,
+          ...(io.readText === undefined ? {} : { readText: io.readText }),
+          ...(io.readSecret === undefined ? {} : { readSecret: io.readSecret }),
+          writeProgress: io.writeProgress ?? io.write,
+        });
+      if (setup !== undefined) {
+        const profileText = JSON.stringify(setup.profile);
+        if (setup.credentials.some((item) => item.secret.length > 0
+          && profileText.includes(JSON.stringify(item.secret).slice(1, -1)))) {
+          throw new Error("Runtime Profile must not contain a credential secret");
+        }
+      }
+      if (setup?.changed === true) await replaceJsonFile(profile, setup.profile);
       const host = await runtimeHost(profile, packageRoot);
+      for (const item of setup?.credentials ?? []) {
+        if (setup?.requiredCredentials?.some((required) => required.endpoint === item.endpoint && required.slots.includes(item.slot))) {
+          let status;
+          try {
+            const control = await host.openCredentials(item.endpoint);
+            try { status = (await control.credentials(item.endpoint)).find((entry) => entry.slot === item.slot); }
+            finally { await control.close?.(); }
+          } catch {
+            throw new Error("Could not inspect Runtime credential");
+          }
+          if (status === undefined) throw new Error(`Endpoint ${item.endpoint} has no credential slot ${item.slot}`);
+          if (status.configured) continue;
+          if (!status.writable) {
+            if (status.ref.store === "env") throw new Error(`set ${status.ref.key} in the environment`);
+            throw new Error(`${status.label} is missing from its read-only credential source`);
+          }
+        }
+        try {
+          const control = await host.openCredentials(item.endpoint);
+          try { await control.putCredential(item.endpoint, item.slot, item.secret); }
+          finally { await control.close?.(); }
+        } catch {
+          throw new Error("Could not save Runtime credential");
+        }
+      }
+      for (const required of setup?.requiredCredentials ?? []) {
+        let control;
+        try { control = await host.openCredentials(required.endpoint); }
+        catch { throw new Error("Could not inspect Runtime credential"); }
+        let failed = false;
+        try {
+          let declared;
+          try { declared = await control.describeCredentials(required.endpoint); }
+          catch { throw new Error("Could not inspect Runtime credential"); }
+          for (const slot of required.slots) {
+            const item = declared.find((candidate) => candidate.slot === slot);
+            if (item === undefined) throw new Error(`Endpoint ${required.endpoint} does not declare ${slot}`);
+            let configured;
+            try { configured = (await control.credentials(required.endpoint)).some((state) => state.slot === slot && state.configured); }
+            catch { throw new Error("Could not inspect Runtime credential"); }
+            if (configured) continue;
+            if (!item.writable) {
+              if (item.ref.store === "env") throw new Error(`set ${item.ref.key} in the environment`);
+              throw new Error(`${item.label} is missing from its read-only credential source`);
+            }
+            if (!io.terminal?.isTTY || io.inputIsTTY !== true || io.readSecret === undefined || args.presentation.json) {
+              throw new Error(`${item.label} is missing; run runtime up in an interactive terminal to configure it`);
+            }
+            const secret = (await io.readSecret(`${item.label}: `))?.trim();
+            if (!secret) throw new Error(`${item.label} input was cancelled or empty`);
+            try { await control.putCredential(required.endpoint, slot, secret); }
+            catch { throw new Error("Could not save Runtime credential"); }
+            try { configured = (await control.credentials(required.endpoint)).some((state) => state.slot === slot && state.configured); }
+            catch { throw new Error("Could not inspect Runtime credential"); }
+            if (!configured) {
+              throw new Error(`Runtime credential ${slot} is not configured after write`);
+            }
+          }
+        } catch (error) {
+          failed = true;
+          throw error;
+        } finally {
+          try { await control.close?.(); }
+          catch { if (!failed) throw new Error("Could not close Runtime credential control"); }
+        }
+      }
+      const controller = await runtimeController(profile);
       const prepared = await host.prepare(
         { ...(args.endpoints === undefined ? {} : { endpoints: args.endpoints }), ...(reportPackageProgress === undefined ? {} : { onProgress: reportPackageProgress }) },
       );
@@ -367,6 +464,7 @@ export async function runEnvironmentCommand(input: {
       if (!ok) io.setExitCode?.(1);
       return;
     }
+    const controller = await runtimeController(profile);
     if (args.action === "logs") {
       const logs = await controller.worker.logs();
       const lines = logs.text.length === 0 ? [] : logs.text.replace(/\n$/u, "").split("\n");
