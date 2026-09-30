@@ -218,7 +218,8 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   if (process.platform !== "darwin" && process.platform !== "win32") { app.quit(); return; }
   const platform = process.platform;
   const home = app.getPath("home");
-  const paths = desktopPaths({ platform, home, appData: platform === "win32" ? process.env.LOCALAPPDATA || join(home, "AppData", "Local") : app.getPath("appData") });
+  const paths = desktopPaths({ platform, home, appData: platform === "win32" ? process.env.LOCALAPPDATA || join(home, "AppData", "Local") : app.getPath("appData"),
+    agentData: app.getPath("appData") });
   const resources = process.resourcesPath;
   const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
   const integration: DesktopIntegrationOptions = { paths, platform, home, electronExecutable: process.execPath,

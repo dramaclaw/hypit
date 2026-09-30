@@ -1,4 +1,5 @@
 import type { NewApiSetupInput } from "@dramaclaw/provider-newapi";
+import type { AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 
 /** Submitted from the wizard to the main process. Never include this in an outbound IPC event. */
 export type SetupInput = Omit<NewApiSetupInput, "relay"> & {
@@ -21,6 +22,10 @@ export type DiagnosticLabel =
   | "命令入口"
   | "Hypit 版本"
   | "FFmpeg"
+  | "Agent Skill"
+  | "通用 Agent Skill"
+  | "Claude Code Skill"
+  /** @deprecated Task 5 migrates existing diagnostic producers. */
   | "Codex Skill"
   | "Runtime Profile"
   | "平台凭据"
@@ -31,6 +36,7 @@ export type DiagnosticItem = {
   readonly code: DiagnosticCode;
   readonly status: "pass" | "warning" | "fail";
   readonly label: DiagnosticLabel;
+  readonly target?: AgentSkillTargetId;
   readonly path?: string;
   readonly cleanupObjectKey?: string;
 };
@@ -52,12 +58,22 @@ export type SetupProgress =
   | { readonly kind: "model-count"; readonly count: number }
   | { readonly kind: "diagnostic"; readonly item: DiagnosticItem };
 
+export type AgentSkillTargetSummary = {
+  readonly id: AgentSkillTargetId;
+  readonly label: "通用 Agent Skill" | "Claude Code Skill";
+  readonly path: string;
+  readonly detectedAgents: readonly DetectedAgentId[];
+};
+
 export type SetupResult = {
   readonly configured: boolean;
   readonly modelCount: number;
   readonly relayVerified: boolean;
   readonly profilePath: string;
+  /** @deprecated Task 5 replaces this with required skillTargets. */
   readonly skillPath: string;
+  /** Optional until Task 5 migrates all setup/status result producers. */
+  readonly skillTargets?: readonly AgentSkillTargetSummary[];
   readonly launcherPath: string;
   readonly diagnostics: readonly DiagnosticItem[];
 };
