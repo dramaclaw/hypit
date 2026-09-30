@@ -159,6 +159,46 @@ test("Profile publication failure retains ready resources and preserves a concur
   assert.equal((await f.service.installAndStart()).state, "ready");
 });
 
+for (const retry of ["start", "installAndStart"] as const) {
+  test(`fresh status after Profile commit failure remains unactivated until ${retry} publishes`, async (t) => {
+    const f = await fixture(t);
+    const userBytes = `${f.bytes.toString()}\n `;
+    const failed = await f.service.installAndStart(stage => {
+      if (stage === "starting-service") writeFileSync(f.paths.profile, userBytes);
+    });
+    assert.equal(failed.code, "WHISPERX_PROFILE_COMMIT_FAILED");
+    const reopened = createWhisperXProgramService(f.options);
+    const unactivated = await reopened.status();
+    assert.equal(unactivated.state, "prepared");
+    assert.equal(unactivated.code, "WHISPERX_PROFILE_REQUIRED");
+    assert.equal(await readFile(f.paths.profile, "utf8"), userBytes);
+    assert.equal(await readFile(join(f.paths.hostState, "fake-state"), "utf8"), "ready");
+    assert.equal((await reopened[retry]()).state, "ready");
+    assert.equal((await createWhisperXProgramService(f.options).status()).state, "ready");
+  });
+}
+
+for (const change of ["missing-endpoint", "missing-binding", "conflicting-endpoint", "conflicting-binding", "missing-profile"] as const) {
+  test(`a healthy service cannot report ready with ${change}`, async (t) => {
+    const f = await fixture(t);
+    await f.service.installAndStart();
+    const document = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    if (change === "missing-endpoint") delete document.endpoints["whisperx.local"];
+    if (change === "missing-binding") delete document.bindings["@hypit/whisperx@1#whisperx-alignment"];
+    if (change === "conflicting-endpoint") document.endpoints["whisperx.local"].config.expectedModel = "large-v3";
+    if (change === "conflicting-binding") document.bindings["@hypit/whisperx@1#whisperx-alignment"] = "custom";
+    const bytes = JSON.stringify(document);
+    if (change === "missing-profile") await rm(f.paths.profile);
+    else await writeFile(f.paths.profile, bytes);
+    const status = await createWhisperXProgramService(f.options).status();
+    const conflict = change.startsWith("conflicting");
+    assert.equal(status.state, conflict || change === "missing-profile" ? "mismatch" : "prepared");
+    assert.equal(status.code, conflict ? "WHISPERX_PROFILE_CONFLICT" : "WHISPERX_PROFILE_REQUIRED");
+    assert.equal(await readFile(join(f.paths.hostState, "fake-state"), "utf8"), "ready");
+    if (change !== "missing-profile") assert.equal(await readFile(f.paths.profile, "utf8"), bytes);
+  });
+}
+
 for (const upState of ["down", "mismatch"]) {
   test(`a ${upState} service never publishes the candidate`, async (t) => {
     const f = await fixture(t, { upState, ...(upState === "down" ? { pid: process.pid } : {}) });

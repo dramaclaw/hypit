@@ -7,7 +7,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { parseLocalRuntimeProfile } from "@hypit/runtime-local";
 import { createDesktopProfile } from "../src/profile.js";
-import { LOCAL_WHISPERX_ENDPOINT, WHISPERX_ALIGNMENT_CAPABILITY, localWhisperXConfig, prepareWhisperXProfile } from "../src/whisperx-profile.js";
+import { LOCAL_WHISPERX_ENDPOINT, WHISPERX_ALIGNMENT_CAPABILITY, isWhisperXProfileActivated, localWhisperXConfig, prepareWhisperXProfile } from "../src/whisperx-profile.js";
 
 const endpoint = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
   expectedModel: "small", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
@@ -46,6 +46,39 @@ test("candidate adds fixed local endpoint and binding without publishing", async
   assert.equal(await prepared.rollback(), false);
   assert.deepEqual(await prepared.dispose(false), []);
   assert.deepEqual(await readdir(dirname(f.profilePath)), ["desktop-newapi.json"]);
+});
+
+test("read-only activation requires both exact managed fragments and never creates a candidate", async (t) => {
+  const f = await fixture(t);
+  assert.equal(await isWhisperXProfileActivated(f), false);
+  f.document.endpoints[LOCAL_WHISPERX_ENDPOINT] = endpoint;
+  await writeFile(f.profilePath, JSON.stringify(f.document));
+  assert.equal(await isWhisperXProfileActivated(f), false);
+  f.document.bindings[WHISPERX_ALIGNMENT_CAPABILITY] = LOCAL_WHISPERX_ENDPOINT;
+  const bytes = Buffer.from(`\n${JSON.stringify(f.document)}  \n`);
+  await writeFile(f.profilePath, bytes);
+  assert.equal(await isWhisperXProfileActivated(f), true);
+  assert.deepEqual(await readFile(f.profilePath), bytes);
+  assert.deepEqual(await readdir(dirname(f.profilePath)), ["desktop-newapi.json"]);
+  delete f.document.endpoints[LOCAL_WHISPERX_ENDPOINT];
+  await writeFile(f.profilePath, JSON.stringify(f.document));
+  assert.equal(await isWhisperXProfileActivated(f), false);
+});
+
+test("read-only activation refuses conflicting, invalid and missing Profiles", async (t) => {
+  const f = await fixture(t);
+  f.document.endpoints[LOCAL_WHISPERX_ENDPOINT] = { ...endpoint, extra: true };
+  await writeFile(f.profilePath, JSON.stringify(f.document));
+  await assert.rejects(isWhisperXProfileActivated(f), /WHISPERX_PROFILE_CONFLICT/u);
+  f.document.endpoints[LOCAL_WHISPERX_ENDPOINT] = endpoint;
+  f.document.bindings[WHISPERX_ALIGNMENT_CAPABILITY] = "custom";
+  await writeFile(f.profilePath, JSON.stringify(f.document));
+  await assert.rejects(isWhisperXProfileActivated(f), /WHISPERX_PROFILE_CONFLICT/u);
+  await writeFile(f.profilePath, "invalid");
+  await assert.rejects(isWhisperXProfileActivated(f), /WHISPERX_PROFILE_INVALID/u);
+  await rm(f.profilePath);
+  await assert.rejects(isWhisperXProfileActivated(f), /WHISPERX_PROFILE_REQUIRED/u);
+  assert.deepEqual(await readdir(dirname(f.profilePath)), []);
 });
 
 test("commit preserves unrelated document values and original permissions", async (t) => {

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { DiagnosticItem } from "./contracts.js";
 import { prepareFileChange, snapshotFile } from "./launcher-install.js";
 import { parseDesktopProfileDocument } from "./profile.js";
+import type { DesktopProfileDocument } from "./profile.js";
 import type { PreparedRemoval } from "./skill-install.js";
 
 export const LOCAL_WHISPERX_ENDPOINT = "whisperx.local";
@@ -12,6 +13,27 @@ export const localWhisperXConfig = Object.freeze({
 });
 export type PreparedWhisperXProfile = PreparedRemoval & { readonly candidatePath: string };
 export type WhisperXProfileOptions = { readonly profilePath: string; readonly platform: "darwin" | "win32" };
+const endpoint = { use: "@hypit/provider-whisperx-local", pool: LOCAL_WHISPERX_ENDPOINT, config: localWhisperXConfig };
+
+function hasExactActivation(profile: DesktopProfileDocument): boolean {
+  const hasEndpoint = Object.hasOwn(profile.endpoints, LOCAL_WHISPERX_ENDPOINT);
+  const hasBinding = Object.hasOwn(profile.bindings, WHISPERX_ALIGNMENT_CAPABILITY);
+  if ((hasEndpoint && !isDeepStrictEqual(profile.endpoints[LOCAL_WHISPERX_ENDPOINT], endpoint))
+    || (hasBinding && profile.bindings[WHISPERX_ALIGNMENT_CAPABILITY] !== LOCAL_WHISPERX_ENDPOINT)) {
+    throw new Error("WHISPERX_PROFILE_CONFLICT");
+  }
+  return hasEndpoint && hasBinding;
+}
+
+/** Read the real Profile only; a candidate or a healthy process cannot establish activation. */
+export async function isWhisperXProfileActivated(options: Pick<WhisperXProfileOptions, "profilePath">): Promise<boolean> {
+  const snapshot = await snapshotFile(options.profilePath);
+  if (snapshot.bytes === undefined) throw new Error("WHISPERX_PROFILE_REQUIRED");
+  let profile;
+  try { profile = parseDesktopProfileDocument(snapshot.bytes); }
+  catch { throw new Error("WHISPERX_PROFILE_INVALID"); }
+  return hasExactActivation(profile);
+}
 
 /** Prepare a sibling so the runtime resolves relative dataRoot exactly as it will after publication. */
 export async function prepareWhisperXProfile(options: WhisperXProfileOptions): Promise<PreparedWhisperXProfile> {
@@ -20,16 +42,10 @@ export async function prepareWhisperXProfile(options: WhisperXProfileOptions): P
   let profile;
   try { profile = parseDesktopProfileDocument(before.bytes); }
   catch { throw new Error("WHISPERX_PROFILE_INVALID"); }
-  const endpoint = { use: "@hypit/provider-whisperx-local", pool: LOCAL_WHISPERX_ENDPOINT, config: localWhisperXConfig };
-  const hasEndpoint = Object.hasOwn(profile.endpoints, LOCAL_WHISPERX_ENDPOINT);
-  const hasBinding = Object.hasOwn(profile.bindings, WHISPERX_ALIGNMENT_CAPABILITY);
-  if ((hasEndpoint && !isDeepStrictEqual(profile.endpoints[LOCAL_WHISPERX_ENDPOINT], endpoint))
-    || (hasBinding && profile.bindings[WHISPERX_ALIGNMENT_CAPABILITY] !== LOCAL_WHISPERX_ENDPOINT)) {
-    throw new Error("WHISPERX_PROFILE_CONFLICT");
-  }
+  const activated = hasExactActivation(profile);
   profile.endpoints[LOCAL_WHISPERX_ENDPOINT] = endpoint;
   profile.bindings[WHISPERX_ALIGNMENT_CAPABILITY] = LOCAL_WHISPERX_ENDPOINT;
-  const bytes = hasEndpoint && hasBinding ? before.bytes : Buffer.from(`${JSON.stringify(profile, null, 2)}\n`);
+  const bytes = activated ? before.bytes : Buffer.from(`${JSON.stringify(profile, null, 2)}\n`);
   const candidatePath = `${options.profilePath}.whisperx-${randomUUID()}.json`;
   const candidate = prepareFileChange({ path: candidatePath }, bytes, options.platform, 0o600, "profile");
   let candidateSnapshot;

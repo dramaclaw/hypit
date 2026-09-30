@@ -6,7 +6,7 @@ import { prepareFileChange, snapshotFile } from "./launcher-install.js";
 import { whisperXProgramPaths } from "./paths.js";
 import type { DesktopPaths } from "./paths.js";
 import type { PreparedRemoval } from "./skill-install.js";
-import { LOCAL_WHISPERX_ENDPOINT, prepareWhisperXProfile } from "./whisperx-profile.js";
+import { LOCAL_WHISPERX_ENDPOINT, isWhisperXProfileActivated, prepareWhisperXProfile } from "./whisperx-profile.js";
 import type { PreparedWhisperXProfile } from "./whisperx-profile.js";
 
 /** The CLI has no structured boundary inside Python + ASR + Chinese preparation. */
@@ -191,6 +191,11 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     if (typeof program?.pid === "number" && Number.isSafeInteger(program.pid) && program.pid > 0) return { state: "starting", stage: "starting-service", logPath: paths.serviceLog };
     return { state: saved ? saved.stopped ? "stopped" : "prepared" : "not-installed", logPath: paths.installationLog };
   };
+  const statusError = (error: unknown): WhisperXProgramStatus => {
+    const result = errorStatus(error);
+    return result.code === "WHISPERX_PROFILE_REQUIRED" || result.code === "WHISPERX_PROFILE_INVALID" || result.code === "WHISPERX_PROFILE_CONFLICT"
+      ? { state: "mismatch", code: result.code, logPath: paths.serviceLog } : result;
+  };
   const status = async (): Promise<WhisperXProgramStatus> => {
     if (active) return { ...current };
     const revision = mutationRevision;
@@ -200,10 +205,17 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     try {
       candidate = await prepareWhisperXProfile({ profilePath: options.paths.profile, platform: options.platform });
       result = project(await execute(options, "status", candidate.candidatePath), await readState());
-    } catch (error) { result = errorStatus(error); }
+    } catch (error) { result = statusError(error); }
     finally {
       try { cleanupIncomplete = !!candidate && (await candidate.dispose(false)).length > 0; }
       catch { cleanupIncomplete = true; }
+    }
+    if (result.state === "ready") {
+      try {
+        if (!await isWhisperXProfileActivated({ profilePath: options.paths.profile })) {
+          result = { state: "prepared", code: "WHISPERX_PROFILE_REQUIRED", logPath: paths.serviceLog };
+        }
+      } catch (error) { result = statusError(error); }
     }
     // A probe started before a mutation cannot overwrite its newer progress, even after completion.
     if (revision === mutationRevision) current = result;
