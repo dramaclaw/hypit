@@ -2,7 +2,24 @@
 
 日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。本次 WhisperX 构建见下一节；其余章节为保留的历史记录。
 
-## 本次 Guided WhisperX 最终审查修复
+## 本次 Distribution 真实依赖调用者复审修复
+
+基于 `a3663d5f` 继续修复依赖复用判定：不再从全 Distribution 选择第一个声明者。选中组件的依赖图保留每个真实物理调用者，内部依赖从该调用者解析；按物理目录去重处理循环，拒绝越出 Distribution 的内部包。只有该 release 的所有真实调用者都能解析到 exact version 才复用包内依赖；缺失进入 host preparation，错误版本/格式明确失败，不使用 active external roots 冒充 bundle。
+
+隔离 `a-unused` / `z-selected` 回归先观察到 4 项失败；随后加入物理依赖图、边界及 exact-version RED。修复后核心 18/18 通过（含真实 CLI 无 npm），locator/runtime-local/desktop 聚焦 520 项：518 通过、2 条件跳过；`pnpm test` 1774 项：1749 通过、25 条件跳过；`pnpm check`、desktop build、diff check 通过。
+
+本次**重新生成**的交付物位于 `release/guided-whisperx-requirer-20260930-2154/`；上一版产物保留为历史记录，不代表本轮源码：
+
+| 文件 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 245808012 | `1b96d2d31c8270577145fd7990547666c843777c555d0ba86bac6a9ed2e1f9e5` |
+| `Hypit-Setup-0.1.0-x64.exe` | 216392301 | `058718d60c4bb38a785a2e5618caeebce3cf7d8a8b55c14509f95be2bf0c6d87` |
+
+两项相邻 checksum 为 `OK`。实际挂载 DMG 与实际双层解包 EXE 的 `inspectApp`、资源/锁/架构/媒体/许可证/ASAR 检查通过，并从交付物读取源码确认逐 requirer 修复存在。新包内真实 macOS Electron/CLI 在隔离 HOME、PATH 仅包内 bin、offline/禁止 Python 下载的环境中再次越过 `host.prepare` 到达实际 uv；同一 Electron/CLI 的受控 uv 回归也通过。扫描 4 个变更源码文件、10807 个资源文本与 16 个 ASAR 文本条目，模式命中为 0；专业 secret scanner 仍未安装。
+
+本轮只删除其自行生成的中间 staging 和重复应用/解包副本，未删除任何旧交付物或用户文件；旧根 Distribution 输出临时移动后原样恢复。未下载模型或执行付费请求。仍为未签名、未公证的内部测试包，原生 Windows 与真实 WhisperX 服务/转写验收未执行。详细证据在 `.superpowers/sdd/final-fixes-report.md` 的后续复审章节和 `requirer-fix-*.log`。
+
+## 此前 Guided WhisperX 最终审查修复
 
 基于 `5fdd3bde` 修复 5 项 Important：真实 Distribution CLI 复用包内锁定依赖，不再为已捆绑的 `cjs-module-lexer` 运行系统 npm；运行前验证 uv 锁定版本、资源清单、大小、SHA-256 和原生架构；`starting` 非 pending 时可停止后重试；首次 Profile 激活仅补入拥有的 Endpoint/Binding，保留其余原文字节；候选文件/恢复目录在重启后仍触发独立固定清理警告，且不覆盖主要错误。
 

@@ -192,22 +192,36 @@ export class NodePackageSelectionMissingError extends Error {
  * Internal @hypit dependencies are followed to their manifests. Other selected
  * packages belong to their project's package manager, including their dependencies.
  */
+type DistributionExternalRequirement = {
+  readonly name: string;
+  readonly version: string;
+  readonly specifier: string;
+  /** Canonical package roots in the selected graph that actually declare this release. */
+  readonly requirers: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+};
+
 export async function distributionExternalPackageRequirements(
   specifiers: readonly string[],
   distributionRoot: string,
-): Promise<readonly { readonly name: string; readonly version: string; readonly specifier: string; readonly env?: Readonly<Record<string, string>> }[]> {
-  const root = resolve(distributionRoot);
-  const queue = [...new Set(specifiers.filter((name) => name.startsWith("@hypit/")))].sort();
+): Promise<readonly DistributionExternalRequirement[]> {
+  const selected = [...new Set(specifiers.filter((name) => name.startsWith("@hypit/")))].sort();
+  if (selected.length === 0) return [];
+  const root = await realpath(distributionRoot);
+  const queue = selected.map(name => ({ name, from: root }));
   const visited = new Set<string>();
-  const external = new Map<string, { readonly name: string; readonly version: string; readonly specifier: string; readonly env?: Readonly<Record<string, string>> }>();
-  while (queue.length > 0) {
-    const name = queue.shift()!;
-    if (visited.has(name)) continue;
-    visited.add(name);
-    const physical = await resolvePackage(name, [root]);
+  const external = new Map<string, DistributionExternalRequirement>();
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const { name, from } = queue[cursor]!;
+    const located = locateNodePackage(name, { from: join(from, "__hypit_package_dependencies__.mjs"),
+      distributionRoots: [root], externalRoots: [], allowExternal: false });
+    assert(within(root, located.root), `${name} resolves outside the active Distribution`);
+    if (visited.has(located.root)) continue;
+    visited.add(located.root);
+    const physical = { root: located.root, json: await packageJson(located.root) };
     for (const [dependency, version] of Object.entries(physical.json.dependencies)) {
       if (dependency.startsWith("@hypit/")) {
-        queue.push(dependency);
+        queue.push({ name: dependency, from: physical.root });
         continue;
       }
       const specifier = `${dependency}@${version}`;
@@ -218,7 +232,7 @@ export async function distributionExternalPackageRequirements(
         assert(env[key] === undefined || env[key] === value, `Conflicting installation environment ${key} for ${specifier}`);
         env[key] = value;
       }
-      external.set(specifier, { name: dependency, version, specifier,
+      external.set(specifier, { name: dependency, version, specifier, requirers: [...previous?.requirers ?? [], physical.root].sort(),
         ...(Object.keys(env).length === 0 ? {} : { env }) });
     }
   }

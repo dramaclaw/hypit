@@ -5,7 +5,6 @@ import { dirname, relative, resolve, sep } from "node:path";
 import {
   collectLoadedNodePackageComponents,
   distributionExternalPackageRequirements,
-  distributionPackageDeclaring,
   locateNodePackage,
   NodePackageNotFoundError,
   loadNodePackageSelection,
@@ -51,6 +50,7 @@ import type {
 import {
   hypitHostPackageRoot,
   hypitHostStateRoot,
+  parseRegistryPackageSpec,
   prepareHostPackages,
 } from "@hypit/runtime-host-node";
 import type {
@@ -467,19 +467,22 @@ export async function prepareRuntimeConfigPackages(
   ], options.distributionPackageRoot);
   const bundled: HostPackageReport[] = [];
   const missing = requirements.filter(item => {
-    const declaring = distributionPackageDeclaring(options.distributionPackageRoot!, item.name, item.version);
-    if (declaring === undefined) return true;
-    try {
-      const located = locateNodePackage(item.name, { from: resolve(declaring, "package.json"),
-        distributionRoots: [options.distributionPackageRoot!], externalRoots: [], allowExternal: false });
-      if (located.manifest.version !== item.version) throw new Error(`Resolved ${item.name} does not match required ${item.version}`);
-      bundled.push({ name: item.name, version: item.version, specifier: item.specifier, root: located.root, action: "already-installed" });
-      options.onProgress?.({ name: item.name, version: item.version, specifier: item.specifier, phase: "ready" });
-      return false;
-    } catch (error) {
-      if (error instanceof NodePackageNotFoundError) return true;
-      throw error;
+    const selected = parseRegistryPackageSpec(item.specifier);
+    const roots: string[] = [];
+    for (const requirer of item.requirers) {
+      try {
+        const located = locateNodePackage(item.name, { from: resolve(requirer, "package.json"),
+          distributionRoots: [options.distributionPackageRoot!], externalRoots: [], allowExternal: false });
+        if (located.manifest.version !== item.version) throw new Error(`Resolved ${item.name} from ${requirer} does not match required ${item.version}`);
+        roots.push(located.root);
+      } catch (error) {
+        if (!(error instanceof NodePackageNotFoundError)) throw error;
+      }
     }
+    if (roots.length === 0 || roots.length !== item.requirers.length) return true;
+    bundled.push({ ...selected, root: roots[0]!, action: "already-installed" });
+    options.onProgress?.({ ...selected, phase: "ready" });
+    return false;
   });
   return [...bundled, ...await prepareHostPackages(missing, {
     root: hypitHostPackageRoot(options.hostStateRoot),
