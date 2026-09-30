@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AgentSkillTarget, AgentSkillTargetId } from "./agent-targets.js";
 import type { DesktopPaths } from "./paths.js";
@@ -26,8 +26,8 @@ export type LegacySkillInstallOptions = Omit<SkillInstallOptions, "target"> & { 
 
 /** @deprecated Existing lifecycle callers still address the old Codex directory. */
 function legacyTarget(paths: DesktopPaths): AgentSkillTarget {
-  return { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.skill,
-    backupDirectory: paths.skillBackup, required: true, detectedAgents: [] };
+  return { id: "portable", label: "通用 Agent Skill", skillDirectory: paths.legacyCodexSkill,
+    backupDirectory: paths.legacyCodexSkillBackup, required: true, detectedAgents: [] };
 }
 
 function asTarget(value: AgentSkillTarget | DesktopPaths): AgentSkillTarget {
@@ -50,6 +50,8 @@ async function markerAt(target: AgentSkillTarget): Promise<ManagedSkillMarker | 
   if (marker?.format !== "hypit.desktop-managed@2" || marker.target !== target.id
     || typeof marker.installedVersion !== "string" || !/^[a-f0-9]{64}$/u.test(marker.sourceDigest)
     || (marker.backupDirectory !== undefined && marker.backupDirectory !== target.backupDirectory)) return undefined;
+  try { if (await treeDigest(path, true) !== marker.sourceDigest) return undefined; }
+  catch { return undefined; }
   return marker;
 }
 
@@ -70,6 +72,32 @@ async function treeDigest(root: string, installed = false): Promise<string> {
   }
   await visit("");
   return hash.digest("hex");
+}
+
+type TreeSnapshot = { readonly dev: number; readonly ino: number; readonly digest: string };
+
+/** Include every entry, including a marker or symlink, when guarding a live tree. */
+async function snapshotTree(root: string): Promise<TreeSnapshot | undefined> {
+  let top: Awaited<ReturnType<typeof lstat>>;
+  try { top = await lstat(root); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const hash = createHash("sha256");
+  async function visit(path: string, relative: string): Promise<void> {
+    const info = await lstat(path);
+    if (info.isFile()) hash.update(JSON.stringify([relative, "file", createHash("sha256").update(await readFile(path)).digest("hex")]));
+    else if (info.isSymbolicLink()) hash.update(JSON.stringify([relative, "symlink", await readlink(path)]));
+    else if (info.isDirectory()) {
+      hash.update(JSON.stringify([relative, "directory"]));
+      for (const name of (await readdir(path)).sort()) await visit(join(path, name), relative ? `${relative}/${name}` : name);
+    } else throw new Error("Unsupported Skill entry");
+  }
+  await visit(root, "");
+  return { dev: top.dev, ino: top.ino, digest: hash.digest("hex") };
+}
+
+function sameSnapshot(left: TreeSnapshot | undefined, right: TreeSnapshot | undefined): boolean {
+  return left === undefined ? right === undefined : right !== undefined
+    && left.dev === right.dev && left.ino === right.ino && left.digest === right.digest;
 }
 
 /** Check ownership and installed content without exposing marker data to the renderer. */
@@ -119,6 +147,7 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
     await (options.copyDirectory ?? ((source, destination) => cp(source, destination, { recursive: true, errorOnExist: true, force: false })))(options.sourceDirectory, stage);
     if (await treeDigest(stage) !== sourceDigest) throw new Error("Incomplete Skill copy");
     if (options.preserveExisting && !(await canRefreshManagedSkill(target))) throw new Error("User Skill must be preserved");
+    const liveSnapshot = await snapshotTree(target.skillDirectory);
     const old = await markerAt(target);
     let backupDirectory = old?.backupDirectory;
     if (await exists(target.skillDirectory) && !old) {
@@ -127,6 +156,11 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
       await cp(target.skillDirectory, backupStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
       backupDirectory = target.backupDirectory;
     }
+    if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed during preparation");
+    if (await exists(backupStage)) {
+      const backupSnapshot = await snapshotTree(backupStage);
+      if (backupSnapshot?.digest !== liveSnapshot?.digest) throw new Error("Incomplete Skill backup");
+    }
     const marker: ManagedSkillMarker = { format: "hypit.desktop-managed@2", target: target.id, installedVersion: options.installedVersion,
       sourceDigest, ...(backupDirectory === undefined ? {} : { backupDirectory }) };
     await writeFile(join(stage, SKILL_MARKER), `${JSON.stringify(marker, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -134,12 +168,19 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
     return {
       marker,
       async commit() {
+        if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before commit");
         if (await exists(backupStage)) {
           if (await exists(target.backupDirectory)) throw new Error("Backup already exists");
           await rename(backupStage, target.backupDirectory);
           backupCreated = true;
         }
-        if (await exists(target.skillDirectory)) { await rename(target.skillDirectory, previous); moved = true; }
+        if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before commit");
+        if (liveSnapshot) {
+          await rename(target.skillDirectory, previous);
+          moved = true;
+          if (!sameSnapshot(liveSnapshot, await snapshotTree(previous))) throw new Error("Skill changed during commit");
+        }
+        if (await exists(target.skillDirectory)) throw new Error("Skill appeared during commit");
         await rename(stage, target.skillDirectory);
         committed = true;
       },
@@ -203,16 +244,20 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
   let moved = false;
   let restored = false;
   try {
+    const liveSnapshot = await snapshotTree(target.skillDirectory);
     const marker = await markerAt(target);
     if (!marker) return undefined;
     if (marker.backupDirectory !== undefined) {
       if (!(await exists(target.backupDirectory))) throw new Error("Invalid backup");
       await cp(target.backupDirectory, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
     }
+    if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed during removal preparation");
     return {
       async commit() {
+        if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before removal commit");
         await rename(target.skillDirectory, previous);
         moved = true;
+        if (!sameSnapshot(liveSnapshot, await snapshotTree(previous))) throw new Error("Skill changed during removal commit");
         if (marker.backupDirectory !== undefined) { await rename(restoreStage, target.skillDirectory); restored = true; }
       },
       async rollback() {

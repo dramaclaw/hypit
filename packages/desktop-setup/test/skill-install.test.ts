@@ -6,7 +6,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { desktopPaths } from "../src/paths.js";
 import type { AgentSkillTarget } from "../src/agent-targets.js";
-import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, prepareSkillInstall, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
+import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, prepareSkillInstall, prepareSkillRemoval, removeManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "hypit 技能 space-"));
@@ -178,4 +178,75 @@ test("a backup created after preparation is never replaced at commit", async (t)
   await prepared.dispose(false);
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user copy");
   assert.deepEqual(await readdir(f.portable.backupDirectory), []);
+});
+
+test("a modified v2 Skill is backed up in full before installation", async (t) => {
+  const f = await fixture(t);
+  await installManagedSkill(f);
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user edited Skill");
+  await installManagedSkill(f);
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user edited Skill");
+  await removeManagedSkill({ target: f.portable });
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edited Skill");
+});
+
+test("a modified v2 Skill is unmanaged for removal", async (t) => {
+  const f = await fixture(t);
+  await installManagedSkill(f);
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user edited Skill");
+  assert.equal(await removeManagedSkill({ target: f.portable }), false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edited Skill");
+});
+
+test("removal commit refuses a Skill modified after preparation", async (t) => {
+  const f = await fixture(t);
+  await installManagedSkill(f);
+  const prepared = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(prepared);
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user edited later");
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edited later");
+});
+
+test("commit refuses content created after an empty-target preparation", async (t) => {
+  const f = await fixture(t);
+  const prepared = await prepareSkillInstall(f);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "arrived later");
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "arrived later");
+  await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+});
+
+test("commit refuses changed content after backup staging", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "before prepare");
+  const prepared = await prepareSkillInstall(f);
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "after prepare");
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "after prepare");
+  await assert.rejects(readFile(join(f.portable.backupDirectory, "SKILL.md")), { code: "ENOENT" });
+});
+
+test("the legacy bridge uses exact Codex fields instead of mutable aliases", async (t) => {
+  const f = await fixture(t);
+  const paths = { ...f.paths, skill: join(dirname(f.paths.skill), "wrong"),
+    skillBackup: join(dirname(f.paths.skillBackup), "wrong") };
+  await mkdir(paths.legacyCodexSkill, { recursive: true });
+  await writeFile(join(paths.legacyCodexSkill, "SKILL.md"), "user copy");
+  await installManagedSkill({ paths, sourceDirectory: f.sourceDirectory, installedVersion: "1" });
+  assert.equal(await isManagedSkillInstalled(paths), true);
+  assert.equal(await readFile(join(paths.legacyCodexSkill, "SKILL.md"), "utf8"), "# Hypit\n");
+  assert.equal(await readFile(join(paths.legacyCodexSkillBackup, "SKILL.md"), "utf8"), "user copy");
+  await assert.rejects(readFile(join(paths.skill, "SKILL.md")), { code: "ENOENT" });
+  await assert.rejects(readFile(join(paths.skillBackup, "SKILL.md")), { code: "ENOENT" });
+  assert.equal(await removeManagedSkill({ paths }), true);
+  assert.equal(await readFile(join(paths.legacyCodexSkill, "SKILL.md"), "utf8"), "user copy");
 });
