@@ -10,7 +10,7 @@ import type { DiagnosticItem, SetupInput } from "./contracts.js";
 import { desktopCredentialRefs } from "./clear-configuration.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { UserPath } from "./launcher-install.js";
-import { exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
+import { exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings } from "./skill-install.js";
 import { scanAgentTargets, supportedSkillTargets } from "./agent-targets.js";
 
 export function diagnosticEnvironment(bin: string, platform: "darwin" | "win32", source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -70,10 +70,11 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
   await check("ffmpeg", "FFmpeg", async () => { requireBundle(); await run(path.join(bin, `ffmpeg${suffix}`), ["-version"], processOptions); await run(path.join(bin, `ffprobe${suffix}`), ["-version"], processOptions); });
   const { targets: activeTargets } = await scanAgentTargets({ paths });
   const retained = await Promise.all(supportedSkillTargets(paths).filter(target => !activeTargets.some(active => active.id === target.id))
-    .map(async target => ({ target, managed: await isManagedSkillInstalled(target) })));
+    .map(async target => ({ target, managed: await isManagedSkillOwned(target) })));
   for (const target of [...activeTargets, ...retained.filter(item => item.managed).map(item => item.target)]) {
     results.push({ code: "skill", target: target.id, label: target.label,
       status: await isManagedSkillInstalled(target) ? "pass" : "fail", path: target.skillDirectory });
+    results.push(...await skillBackupWarnings(target));
   }
   if (await exists(paths.legacyCodexSkill) && !(await isManagedLegacyCodexSkillInstalled(paths))) {
     results.push({ code: "skill", target: "portable", label: "通用 Agent Skill", status: "warning", path: paths.legacyCodexSkill });

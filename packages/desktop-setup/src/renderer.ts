@@ -134,6 +134,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     for (const item of state.result?.diagnostics ?? []) {
       const line = node("li"); line.append(node("span", item.label), node("span", { pass: "通过", warning: "待检查", fail: "失败" }[item.status], item.status));
       if (item.path) line.append(node("code", item.path));
+      if (item.reason === "SKILL_BACKUP_UNAVAILABLE") line.append(node("p", "备份缺失或无法读取；请恢复此路径的原 Skill 备份后重试。"));
       if (item.code === "oss" && item.status === "warning" && item.cleanupObjectKey) line.append(node("p", "OSS 已验证；测试对象未自动删除"), node("p", "请在 OSS 中手动删除测试对象："), node("code", item.cleanupObjectKey));
       diagnostics.append(line);
     }

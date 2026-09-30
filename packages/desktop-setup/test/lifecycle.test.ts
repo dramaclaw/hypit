@@ -430,7 +430,7 @@ test("uninstall preflights the Skill backup before changing PATH or launcher fil
   const before = await Promise.all(files.map((path) => readFile(path)));
   const oldPath = value;
   const oldWrites = writes;
-  await assert.rejects(removeDesktopIntegration(options), /INTEGRATION_REMOVE_FAILED\]$/);
+  await assert.rejects(removeDesktopIntegration(options), /SKILL_BACKUP_UNAVAILABLE\]$/);
   assert.deepEqual(await Promise.all(files.map((path) => readFile(path))), before);
   assert.equal(value, oldPath);
   assert.equal(writes, oldWrites);

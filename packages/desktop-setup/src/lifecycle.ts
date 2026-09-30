@@ -2,7 +2,7 @@ import { prepareLauncherInstall, prepareLauncherRemoval } from "./launcher-insta
 import type { LauncherOptions } from "./launcher-install.js";
 import { supportedSkillTargets } from "./agent-targets.js";
 import type { AgentSkillTarget } from "./agent-targets.js";
-import { prepareLegacyCodexMigration, prepareSkillInstall, prepareSkillRemoval } from "./skill-install.js";
+import { isBackupUnavailable, prepareLegacyCodexMigration, prepareSkillInstall, prepareSkillRemoval } from "./skill-install.js";
 import type { PreparedRemoval, SkillInstallOptions } from "./skill-install.js";
 
 export type DesktopIntegrationOptions = LauncherOptions & Omit<SkillInstallOptions, "target"> & {
@@ -51,7 +51,7 @@ export async function installDesktopIntegration(options: DesktopIntegrationOptio
   } catch (error) {
     let failed = await rollbackAll(operations) || rollbackFailed(error);
     if (launcher) failed = await rollbackAll([launcher]) || failed;
-    failure = `INTEGRATION_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
+    failure = !failed && isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : `INTEGRATION_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
   if (await disposeAll(operations, committed)) failure = committed ? "INTEGRATION_INSTALL_FAILED_CLEANUP_FAILED" : "INTEGRATION_INSTALL_FAILED_ROLLBACK_FAILED";
   if (failure) throw new Error(`桌面集成安装失败 [${failure}]`);
@@ -75,9 +75,9 @@ export async function removeDesktopIntegration(options: Pick<LauncherOptions, "p
     await launcher?.commit();
     for (const skill of skills) await skill.commit();
     committed = true;
-  } catch {
+  } catch (error) {
     const failed = await rollbackAll([...(launcher ? [launcher] : []), ...skills]);
-    failure = `INTEGRATION_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
+    failure = !failed && isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : `INTEGRATION_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}`;
   }
   if (await disposeAll([...(launcher ? [launcher] : []), ...skills], committed)) failure = committed ? "INTEGRATION_REMOVE_FAILED_CLEANUP_FAILED" : "INTEGRATION_REMOVE_FAILED_ROLLBACK_FAILED";
   if (failure) throw new Error(`桌面集成卸载失败 [${failure}]`);

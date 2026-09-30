@@ -8,6 +8,16 @@ import type { SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
+
+test("backup-health warning explains restoration at the allowlisted diagnostic path", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const warned: SetupResult = { ...result, configured: false, diagnostics: [{ code: "skill", label: "通用 Agent Skill", target: "portable",
+    status: "warning", reason: "SKILL_BACKUP_UNAVAILABLE", path: "/original-backup" }] };
+  renderWizard(root, wizardReducer(initialWizardState(), { type: "success", result: warned }), () => {});
+  assert.match(root.textContent!, /请恢复此路径的原 Skill 备份后重试/);
+  assert.match(root.textContent!, /original-backup/);
+});
 const filled = () => Object.entries(fields).reduce((state, [field, value]) => wizardReducer(state, { type: "field", field: field as keyof typeof fields, value }), wizardReducer(initialWizardState(), { type: "begin" }));
 
 test("Agent-neutral copy and detected target summaries render as text", () => {

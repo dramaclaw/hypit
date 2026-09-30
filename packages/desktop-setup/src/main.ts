@@ -10,7 +10,7 @@ import type { SetupFailure, SetupReply } from "./ipc.js";
 import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
 import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
-import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled } from "./skill-install.js";
+import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings } from "./skill-install.js";
 import { atomicFile, isManagedLauncherInstalled, restoreFiles } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
@@ -79,6 +79,7 @@ const errorMessages: Readonly<Record<string, string>> = {
   SETUP_VALIDATION_FAILED: "配置校验失败", SETUP_NEWAPI_FAILED: "NewAPI 连接测试失败", SETUP_OSS_FAILED: "OSS 连接测试失败",
   SETUP_CREDENTIAL_SNAPSHOT_FAILED: "读取平台凭据失败", SETUP_CREDENTIAL_WRITE_FAILED: "保存平台凭据失败", SETUP_PROFILE_WRITE_FAILED: "写入 Runtime Profile 失败",
   INTEGRATION_INSTALL_FAILED: "桌面集成安装失败", SETUP_UNAVAILABLE: "此操作尚未可用", SETUP_REQUEST_FAILED: "操作失败，请检查配置后重试",
+  SKILL_BACKUP_UNAVAILABLE: "原 Skill 备份缺失或无法读取；请按诊断路径恢复原备份后重试",
   INTEGRATION_REMOVE_FAILED: "本机集成卸载失败，已保留用户数据；请检查命令入口与 Skill 路径", CLEAR_FAILED: "清除配置失败", CONFIRMATION_REQUIRED: "确认已取消或过期，请重新操作",
 };
 export function serializeFailure(error: unknown): SetupFailure {
@@ -136,12 +137,14 @@ function publicDiagnostic(value: unknown): DiagnosticItem {
   const target: unknown = Reflect.get(value, "target");
   const path: unknown = Reflect.get(value, "path");
   const cleanupObjectKey: unknown = Reflect.get(value, "cleanupObjectKey");
+  const reason: unknown = Reflect.get(value, "reason");
   if (typeof code !== "string" || !isDiagnosticStatus(status)
     || typeof label !== "string" || (path !== undefined && typeof path !== "string")
     || (cleanupObjectKey !== undefined && typeof cleanupObjectKey !== "string")) throw new Error("Invalid diagnostic result");
   if (code === "skill") {
     if (!isSkillTargetId(target) || label !== skillLabels[target]) throw new Error("Invalid diagnostic result");
     return { code: "skill", status, label: skillLabels[target], target,
+      ...(reason === "SKILL_BACKUP_UNAVAILABLE" && status === "warning" ? { reason } : {}),
       ...(path === undefined ? {} : { path }) };
   }
   if (!isNonSkillCode(code) || label !== diagnosticLabels[code] || target !== undefined) throw new Error("Invalid diagnostic result");
@@ -235,7 +238,7 @@ export function createSetupController(services: SetupServices) {
 
 export async function rescanIntegrationTargets(paths: ReturnType<typeof desktopPaths>,
   scan: (options: { readonly paths: ReturnType<typeof desktopPaths> }) => Promise<AgentScanResult> = scanAgentTargets,
-  managed: (target: AgentSkillTarget) => Promise<boolean> = isManagedSkillInstalled): Promise<readonly AgentSkillTarget[]> {
+  managed: (target: AgentSkillTarget) => Promise<boolean> = isManagedSkillOwned): Promise<readonly AgentSkillTarget[]> {
   const discovered = await scan({ paths });
   const retained = await Promise.all(supportedSkillTargets(paths)
     .filter(target => !discovered.targets.some(active => active.id === target.id))
@@ -247,7 +250,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
   const { paths } = options;
   const activeTargets = scan?.targets ?? options.targets ?? (await scanAgentTargets({ paths })).targets;
   const retained = await Promise.all(supportedSkillTargets(paths).filter(target => !activeTargets.some(active => active.id === target.id))
-    .map(async target => ({ target, managed: await isManagedSkillInstalled(target) })));
+    .map(async target => ({ target, managed: await isManagedSkillOwned(target) })));
   const targets = [...activeTargets, ...retained.filter(item => item.managed).map(item => item.target)];
   const profileValid = async () => {
     try {
@@ -282,6 +285,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
     profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) ? [
       { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
       ...targetStates.map(({ target, installed }) => ({ code: "skill" as const, target: target.id, label: target.label, status: installed ? "pass" as const : "fail" as const, path: target.skillDirectory })),
+      ...(await Promise.all(targets.map(skillBackupWarnings))).flat(),
       ...(legacyExists && !legacyManaged ? [{ code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const, status: "warning" as const, path: paths.legacyCodexSkill }] : []),
       { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
       ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),

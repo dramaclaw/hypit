@@ -9,12 +9,13 @@ import { completeNewApiSetup } from "@dramaclaw/provider-newapi";
 import { createDesktopProfile } from "../src/profile.js";
 import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets, supportedSkillTargets } from "../src/agent-targets.js";
-import { installDesktopIntegration } from "../src/lifecycle.js";
+import { installDesktopIntegration, removeDesktopIntegration } from "../src/lifecycle.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
-import { createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus } from "../src/main.js";
+import { createSetupController, readDesktopStatus, reconcileStartupStatus, refreshDesktopStatus, rescanIntegrationTargets, serializeFailure } from "../src/main.js";
+import { runDiagnostics } from "../src/diagnostics.js";
 import { renderLauncher } from "../src/launcher-install.js";
 import { mountWizard } from "../src/renderer.js";
-import { SKILL_MARKER } from "../src/skill-install.js";
+import { isManagedSkillInstalled, SKILL_MARKER } from "../src/skill-install.js";
 import type { SetupInput } from "../src/contracts.js";
 
 const input: SetupInput = { baseUrl: "https://newapi.example/v1", apiKey: "SECRET_API", relay: {
@@ -35,6 +36,68 @@ async function fixture(t: TestContext) {
   await writeFile(cliEntry, "fake");
   await mkdir(dirname(paths.profile), { recursive: true });
   return { paths, targets: (await scanAgentTargets({ paths })).targets, home, platform: "darwin" as const, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
+}
+
+async function missingBackupFixture(t: TestContext) {
+  const f = await fixture(t);
+  await mkdir(f.paths.portableSkill, { recursive: true });
+  await writeFile(join(f.paths.portableSkill, "SKILL.md"), "original private user Skill");
+  await writeFile(f.paths.profile, JSON.stringify(profile()));
+  await installDesktopIntegration(f);
+  await rm(f.paths.portableSkillBackup, { recursive: true });
+  return f;
+}
+
+test("same-version status and diagnostics reject missing recorded backup with an actionable warning", async (t) => {
+  const f = await missingBackupFixture(t);
+  assert.equal(await isManagedSkillInstalled(f.targets[0]!), false);
+  const status = await readDesktopStatus(f);
+  assert.equal(status.configured, false);
+  const warning = { code: "skill", label: "通用 Agent Skill", target: "portable", status: "warning",
+    path: f.paths.portableSkillBackup, reason: "SKILL_BACKUP_UNAVAILABLE" };
+  assert.deepEqual(status.diagnostics.find(item => item.reason === "SKILL_BACKUP_UNAVAILABLE"), warning);
+  const diagnostics = await runDiagnostics({ ...f, resources: f.sourceDirectory, arch: "arm64",
+    credentialStore: { owns: () => false, resolve: async () => undefined }, execute: async () => {} });
+  assert.deepEqual(diagnostics.find(item => item.reason === "SKILL_BACKUP_UNAVAILABLE"), warning);
+  assert.equal(diagnostics.find(item => item.code === "skill")?.status, "fail");
+  const controller = createSetupController({ getStatus: () => readDesktopStatus(f), commit: async () => status,
+    install: async () => {}, diagnose: async () => diagnostics, clear: async () => status, openConfig: async () => {} });
+  const result = await controller.rerunDiagnostics();
+  assert.equal(result.ok, true);
+  if (result.ok) assert.ok(result.value.diagnostics.some(item => item.reason === "SKILL_BACKUP_UNAVAILABLE"));
+});
+
+test("missing backup retains an owned Claude target after Agent discovery stops finding it", async (t) => {
+  const f = await fixture(t);
+  const targets = supportedSkillTargets(f.paths);
+  await mkdir(f.paths.claudeSkill, { recursive: true });
+  await writeFile(join(f.paths.claudeSkill, "SKILL.md"), "user Claude");
+  await writeFile(f.paths.profile, JSON.stringify(profile()));
+  await installDesktopIntegration({ ...f, targets });
+  await rm(f.paths.claudeSkillBackup, { recursive: true });
+  const scan = { targets: [targets[0]!], detectedAgents: [] };
+  const status = await readDesktopStatus(f, scan);
+  assert.equal(status.configured, false);
+  assert.deepEqual(status.skillTargets.map(target => target.id), ["portable", "claude"]);
+  assert.deepEqual((await rescanIntegrationTargets(f.paths, async () => scan)).map(target => target.id), ["portable", "claude"]);
+  assert.equal(status.diagnostics.find(item => item.reason === "SKILL_BACKUP_UNAVAILABLE")?.path, f.paths.claudeSkillBackup);
+});
+
+for (const version of ["1", "2"]) {
+  test(`missing backup blocks explicit refresh and upgrade without losing ownership (version ${version})`, async (t) => {
+    const f = await missingBackupFixture(t);
+    const files = [f.paths.launcher, f.paths.managedState, f.paths.profile, join(f.paths.portableSkill, SKILL_MARKER)];
+    const before = await Promise.all(files.map(path => readFile(path)));
+    const options = { ...f, installedVersion: version };
+    await assert.rejects(installDesktopIntegration(options), /\[SKILL_BACKUP_UNAVAILABLE\]$/u);
+    assert.equal((await refreshDesktopStatus(options)).configured, false);
+    await assert.rejects(removeDesktopIntegration(f), /\[SKILL_BACKUP_UNAVAILABLE\]$/u);
+    assert.deepEqual(await Promise.all(files.map(path => readFile(path))), before);
+    const error = serializeFailure(new Error("private detail [SKILL_BACKUP_UNAVAILABLE]"));
+    assert.equal(error.code, "SKILL_BACKUP_UNAVAILABLE");
+    assert.match(error.message, /恢复.*备份/);
+    assert.doesNotMatch(JSON.stringify(error), /private/);
+  });
 }
 
 test("status rejects missing, malformed, empty, and partial NewAPI profiles even with installed integration", async (t) => {

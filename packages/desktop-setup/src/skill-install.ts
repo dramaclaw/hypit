@@ -3,6 +3,7 @@ import { cp, link, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlin
 import { dirname, join } from "node:path";
 import type { AgentSkillTarget, AgentSkillTargetId } from "./agent-targets.js";
 import type { DesktopPaths } from "./paths.js";
+import type { DiagnosticItem } from "./contracts.js";
 
 export const SKILL_MARKER = ".hypit-desktop-managed.json";
 export type ManagedSkillMarker = {
@@ -145,11 +146,33 @@ function publishedMatches(prepared: TreeSnapshot | undefined, published: TreeSna
     && (sameIdentity ? sameSnapshot(prepared, published) : prepared.digest === published.digest);
 }
 
+export const isBackupUnavailable = (error: unknown): boolean => error instanceof Error && /\[SKILL_BACKUP_UNAVAILABLE\]$/u.test(error.message);
+const backupUnavailable = () => new Error("原 Skill 备份缺失或无法读取；请恢复备份后重试 [SKILL_BACKUP_UNAVAILABLE]");
+
+async function requiredBackup(path: string): Promise<TreeSnapshot> {
+  try { const snapshot = await snapshotTree(path); if (snapshot) return snapshot; } catch { /* Fixed public failure below. */ }
+  throw backupUnavailable();
+}
+
+/** Ownership remains valid when the separate restoration backup is unavailable. */
+export async function isManagedSkillOwned(target: AgentSkillTarget): Promise<boolean> {
+  try { return !!await markerAt(target); } catch { return false; }
+}
+
+export async function skillBackupWarnings(target: AgentSkillTarget): Promise<readonly DiagnosticItem[]> {
+  const marker = await markerAt(target);
+  if (!marker?.backupDirectory) return [];
+  try { await requiredBackup(target.backupDirectory); return []; }
+  catch { return [{ code: "skill", label: target.label, target: target.id, status: "warning",
+    path: target.backupDirectory, reason: "SKILL_BACKUP_UNAVAILABLE" }]; }
+}
+
 /** Check ownership and installed content without exposing marker data to the renderer. */
 export async function isManagedSkillInstalled(target: AgentSkillTarget, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean> {
   try {
     const marker = await markerAt(target);
     return !!marker?.installedVersion.trim()
+      && (!marker.backupDirectory || !!await requiredBackup(target.backupDirectory))
       && await treeDigest(target.skillDirectory, true) === marker.sourceDigest
       && (!current || (marker.installedVersion === current.installedVersion
         && marker.sourceDigest === await treeDigest(current.sourceDirectory)));
@@ -193,6 +216,7 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
     if (options.preserveExisting && !(await canRefreshManagedSkill(target))) throw new Error("User Skill must be preserved");
     const liveSnapshot = await snapshotTree(target.skillDirectory);
     const old = await markerAt(target);
+    const recordedBackup = old?.backupDirectory ? await requiredBackup(target.backupDirectory) : undefined;
     let backupDirectory = old?.backupDirectory;
     if (await exists(target.skillDirectory) && !old) {
       if (await exists(target.backupDirectory)) throw new Error("Backup already exists");
@@ -213,6 +237,7 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
     return {
       marker,
       async commit() {
+        if (recordedBackup && !sameSnapshot(recordedBackup, await requiredBackup(target.backupDirectory))) throw backupUnavailable();
         if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before commit");
         if (backupStageRequired) {
           if (!(await matchesSnapshot(backupStageSnapshot, backupStage))) throw new Error("Backup stage changed before commit");
@@ -291,12 +316,12 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
         ], "Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
       },
     };
-  } catch {
+  } catch (error) {
     const retained = await cleanupFailedPreparation([
       { path: stage, snapshot: stageSnapshot },
       { path: backupStage, snapshot: backupStageSnapshot },
     ]);
-    throw preparationFailure("Skill 安装失败", "SKILL_INSTALL_FAILED", retained);
+    throw preparationFailure("Skill 安装失败", isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : "SKILL_INSTALL_FAILED", retained);
   }
 }
 
@@ -308,8 +333,9 @@ export async function installManagedSkill(options: SkillInstallOptions): Promise
     await prepared.commit();
     committed = true;
     return prepared.marker;
-  } catch {
+  } catch (error) {
     const failed = await prepared.rollback();
+    if (!failed && isBackupUnavailable(error)) throw backupUnavailable();
     throw new Error(`Skill 安装失败 [SKILL_INSTALL_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
   } finally { await prepared.dispose(committed); }
 }
@@ -382,8 +408,7 @@ async function prepareOwnedRemoval(target: LegacyCodexPaths,
     if (!marker) return undefined;
     let backupSnapshot: TreeSnapshot | undefined;
     if (marker.backupDirectory !== undefined) {
-      backupSnapshot = await snapshotTree(target.backupDirectory);
-      if (!backupSnapshot) throw new Error("Invalid backup");
+      backupSnapshot = await requiredBackup(target.backupDirectory);
       await cp(target.backupDirectory, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
       restoreStageSnapshot = await snapshotTree(restoreStage);
       if (restoreStageSnapshot?.digest !== backupSnapshot.digest
@@ -455,9 +480,9 @@ async function prepareOwnedRemoval(target: LegacyCodexPaths,
         ], "Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
       },
     };
-  } catch {
+  } catch (error) {
     const retained = await cleanupFailedPreparation([{ path: restoreStage, snapshot: restoreStageSnapshot }]);
-    throw preparationFailure("Skill 卸载失败", "SKILL_REMOVE_FAILED", retained);
+    throw preparationFailure("Skill 卸载失败", isBackupUnavailable(error) ? "SKILL_BACKUP_UNAVAILABLE" : "SKILL_REMOVE_FAILED", retained);
   }
 }
 
@@ -470,8 +495,9 @@ export async function removeManagedSkill(options: { readonly target: AgentSkillT
     await removal.commit();
     committed = true;
     return true;
-  } catch {
+  } catch (error) {
     const failed = await removal?.rollback();
+    if (!failed && isBackupUnavailable(error)) throw backupUnavailable();
     throw new Error(`Skill 卸载失败 [SKILL_REMOVE_FAILED${failed ? "_ROLLBACK_FAILED" : ""}]`);
   } finally { await removal?.dispose(committed); }
 }
