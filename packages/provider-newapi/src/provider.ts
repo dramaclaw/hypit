@@ -208,6 +208,44 @@ class NewApiClient {
       deadline.finish();
     }
   }
+
+  async audio(path: string, credentials: Credentials, init: RequestInit): Promise<{
+    readonly bytes: Uint8Array;
+    readonly mediaType: string;
+  }> {
+    const deadline = requestDeadline(this.timeout,
+      () => new EndpointTransportError("DramaClaw NewAPI speech request timed out"));
+    try {
+      const response = await transport(deadline.wait(this.fetcher(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: deadline.signal,
+        headers: {
+          authorization: `Bearer ${credential(credentials, "apiKey")}`,
+          "content-type": "application/json",
+          ...(init.headers ?? {}),
+        },
+      })));
+      if (!response.ok) {
+        const text = await transport(deadline.wait(response.text()));
+        let body: unknown = text;
+        try { body = text.length === 0 ? {} : JSON.parse(text); }
+        catch { /* Retain the public text when the service does not return JSON. */ }
+        throw new EndpointHttpError(
+          "DRAMACLAW_NEWAPI_HTTP_ERROR",
+          `DramaClaw NewAPI ${init.method ?? "GET"} ${path} failed: ${publicError(body) ?? `HTTP ${response.status}`}`,
+          response.status,
+          retryAfterMs(response.headers),
+        );
+      }
+      const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+      assert(mediaType.startsWith("audio/"), "DramaClaw NewAPI speech response is not audio");
+      const bytes = new Uint8Array(await transport(deadline.wait(response.arrayBuffer())));
+      assert(bytes.byteLength > 0, "DramaClaw NewAPI speech response contains empty audio");
+      return { bytes, mediaType };
+    } finally {
+      deadline.finish();
+    }
+  }
 }
 
 function resolverFor(context: EndpointInvocationContext, publish: AssetPublisher | undefined, personReference: { value: boolean }): GenerationArtifactUrlResolver {
@@ -276,6 +314,21 @@ function videoBody(request: NewApiPreparedRequest, input: Record<string, unknown
       ...(input.reference_audios === undefined ? {} : { reference_audios: input.reference_audios }),
       ...(input.last_frame === undefined ? {} : { last_frame_image: input.last_frame }),
       ...(input.web_search === undefined ? {} : { web_search: input.web_search }),
+    },
+  };
+}
+
+function speechBody(request: NewApiPreparedRequest, input: Record<string, unknown>) {
+  const instruction = typeof input.emotion_prompt === "string" ? input.emotion_prompt : undefined;
+  return {
+    model: request.model,
+    input: input.input,
+    metadata: {
+      audio_url: input.audio_url,
+      ...(instruction === undefined ? {} : {
+        emotion_prompt: instruction,
+        should_use_prompt_for_emotion: true,
+      }),
     },
   };
 }
@@ -392,6 +445,22 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
       throw safeError(error, context.credentials);
     }
   };
+  const audioEndpoint: ImmediateEndpointHandler = async (context) => {
+    try {
+      const route = newApiRouteForCapability(context.need.capability);
+      assert(route !== undefined && route.result === "audio",
+        "DramaClaw NewAPI does not implement this exact audio capability");
+      const { request, input } = await prepare(route, context, publish);
+      const asset = await client.audio("/audio/speech", context.credentials, {
+        method: "POST",
+        body: JSON.stringify(speechBody(request, input)),
+      });
+      const artifact = await context.resources.put(asset.bytes, asset.mediaType);
+      return { value: route.packageResult([artifact]) };
+    } catch (error) {
+      throw safeError(error, context.credentials);
+    }
+  };
   return defineEndpointPackage({
     module: newApiProviderModuleRef,
     facet: "gateway",
@@ -413,8 +482,10 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
     },
     defaultConcurrency: options.defaultConcurrency ?? 2,
     ...(options.actionLimits === undefined ? { actionLimits: { submit: { concurrency: 2 }, poll: { concurrency: 8 }, collect: { concurrency: 2 } } } : { actionLimits: options.actionLimits }),
-    capabilities: newApiRoutes.map((route) => route.result === "image"
-      ? { capability: route.capability, returns: route.returns, lifecycle: "immediate" as const, handler: imageEndpoint, capacity: route.capability.name, supports: route.supports }
-      : { capability: route.capability, returns: route.returns, lifecycle: "asynchronous" as const, endpoint: asyncEndpoint, capacity: route.capability.name, supports: route.supports }),
+    capabilities: newApiRoutes.map((route) => route.result === "video"
+      ? { capability: route.capability, returns: route.returns, lifecycle: "asynchronous" as const, endpoint: asyncEndpoint, capacity: route.capability.name, supports: route.supports }
+      : { capability: route.capability, returns: route.returns, lifecycle: "immediate" as const,
+        handler: route.result === "audio" ? audioEndpoint : imageEndpoint,
+        capacity: route.capability.name, supports: route.supports }),
   });
 }

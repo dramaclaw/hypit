@@ -5,6 +5,7 @@ import { inspect } from "node:util";
 import { EndpointRegistry, MemoryResourceStore } from "@hypit/driver-node";
 import { gptImageEndpoints, sealGptImage2Request } from "@hypit/gpt-image";
 import { minimaxH3Endpoints, sealMinimaxH3Request } from "@hypit/minimax-h3";
+import { mimoSpeechEndpoints, sealMimoSpeechRequest } from "@hypit/mimo-speech";
 import type { CanonicalValue, Need } from "@hypit/protocol";
 import { generationTypes } from "@hypit/generation";
 import { sealSeedanceRequest, seedanceEndpointsByModel } from "@hypit/seedance";
@@ -76,14 +77,15 @@ async function resolved(request: Need, fetcher: typeof fetch, publish?: Provider
   return resolution.registration;
 }
 
-test("registers four immediate image models and five asynchronous video models", () => {
+test("registers four image, five video and one audio model", () => {
   const provider = createNewApiProvider({
     baseUrl: "https://newapi.example/v1",
     apiKey: credentialRef("platform", "newapi.key"),
   });
-  assert.equal(provider.offers.length, 9);
+  assert.equal(provider.offers.length, 10);
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.imageSet.name).length, 4);
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.videoSet.name).length, 5);
+  assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.audioSet.name).length, 1);
 });
 
 test("text-only image generation needs no OSS and stores base64 output", async () => {
@@ -115,6 +117,126 @@ function assertRedacted(value: unknown) {
   assert.doesNotMatch(printed, /test-newapi-key|test-oss-ak|test-oss-sk|private\.example|signature=hidden/u);
   assert.match(printed, /redacted/u);
 }
+
+async function speechRequest(resources: MemoryResourceStore, instruction?: string): Promise<Need> {
+  const voice = await resources.put(new Uint8Array([1, 2, 3]), "audio/wav");
+  return need(
+    mimoSpeechEndpoints.voiceClone.capability,
+    generationTypes.audioSet,
+    sealMimoSpeechRequest("mimo-v2.5-tts-voiceclone", {
+      text: ["欢迎使用 Hypit。"],
+      ...(instruction === undefined ? {} : { instruction: [instruction] }),
+      voiceReference: [{ role: "audio", artifact: voice }],
+    }),
+    "speech",
+  );
+}
+
+test("IndexTTS2 publishes one voice reference and stores binary speech", async () => {
+  const resources = new MemoryResourceStore();
+  const request = await speechRequest(resources, "温暖、自然地说。");
+  const published: string[] = [];
+  const registration = await resolved(request, async (url, init) => {
+    assert.equal(String(url), "https://newapi.example/v1/audio/speech");
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      model: "index-tts-2",
+      input: "欢迎使用 Hypit。",
+      metadata: {
+        audio_url: "https://relay.example/voice.wav",
+        emotion_prompt: "温暖、自然地说。",
+        should_use_prompt_for_emotion: true,
+      },
+    });
+    return new Response(new Uint8Array([82, 73, 70, 70]), {
+      headers: { "content-type": "audio/wav" },
+    });
+  }, async ({ mediaType }) => {
+    published.push(mediaType);
+    return "https://relay.example/voice.wav";
+  });
+  assert.equal(registration.kind, "immediate");
+  const result = await registration.handler({
+    command: { kind: "fulfill-need", id: "command:speech", need: request },
+    need: request,
+    resources,
+    credentials: allCredentials,
+  });
+  assert.deepEqual(published, ["audio/wav"]);
+  assert.match(JSON.stringify(result), /audio\/wav/u);
+});
+
+test("IndexTTS2 without OSS fails before its paid request", async () => {
+  const resources = new MemoryResourceStore();
+  const request = await speechRequest(resources);
+  let calls = 0;
+  const registration = await resolved(request, async () => {
+    calls += 1;
+    return new Response();
+  });
+  assert.equal(registration.kind, "immediate");
+  await assert.rejects(async () => await registration.handler({
+    command: { kind: "fulfill-need", id: "command:speech", need: request },
+    need: request,
+    resources,
+    credentials,
+  }), /reference media requires an OSS relay configuration/u);
+  assert.equal(calls, 0);
+});
+
+for (const [name, response, message] of [
+  ["empty", new Response(new Uint8Array(), { headers: { "content-type": "audio/wav" } }), /empty audio/u],
+  ["non-audio", Response.json({ ok: true }), /not audio/u],
+] as const) {
+  test(`IndexTTS2 rejects ${name} success responses`, async () => {
+    const resources = new MemoryResourceStore();
+    const request = await speechRequest(resources);
+    const registration = await resolved(request, async () => response.clone(),
+      async () => "https://relay.example/voice.wav");
+    assert.equal(registration.kind, "immediate");
+    await assert.rejects(async () => await registration.handler({
+      command: { kind: "fulfill-need", id: "command:speech", need: request },
+      need: request,
+      resources,
+      credentials,
+    }), message);
+  });
+}
+
+test("IndexTTS2 redacts upstream speech errors", async () => {
+  const resources = new MemoryResourceStore();
+  const request = await speechRequest(resources);
+  const registration = await resolved(request,
+    async () => Response.json({ error: { message: reflected } }, { status: 400 }),
+    async () => "https://relay.example/voice.wav");
+  assert.equal(registration.kind, "immediate");
+  await assert.rejects(async () => await registration.handler({
+    command: { kind: "fulfill-need", id: "command:speech", need: request },
+    need: request,
+    resources,
+    credentials: allCredentials,
+  }), (error: Error) => {
+    assertRedacted(error);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("IndexTTS2 omits emotion metadata without an instruction", async () => {
+  const resources = new MemoryResourceStore();
+  const request = await speechRequest(resources);
+  const registration = await resolved(request, async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { metadata: Record<string, unknown> };
+    assert.deepEqual(body.metadata, { audio_url: "https://relay.example/voice.wav" });
+    return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+  }, async () => "https://relay.example/voice.wav");
+  assert.equal(registration.kind, "immediate");
+  await registration.handler({
+    command: { kind: "fulfill-need", id: "command:speech", need: request },
+    need: request,
+    resources,
+    credentials,
+  });
+});
 
 for (const stage of ["upload", "download", "upstream"] as const) {
   test(`image ${stage} errors redact credentials, URLs and nested causes`, async () => {
