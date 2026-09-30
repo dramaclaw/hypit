@@ -1,6 +1,6 @@
 # `@dramaclaw/provider-newapi`
 
-这是 Hypit 对 DramaClaw NewAPI 网关的图片、视频 Provider。它只注册 Hypit 已经有精确定义、并且 DramaClaw 当前目录也支持的模型；不会额外伪造尚未定义的 Hypit 模型。
+这是 Hypit 对 DramaClaw NewAPI 网关的图片、视频和语音 Provider。它只注册 Hypit 已经有精确定义、并且 DramaClaw 当前目录也支持的模型；不会额外伪造尚未定义的 Hypit 模型。
 
 | Hypit Capability | NewAPI 模型名 | 类型 |
 | --- | --- | --- |
@@ -13,6 +13,7 @@
 | `@hypit/seedance@1#seedance-2-mini` | `seedance-2.0-mini` | 视频 |
 | `@hypit/seedance@1#seedance-2.5` | `seedance-2.5` | 视频 |
 | `@hypit/minimax-h3@1#minimax-h3` | `MiniMax-H3` | 视频 |
+| `@hypit/mimo-speech@1#mimo-v2.5-tts-voiceclone` | `index-tts-2` | 参考音频克隆配音 |
 
 ## 首次使用
 
@@ -25,7 +26,7 @@ hypit runtime up
 
 `runtime init` 在尚无 Profile 时创建并选择可编辑的 `hypit.runtime.json`；已有 Profile 会保留。
 此命令不会登录或启动服务。起始 Profile 保留
-HypiHub，并将上表九项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
+HypiHub，并将上表十项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
 API Key，再询问是否配置 OSS 中转。仅用文字生成图片或视频时可以选择不配置 OSS。
 
 地址写入 Profile 的 `baseUrl`，必须使用 HTTPS；本机服务可以使用 loopback HTTP。API Key
@@ -65,6 +66,8 @@ hypit runtime up
 不会因已有 `baseUrl` 而重新启动首次配置问答。
 
 Provider 只在请求实际包含参考素材时上传 OSS，路径为 `relay/hypit/YYYYMMDD/<uuid>.<扩展名>`，并把临时签名 URL 交给 NewAPI。纯文本请求不会创建 OSS 客户端，也不会上传任何内容。未配置 OSS 却使用参考素材时，请求会在调用付费生成接口之前失败，并给出明确错误。
+
+`index-tts-2` 复用 Hypit 官方的 `<mimo:VoiceClone>` 作者接口。Provider 把朗读文字、唯一参考音频和可选演绎指令转换为 NewAPI `/audio/speech` 请求；返回音频会进入当前 Build 的 ResourceStore。它不提供无参考音频的预设音色或声音设计。由于参考音频是必需输入，使用 `index-tts-2` 前必须配置 OSS。
 
 视频生成通过 `POST /video/generations` 提交并轮询 `GET /video/generations/{taskId}`；图片根据是否有参考图调用 `/images/generations` 或 `/images/edits`。下载后的图片、视频都会进入当前 Hypit Build 的 ResourceStore。错误信息中的 HTTP(S) URL 会被脱敏，避免签名地址进入日志。
 

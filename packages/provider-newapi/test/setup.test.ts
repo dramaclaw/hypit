@@ -4,10 +4,14 @@ import test from "node:test";
 import { newApiRoutes } from "../src/routes.js";
 import { completeNewApiSetup, inspectNewApiSetup, newApiDefaultBindings } from "../src/setup.js";
 
-test("the setup core owns exactly the nine NewAPI default bindings", () => {
-  assert.equal(Object.keys(newApiDefaultBindings).length, 9);
+test("the setup core owns exactly the ten NewAPI default bindings", () => {
+  assert.equal(Object.keys(newApiDefaultBindings).length, 10);
   assert.deepEqual(new Set(Object.keys(newApiDefaultBindings)), new Set(newApiRoutes.map((route) => route.key)));
   assert.deepEqual(new Set(Object.values(newApiDefaultBindings)), new Set(["newapi.personal"]));
+  assert.equal(
+    newApiDefaultBindings["@hypit/mimo-speech@1#mimo-v2.5-tts-voiceclone"],
+    "newapi.personal",
+  );
 });
 
 test("setup inspection requires a nonblank baseUrl", () => {

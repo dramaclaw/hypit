@@ -24,12 +24,16 @@ function contextWithAnswers(answers: readonly string[]): CliRuntimeProfileSetupC
   };
 }
 
-test("the video starter keeps HypiHub and defaults supported media to NewAPI", () => {
+test("the video starter keeps HypiHub and defaults supported generation to NewAPI", () => {
   const profile = videoCliDistribution.initialRuntimeProfile as Profile;
   assert.equal(profile.endpoints["hypihub.default"].use, "@hypit/provider-hypihub");
   assert.equal(profile.endpoints["newapi.personal"].use, "@dramaclaw/provider-newapi");
   assert.deepEqual(profile.bindings, newApiDefaultBindings);
-  assert.equal(Object.keys(profile.bindings).length, 9);
+  assert.equal(Object.keys(profile.bindings).length, 10);
+  assert.equal(
+    profile.bindings["@hypit/mimo-speech@1#mimo-v2.5-tts-voiceclone"],
+    "newapi.personal",
+  );
 });
 
 test("first interactive up configures NewAPI without OSS", async () => {
