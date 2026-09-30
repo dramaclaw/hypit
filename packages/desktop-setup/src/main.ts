@@ -309,6 +309,12 @@ export async function refreshDesktopStatus(options: DesktopIntegrationOptions): 
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
+export function integrationConfirmationTargets(options: Pick<LauncherOptions, "paths" | "platform" | "home">): readonly string[] {
+  return [options.paths.launcher, ...supportedSkillTargets(options.paths).map(target => target.skillDirectory),
+    `旧版迁移／手动恢复：${options.paths.legacyCodexSkill}`, options.paths.managedState,
+    options.platform === "darwin" ? join(options.home, ".zprofile") : "HKCU\\Environment\\Path"];
+}
+
 export async function startElectronShell(bundleDirectory: string): Promise<void> {
   const { app, BrowserWindow, ipcMain, shell, dialog } = await import("electron");
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
@@ -355,7 +361,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
     clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); startupStatus = undefined; return getStatus(); },
     removeIntegration: async () => {
-      const targets = [paths.launcher, paths.skill, paths.managedState, platform === "darwin" ? join(home, ".zprofile") : "HKCU\\Environment\\Path"];
+      const targets = integrationConfirmationTargets({ paths, platform, home });
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
       await removeDesktopIntegration({ paths, platform, home }); return getStatus();
     },

@@ -25,8 +25,6 @@ test("Darwin desktop paths stay under the injected user locations", () => {
     claudeSkillBackup: "/Users/tester/Library/Application Support/Hypit/desktop/skill-backup/claude/hypit",
     legacyCodexSkill: "/Users/tester/.codex/skills/hypit",
     legacyCodexSkillBackup: "/Users/tester/Library/Application Support/Hypit/desktop/skill-backup/hypit",
-    skill: "/Users/tester/.codex/skills/hypit",
-    skillBackup: "/Users/tester/Library/Application Support/Hypit/desktop/skill-backup/hypit",
     launcher: "/Users/tester/.local/bin/hypit",
     managedState: "/Users/tester/Library/Application Support/Hypit/desktop/managed-state.json",
     agentProbePaths: {
@@ -54,8 +52,6 @@ test("Windows desktop paths use Windows separators and a current-user launcher",
     claudeSkillBackup: "C:\\Users\\tester\\AppData\\Local\\Hypit\\desktop\\skill-backup\\claude\\hypit",
     legacyCodexSkill: "C:\\Users\\tester\\.codex\\skills\\hypit",
     legacyCodexSkillBackup: "C:\\Users\\tester\\AppData\\Local\\Hypit\\desktop\\skill-backup\\hypit",
-    skill: "C:\\Users\\tester\\.codex\\skills\\hypit",
-    skillBackup: "C:\\Users\\tester\\AppData\\Local\\Hypit\\desktop\\skill-backup\\hypit",
     launcher: "C:\\Users\\tester\\AppData\\Local\\Hypit\\bin\\hypit.cmd",
     managedState: "C:\\Users\\tester\\AppData\\Local\\Hypit\\desktop\\managed-state.json",
     agentProbePaths: {

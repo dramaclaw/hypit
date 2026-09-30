@@ -603,13 +603,12 @@ test("removal disposal preserves a changed restore stage", async (t) => {
   assert.equal(await readFile(join(restorePath, "SKILL.md"), "utf8"), "user edit to restore stage");
 });
 
-test("legacy migration ignores path aliases and v1 markers at portable and Claude targets", async (t) => {
+test("legacy migration ignores v1 markers at portable and Claude targets", async (t) => {
   const f = await fixture(t);
   for (const target of [f.portable, f.claude]) {
     const marker = await installManagedSkill({ ...f, target });
     await writeFile(join(target.skillDirectory, SKILL_MARKER), JSON.stringify({ ...marker, format: "hypit.desktop-managed@1" }));
-    const paths = { ...f.paths, skill: target.skillDirectory, skillBackup: target.backupDirectory };
-    assert.equal(await prepareLegacyCodexMigration(paths), undefined);
+    assert.equal(await prepareLegacyCodexMigration(f.paths), undefined);
     assert.equal(await isManagedSkillInstalled(target), false);
     assert.equal(await prepareSkillRemoval({ target }), undefined);
     assert.equal(await readFile(join(target.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");

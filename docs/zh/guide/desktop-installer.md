@@ -5,7 +5,7 @@ description: 在 macOS 或 Windows 安装 Hypit，并连接自己的 NewAPI 与 
 
 # 桌面安装包（内部测试版）
 
-安装包面向不需要编译源码的团队成员。它包含 Hypit、FFmpeg、FFprobe、Codex Skill 和中文配置向导。当前提供 **macOS Apple Silicon（arm64）DMG** 与 **Windows x64 EXE**；两者均未签名，且没有自动更新。Windows 安装包在 macOS 上交叉构建，尚未经过真实 Windows x64 机器的安装验证。
+安装包面向不需要编译源码的团队成员。它包含 Hypit、FFmpeg、FFprobe、Agent Skill 和中文配置向导。当前提供 **macOS Apple Silicon（arm64）DMG** 与 **Windows x64 EXE**；两者均未签名，且没有自动更新。Windows 安装包在 macOS 上交叉构建，尚未经过真实 Windows x64 机器的安装验证。
 
 ## 安装与核对文件
 
@@ -37,16 +37,20 @@ Windows：运行 EXE，安装在当前用户下，不需要管理员权限。若
 
 点击“测试连接并安装”后，向导会读取 NewAPI 的可用模型列表，并在 OSS 上传一个 2 字节测试文件、通过短时签名 URL 下载核对，然后删除测试文件。此操作不会生成图片或视频，也不会提交付费生成请求。如果清理失败，界面会给出测试对象键，需到 OSS 手动删除。地址、Endpoint 和 Bucket 可作为非密钥草稿保留；三个密钥不会保存在草稿中，关闭向导后重新填写。
 
-配置成功后，密钥放在 macOS 钥匙串或 Windows 凭据管理器；Runtime Profile 只保存凭据引用。桌面 Profile 位于 macOS 的 `~/Library/Application Support/Hypit/profiles/desktop-newapi.json`，Windows 的 `%LOCALAPPDATA%\Hypit\profiles\desktop-newapi.json`。命令入口分别为 `~/.local/bin/hypit` 与 `%LOCALAPPDATA%\Hypit\bin\hypit.cmd`，Codex Skill 位于 `~/.codex/skills/hypit` 或 `%USERPROFILE%\.codex\skills\hypit`。安装器会备份已有的非托管 Hypit Skill，卸载本机集成时恢复它。
+配置成功后，密钥放在 macOS 钥匙串或 Windows 凭据管理器；Runtime Profile 只保存凭据引用。桌面 Profile 位于 macOS 的 `~/Library/Application Support/Hypit/profiles/desktop-newapi.json`，Windows 的 `%LOCALAPPDATA%\Hypit\profiles\desktop-newapi.json`。命令入口分别为 `~/.local/bin/hypit` 与 `%LOCALAPPDATA%\Hypit\bin\hypit.cmd`。
 
-完成后重启 Codex 和终端。运行 `hypit --version` 与 `hypit paths --json` 检查安装。在新的视频项目中，选择上面的桌面 Profile：
+通用 Agent Skill 始终安装到 `~/.agents/skills/hypit`（Windows 为 `%USERPROFILE%\.agents\skills\hypit`），供 Codex、Claymore Piko 和 Cursor 发现。检测到 Claude Code 时，还会安装到 `~/.claude/skills/hypit`（Windows 为 `%USERPROFILE%\.claude\skills\hypit`）。每个目标独立备份已有的非托管 Hypit Skill，卸载本机集成时分别恢复。
+
+之后安装了新的 Agent，可在向导中点击“重新扫描 Agent”。此操作只更新 Skill 与命令入口，不会读取或改写凭据，也不要求重新输入密钥。旧版 `~/.codex/skills/hypit`（Windows 为 `%USERPROFILE%\.codex\skills\hypit`）仅用于托管安装迁移或手动恢复；无法证明归属的旧文件会保留并提示检查。
+
+完成后重启正在使用的 Agent 和终端。运行 `hypit --version` 与 `hypit paths --json` 检查安装。在新的视频项目中，选择上面的桌面 Profile：
 
 ```bash
 hypit runtime use "<桌面 Profile 的实际绝对路径>" --workspace "<视频项目目录>"
 hypit doctor --workspace "<视频项目目录>"
 ```
 
-每个项目独立选择 Runtime Profile；向导不会把桌面 Profile 强加到已有项目。Codex Skill 会在新项目中引导选择已安装的桌面 Profile，无需再输入已保存的密钥。`doctor` 用于诊断配置与依赖；正式生成前仍应核对所选模型、参数与费用。Chrome、WhisperX 和模型权重没有随安装包分发，选用相关功能时可能另外下载、安装或配置。
+每个项目独立选择 Runtime Profile；向导不会把桌面 Profile 强加到已有项目。Agent Skill 会在新项目中引导选择已安装的桌面 Profile，无需再输入已保存的密钥。`doctor` 用于诊断配置与依赖；正式生成前仍应核对所选模型、参数与费用。Chrome、WhisperX 和模型权重没有随安装包分发，选用相关功能时可能另外下载、安装或配置。
 
 ## 更新与卸载
 
@@ -60,7 +64,7 @@ hypit doctor --workspace "<视频项目目录>"
 
 ## 排查
 
-- `hypit` 找不到：重启 Codex 和终端，检查向导的“命令入口”诊断，以及 macOS 的 `~/.local/bin` 或 Windows 当前用户 PATH。
+- `hypit` 找不到：重启正在使用的 Agent 和终端，检查向导的“命令入口”诊断，以及 macOS 的 `~/.local/bin` 或 Windows 当前用户 PATH。
 - NewAPI 失败：核对地址和 API Key，确认该地址提供模型列表接口，检查网络与账户权限。
 - OSS 失败：核对 Endpoint、Bucket、AccessKey 权限和时效；如界面列出测试对象键，请手动删除后重试。
 - 本机依赖失败：在向导中“重新运行诊断”。诊断会检查安装资源、Hypit、FFmpeg/FFprobe、Skill、Profile、凭据与连接，不会生成素材。

@@ -10,10 +10,6 @@ export type DesktopPaths = {
   readonly claudeSkillBackup: string;
   readonly legacyCodexSkill: string;
   readonly legacyCodexSkillBackup: string;
-  /** @deprecated Task 3 replaces installer consumers with explicit targets. */
-  readonly skill: string;
-  /** @deprecated Task 3 replaces installer consumers with explicit targets. */
-  readonly skillBackup: string;
   readonly launcher: string;
   readonly managedState: string;
   readonly agentProbePaths: Readonly<Record<DetectedAgentId, readonly string[]>>;
@@ -60,8 +56,6 @@ export function desktopPaths(options: DesktopPathOptions): DesktopPaths {
     claudeSkillBackup: path.join(desktopState, "skill-backup", "claude", "hypit"),
     legacyCodexSkill,
     legacyCodexSkillBackup,
-    skill: legacyCodexSkill,
-    skillBackup: legacyCodexSkillBackup,
     launcher: options.platform === "darwin"
       ? path.join(options.home, ".local", "bin", "hypit")
       : path.join(hostState, "bin", "hypit.cmd"),

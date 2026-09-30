@@ -11,8 +11,22 @@ import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
 import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 import { removeDesktopIntegration } from "../src/lifecycle.js";
+import * as desktopMain from "../src/main.js";
 
 const require = createRequire(new URL("../package.json", import.meta.url));
+
+test("integration confirmation names every supported destination and explicit legacy recovery on both platforms", () => {
+  assert.equal(typeof desktopMain.integrationConfirmationTargets, "function");
+  for (const platform of ["darwin", "win32"] as const) {
+    const home = platform === "darwin" ? "/Users/test" : "C:\\Users\\test";
+    const paths = desktopPaths({ platform, home, appData: home });
+    assert.deepEqual(desktopMain.integrationConfirmationTargets({ paths, platform, home }), [
+      paths.launcher, paths.portableSkill, paths.claudeSkill,
+      `旧版迁移／手动恢复：${paths.legacyCodexSkill}`, paths.managedState,
+      platform === "darwin" ? join(home, ".zprofile") : "HKCU\\Environment\\Path",
+    ]);
+  }
+});
 
 test("cleanup failure names portable, compatibility and legacy manual-recovery paths on both platforms", async () => {
   const { build } = require("esbuild");
@@ -44,6 +58,12 @@ test("desktop Skill instructions explain portable discovery, absolute launchers 
   const guide = await readFile(new URL("../../../skills/hypit/references/environment/distribution.md", import.meta.url), "utf8");
   for (const text of ["~/.agents/skills/hypit", "~/.claude/skills/hypit", "~/.local/bin/hypit", "%LOCALAPPDATA%\\Hypit\\bin\\hypit.cmd", "Codex, Claymore Piko and Cursor", "重新扫描 Agent", "does not request or rewrite model credentials"]) assert.ok(guide.includes(text), `missing installation guidance: ${text}`);
   assert.doesNotMatch(guide, /managed Codex Skill|restart Codex and Terminal/);
+});
+
+test("Chinese desktop guide explains portable and conditional Claude targets with credential-free rescan", async () => {
+  const guide = await readFile(new URL("../../../docs/zh/guide/desktop-installer.md", import.meta.url), "utf8");
+  for (const text of ["~/.agents/skills/hypit", "~/.claude/skills/hypit", "检测到 Claude Code", "重新扫描 Agent", "不会读取或改写凭据", "旧版", "手动恢复", "重启正在使用的 Agent 和终端"]) assert.ok(guide.includes(text), `missing guidance: ${text}`);
+  assert.doesNotMatch(guide, /Codex Skill 位于|重启 Codex 和终端/);
 });
 
 test("explicit uninstall enumerates every managed target and legacy tree without Agent detection", async (t) => {
