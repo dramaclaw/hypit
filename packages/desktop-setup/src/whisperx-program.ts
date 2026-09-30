@@ -293,7 +293,7 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     mutationRevision++;
     activeStage = operation === "stop" ? undefined : current.stage;
     const observers = new Set<WhisperXProgressReporter>();
-    const promise = Promise.resolve().then(() => perform(operation)).finally(() => { active = undefined; });
+    const promise = Promise.resolve().then(() => perform(operation)).finally(() => { active = undefined; activeStage = undefined; });
     active = { operation, promise, observers };
     observe(report, signal, active);
     return promise;

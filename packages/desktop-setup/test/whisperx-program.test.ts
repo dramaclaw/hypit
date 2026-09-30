@@ -242,6 +242,23 @@ test("malformed output and Profile conflicts are sanitized", async (t) => {
   assert.equal((await f.calls()).length, before);
 });
 
+test("a standalone failed status probe does not inherit a completed installation's ready stage", async (t) => {
+  const f = await fixture(t);
+  const installed = await f.service.installAndStart();
+  assert.equal(installed.state, "ready");
+  assert.equal(installed.stage, "ready");
+  await f.configure({ fail: "status" });
+  const failed = await f.service.status();
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.code, "WHISPERX_COMMAND_FAILED");
+  assert.equal(failed.stage, undefined);
+  assert.equal(await readFile(join(f.paths.hostState, "fake-state"), "utf8"), "ready");
+  await f.configure({});
+  assert.equal((await f.service.status()).stage, "ready");
+  await f.configure({ fail: "status" });
+  assert.equal((await f.service.status()).stage, undefined);
+});
+
 for (const invalid of ["relative", "outside", "symlink", "directory", "non-executable"]) {
   test(`rejects ${invalid} uv without falling back to PATH`, async (t) => {
     const f = await fixture(t);
