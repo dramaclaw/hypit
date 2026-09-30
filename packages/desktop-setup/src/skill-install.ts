@@ -100,6 +100,22 @@ function sameSnapshot(left: TreeSnapshot | undefined, right: TreeSnapshot | unde
     && left.dev === right.dev && left.ino === right.ino && left.digest === right.digest;
 }
 
+async function matchesSnapshot(expected: TreeSnapshot | undefined, path: string): Promise<boolean> {
+  try { return expected !== undefined && sameSnapshot(expected, await snapshotTree(path)); }
+  catch { return false; }
+}
+
+async function cleanupOwned(entries: readonly { readonly path: string; readonly snapshot: TreeSnapshot | undefined }[], code: string): Promise<void> {
+  for (const entry of entries) {
+    if (await exists(entry.path) && !(await matchesSnapshot(entry.snapshot, entry.path))) throw new Error(code);
+  }
+  for (const entry of entries) {
+    if (!(await exists(entry.path))) continue;
+    if (!(await matchesSnapshot(entry.snapshot, entry.path))) throw new Error(code);
+    await rm(entry.path, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /** Check ownership and installed content without exposing marker data to the renderer. */
 export async function isManagedSkillInstalled(target: AgentSkillTarget, current?: Pick<SkillInstallOptions, "sourceDirectory" | "installedVersion">): Promise<boolean>;
 /** @deprecated Task 4 removes the DesktopPaths overload. */
@@ -140,6 +156,10 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
   let backupCreated = false;
   let committed = false;
   let committedSnapshot: TreeSnapshot | undefined;
+  let stageSnapshot: TreeSnapshot | undefined;
+  let backupStageSnapshot: TreeSnapshot | undefined;
+  let publishedBackupSnapshot: TreeSnapshot | undefined;
+  let recoveryFailed = false;
   let prepared = false;
   try {
     if (!options.installedVersion || await exists(join(options.sourceDirectory, SKILL_MARKER))) throw new Error("Invalid source");
@@ -161,55 +181,86 @@ export async function prepareSkillInstall(options: SkillInstallOptions): Promise
     if (await exists(backupStage)) {
       const backupSnapshot = await snapshotTree(backupStage);
       if (backupSnapshot?.digest !== liveSnapshot?.digest) throw new Error("Incomplete Skill backup");
+      backupStageSnapshot = backupSnapshot;
     }
     const marker: ManagedSkillMarker = { format: "hypit.desktop-managed@2", target: target.id, installedVersion: options.installedVersion,
       sourceDigest, ...(backupDirectory === undefined ? {} : { backupDirectory }) };
     await writeFile(join(stage, SKILL_MARKER), `${JSON.stringify(marker, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    stageSnapshot = await snapshotTree(stage);
     prepared = true;
     return {
       marker,
       async commit() {
         if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before commit");
         if (await exists(backupStage)) {
+          if (!(await matchesSnapshot(backupStageSnapshot, backupStage))) throw new Error("Backup stage changed before commit");
           if (await exists(target.backupDirectory)) throw new Error("Backup already exists");
           await rename(backupStage, target.backupDirectory);
           backupCreated = true;
+          publishedBackupSnapshot = await snapshotTree(target.backupDirectory);
+          if (!sameSnapshot(backupStageSnapshot, publishedBackupSnapshot)) throw new Error("Backup changed during commit");
         }
         if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before commit");
         if (liveSnapshot) {
+          if (await exists(previous)) throw new Error("Previous Skill path already exists");
           await rename(target.skillDirectory, previous);
           moved = true;
           if (!sameSnapshot(liveSnapshot, await snapshotTree(previous))) throw new Error("Skill changed during commit");
         }
         if (await exists(target.skillDirectory)) throw new Error("Skill appeared during commit");
+        if (!(await matchesSnapshot(stageSnapshot, stage))) throw new Error("Skill stage changed before commit");
         await rename(stage, target.skillDirectory);
         committed = true;
         committedSnapshot = await snapshotTree(target.skillDirectory);
-        if (!committedSnapshot) throw new Error("Committed Skill disappeared");
+        if (!sameSnapshot(stageSnapshot, committedSnapshot)) throw new Error("Committed Skill changed");
       },
       async rollback() {
+        const fail = () => { recoveryFailed = true; return true; };
         try {
+          if (backupCreated && !(await matchesSnapshot(publishedBackupSnapshot, target.backupDirectory))) return fail();
+          if (moved && !(await matchesSnapshot(liveSnapshot, previous))) return fail();
+          if (!committed && !moved && backupCreated
+            && !sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) return fail();
           if (committed) {
             if (!committedSnapshot || !sameSnapshot(committedSnapshot, await snapshotTree(target.skillDirectory))
-              || await exists(stage)) return true;
+              || await exists(stage)) return fail();
             await rename(target.skillDirectory, stage);
             if (!sameSnapshot(committedSnapshot, await snapshotTree(stage))) {
               if (!(await exists(target.skillDirectory))) await rename(stage, target.skillDirectory).catch(() => {});
-              return true;
+              return fail();
             }
             committed = false;
+            stageSnapshot = committedSnapshot;
           }
-          if (moved) { await rename(previous, target.skillDirectory); moved = false; }
-          if (backupCreated) { await rm(target.backupDirectory, { recursive: true, force: true }); backupCreated = false; }
+          if (moved) {
+            if (await exists(target.skillDirectory) || !(await matchesSnapshot(liveSnapshot, previous))) return fail();
+            await rename(previous, target.skillDirectory);
+            moved = false;
+            if (!(await matchesSnapshot(liveSnapshot, target.skillDirectory))) return fail();
+          }
+          if (backupCreated) {
+            if (!(await matchesSnapshot(publishedBackupSnapshot, target.backupDirectory))) return fail();
+            await rm(target.backupDirectory, { recursive: true, force: true });
+            backupCreated = false;
+          }
           return false;
-        } catch { return true; }
+        } catch { return fail(); }
       },
       async dispose(succeeded) {
-        if (succeeded && moved) await rm(previous, { recursive: true, force: true }).catch(() => {});
-        if (succeeded || (!moved && !committed)) {
-          await rm(stage, { recursive: true, force: true }).catch(() => {});
-          await rm(backupStage, { recursive: true, force: true }).catch(() => {});
+        if (recoveryFailed) {
+          if (succeeded) throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
+          return;
         }
+        if (!succeeded && (moved || committed)) return;
+        if (succeeded && committed && !(await matchesSnapshot(committedSnapshot, target.skillDirectory)))
+          throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
+        if (succeeded && backupCreated && !(await matchesSnapshot(publishedBackupSnapshot, target.backupDirectory)))
+          throw new Error("Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
+        await cleanupOwned([
+          ...(succeeded && moved ? [{ path: previous, snapshot: liveSnapshot }] : []),
+          { path: stage, snapshot: stageSnapshot },
+          { path: backupStage, snapshot: backupStageSnapshot },
+        ], "Skill 安装失败 [SKILL_INSTALL_FAILED_CLEANUP_FAILED]");
       },
     };
   } catch {
@@ -252,6 +303,9 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
   const restoreStage = `${target.skillDirectory}.restore-${randomUUID()}`;
   let moved = false;
   let restored = false;
+  let restoredLiveSnapshot: TreeSnapshot | undefined;
+  let restoreStageSnapshot: TreeSnapshot | undefined;
+  let recoveryFailed = false;
   try {
     const liveSnapshot = await snapshotTree(target.skillDirectory);
     const marker = await markerAt(target);
@@ -261,7 +315,8 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
       backupSnapshot = await snapshotTree(target.backupDirectory);
       if (!backupSnapshot) throw new Error("Invalid backup");
       await cp(target.backupDirectory, restoreStage, { recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true, force: false });
-      if ((await snapshotTree(restoreStage))?.digest !== backupSnapshot.digest
+      restoreStageSnapshot = await snapshotTree(restoreStage);
+      if (restoreStageSnapshot?.digest !== backupSnapshot.digest
         || !sameSnapshot(backupSnapshot, await snapshotTree(target.backupDirectory))) throw new Error("Backup changed during removal preparation");
     }
     if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed during removal preparation");
@@ -270,26 +325,62 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
         if (!sameSnapshot(liveSnapshot, await snapshotTree(target.skillDirectory))) throw new Error("Skill changed before removal commit");
         if (backupSnapshot && !sameSnapshot(backupSnapshot, await snapshotTree(target.backupDirectory)))
           throw new Error("Backup changed before removal commit");
+        if (backupSnapshot && !(await matchesSnapshot(restoreStageSnapshot, restoreStage)))
+          throw new Error("Restore stage changed before removal commit");
+        if (await exists(previous)) throw new Error("Removed Skill path already exists");
         await rename(target.skillDirectory, previous);
         moved = true;
         if (!sameSnapshot(liveSnapshot, await snapshotTree(previous))) throw new Error("Skill changed during removal commit");
-        if (marker.backupDirectory !== undefined) { await rename(restoreStage, target.skillDirectory); restored = true; }
+        if (marker.backupDirectory !== undefined) {
+          if (await exists(target.skillDirectory) || !(await matchesSnapshot(restoreStageSnapshot, restoreStage)))
+            throw new Error("Restore stage changed during removal commit");
+          await rename(restoreStage, target.skillDirectory);
+          restored = true;
+          restoredLiveSnapshot = await snapshotTree(target.skillDirectory);
+          if (!sameSnapshot(restoreStageSnapshot, restoredLiveSnapshot)) throw new Error("Restored Skill changed during commit");
+        }
       },
       async rollback() {
+        const fail = () => { recoveryFailed = true; return true; };
         if (!moved) return false;
         try {
-          if (restored) { await rename(target.skillDirectory, restoreStage); restored = false; }
+          if (!(await matchesSnapshot(liveSnapshot, previous))) return fail();
+          if (restored) {
+            if (!(await matchesSnapshot(restoredLiveSnapshot, target.skillDirectory)) || await exists(restoreStage)) return fail();
+            await rename(target.skillDirectory, restoreStage);
+            if (!(await matchesSnapshot(restoredLiveSnapshot, restoreStage))) {
+              if (!(await exists(target.skillDirectory))) await rename(restoreStage, target.skillDirectory).catch(() => {});
+              return fail();
+            }
+            restored = false;
+            restoreStageSnapshot = restoredLiveSnapshot;
+          }
+          if (await exists(target.skillDirectory) || !(await matchesSnapshot(liveSnapshot, previous))) return fail();
           await rename(previous, target.skillDirectory);
           moved = false;
+          if (!(await matchesSnapshot(liveSnapshot, target.skillDirectory))) return fail();
           return false;
-        } catch { return true; }
+        } catch { return fail(); }
       },
       async dispose(committed) {
-        if (committed) {
-          await rm(previous, { recursive: true, force: true }).catch(() => {});
-          if (marker.backupDirectory !== undefined) await rm(target.backupDirectory, { recursive: true, force: true }).catch(() => {});
+        if (recoveryFailed) {
+          if (committed) throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+          return;
         }
-        await rm(restoreStage, { recursive: true, force: true }).catch(() => {});
+        if (committed) {
+          if (restored && !(await matchesSnapshot(restoredLiveSnapshot, target.skillDirectory)))
+            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+          if (marker.backupDirectory !== undefined && !(await matchesSnapshot(backupSnapshot, target.backupDirectory)))
+            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+          if (!(await matchesSnapshot(liveSnapshot, previous)))
+            throw new Error("Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
+        }
+        if (!committed && moved) return;
+        await cleanupOwned([
+          ...(committed ? [{ path: previous, snapshot: liveSnapshot }] : []),
+          ...(committed && marker.backupDirectory !== undefined ? [{ path: target.backupDirectory, snapshot: backupSnapshot }] : []),
+          { path: restoreStage, snapshot: restoreStageSnapshot },
+        ], "Skill 卸载失败 [SKILL_REMOVE_FAILED_CLEANUP_FAILED]");
       },
     };
   } catch {

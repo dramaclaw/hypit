@@ -261,6 +261,59 @@ test("outer rollback preserves a replacement at a freshly committed path", async
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "replacement");
 });
 
+test("outer rollback preserves a published backup edited after install commit", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  const prepared = await prepareSkillInstall(f);
+  await prepared.commit();
+  await writeFile(join(f.portable.backupDirectory, "SKILL.md"), "user edited backup");
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user edited backup");
+  assert.equal((await readdir(dirname(f.portable.skillDirectory))).some((name) => name.startsWith("hypit.previous-")), true);
+});
+
+test("successful install cleanup preserves a changed previous tree", async (t) => {
+  const f = await fixture(t);
+  await installManagedSkill(f);
+  const prepared = await prepareSkillInstall({ ...f, installedVersion: "2" });
+  await prepared.commit();
+  const previous = (await readdir(dirname(f.portable.skillDirectory))).find((name) => name.startsWith("hypit.previous-"));
+  assert.ok(previous);
+  await writeFile(join(dirname(f.portable.skillDirectory), previous, "SKILL.md"), "user edit to previous");
+  await assert.rejects(prepared.dispose(true), /SKILL_INSTALL_FAILED/);
+  assert.equal(await readFile(join(dirname(f.portable.skillDirectory), previous, "SKILL.md"), "utf8"), "user edit to previous");
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
+});
+
+test("install disposal preserves a changed prepared stage", async (t) => {
+  const f = await fixture(t);
+  const prepared = await prepareSkillInstall(f);
+  const stage = (await readdir(dirname(f.portable.skillDirectory))).find((name) => name.startsWith("hypit.stage-"));
+  assert.ok(stage);
+  await writeFile(join(dirname(f.portable.skillDirectory), stage, "SKILL.md"), "user edit to stage");
+  await assert.rejects(prepared.dispose(false), /SKILL_INSTALL_FAILED/);
+  assert.equal(await readFile(join(dirname(f.portable.skillDirectory), stage, "SKILL.md"), "utf8"), "user edit to stage");
+});
+
+test("install commit and disposal preserve a changed backup stage", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  const prepared = await prepareSkillInstall(f);
+  const backupStage = (await readdir(dirname(f.portable.backupDirectory))).find((name) => name.startsWith("hypit.stage-"));
+  assert.ok(backupStage);
+  const stagedPath = join(dirname(f.portable.backupDirectory), backupStage);
+  await writeFile(join(stagedPath, "SKILL.md"), "user edit to backup stage");
+  await assert.rejects(prepared.commit());
+  assert.equal(await prepared.rollback(), false);
+  await assert.rejects(prepared.dispose(false), /SKILL_INSTALL_FAILED/);
+  assert.equal(await readFile(join(stagedPath, "SKILL.md"), "utf8"), "user edit to backup stage");
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+});
+
 test("removal commit preserves a backup changed after preparation", async (t) => {
   const f = await fixture(t);
   await mkdir(f.portable.skillDirectory, { recursive: true });
@@ -275,6 +328,52 @@ test("removal commit preserves a backup changed after preparation", async (t) =>
   assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "# Hypit\n");
   assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "changed user backup");
   assert.deepEqual(await readdir(dirname(f.portable.skillDirectory)), ["hypit"]);
+});
+
+test("outer removal rollback preserves a restored Skill edited after commit", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  const prepared = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(prepared);
+  await prepared.commit();
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "user edit after removal");
+  assert.equal(await prepared.rollback(), true);
+  await prepared.dispose(false);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "user edit after removal");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "original user copy");
+  assert.equal((await readdir(dirname(f.portable.skillDirectory))).some((name) => name.startsWith("hypit.removed-")), true);
+});
+
+test("successful removal cleanup preserves an original backup edited after commit", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  const prepared = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(prepared);
+  await prepared.commit();
+  await writeFile(join(f.portable.backupDirectory, "SKILL.md"), "user edit after removal");
+  await assert.rejects(prepared.dispose(true), /SKILL_REMOVE_FAILED/);
+  assert.equal(await readFile(join(f.portable.skillDirectory, "SKILL.md"), "utf8"), "original user copy");
+  assert.equal(await readFile(join(f.portable.backupDirectory, "SKILL.md"), "utf8"), "user edit after removal");
+  assert.equal((await readdir(dirname(f.portable.skillDirectory))).some((name) => name.startsWith("hypit.removed-")), true);
+});
+
+test("removal disposal preserves a changed restore stage", async (t) => {
+  const f = await fixture(t);
+  await mkdir(f.portable.skillDirectory, { recursive: true });
+  await writeFile(join(f.portable.skillDirectory, "SKILL.md"), "original user copy");
+  await installManagedSkill(f);
+  const prepared = await prepareSkillRemoval({ target: f.portable });
+  assert.ok(prepared);
+  const restore = (await readdir(dirname(f.portable.skillDirectory))).find((name) => name.startsWith("hypit.restore-"));
+  assert.ok(restore);
+  const restorePath = join(dirname(f.portable.skillDirectory), restore);
+  await writeFile(join(restorePath, "SKILL.md"), "user edit to restore stage");
+  await assert.rejects(prepared.dispose(false), /SKILL_REMOVE_FAILED/);
+  assert.equal(await readFile(join(restorePath, "SKILL.md"), "utf8"), "user edit to restore stage");
 });
 
 test("the legacy bridge uses exact Codex fields instead of mutable aliases", async (t) => {
