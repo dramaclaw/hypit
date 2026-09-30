@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { runIntegrationCleanup } from "../src/cleanup-entry.js";
 import { desktopPaths } from "../src/paths.js";
 import { scanAgentTargets } from "../src/agent-targets.js";
@@ -11,6 +13,38 @@ import { installManagedSkill, SKILL_MARKER } from "../src/skill-install.js";
 import { removeDesktopIntegration } from "../src/lifecycle.js";
 
 const require = createRequire(new URL("../package.json", import.meta.url));
+
+test("cleanup failure names portable, compatibility and legacy manual-recovery paths on both platforms", async () => {
+  const { build } = require("esbuild");
+  const built = await build({ entryPoints: [fileURLToPath(new URL("../src/cleanup-entry.ts", import.meta.url))], bundle: true, platform: "node", format: "cjs", write: false });
+  for (const platform of ["darwin", "win32"] as const) {
+    const home = platform === "win32" ? "C:\\Users\\test" : "/Users/test";
+    const appData = platform === "win32" ? "C:\\Users\\test\\AppData\\Local" : join(home, "Library", "Application Support");
+    const paths = desktopPaths({ platform, home, appData });
+    let output = "";
+    const processStub = { platform, env: { LOCALAPPDATA: appData }, argv: ["node", "cleanup.cjs", "--invalid"], stderr: { write: (value: string) => { output += value; } }, exitCode: 0 };
+    const module = { exports: {} as { startIntegrationCleanup(): Promise<void> } };
+    runInNewContext(built.outputFiles[0].text, { module, exports: module.exports, process: processStub,
+      require: (name: string) => name === "node:os" ? { homedir: () => home } : require(name) });
+    await module.exports.startIntegrationCleanup();
+    assert.equal(processStub.exitCode, 1);
+    for (const path of [paths.launcher, paths.portableSkill, paths.claudeSkill]) assert.ok(output.includes(path), `missing recovery path: ${path}`);
+    assert.ok(output.includes(`旧版手动恢复：${paths.legacyCodexSkill}`));
+    assert.match(output, /凭据与项目已保留/);
+    assert.doesNotMatch(output, /仅允许卸载托管集成/);
+  }
+});
+
+test("NSIS recovery names all Skill paths and labels Codex as legacy manual recovery", async () => {
+  const hook = await readFile(new URL("../build/installer.nsh", import.meta.url), "utf8");
+  for (const path of ["$PROFILE\\.agents\\skills\\hypit", "$PROFILE\\.claude\\skills\\hypit", "旧版手动恢复：$PROFILE\\.codex\\skills\\hypit"]) assert.ok(hook.includes(path), `missing recovery path: ${path}`);
+});
+
+test("desktop Skill instructions explain portable discovery, absolute launchers and credential-free rescanning", async () => {
+  const guide = await readFile(new URL("../../../skills/hypit/references/environment/distribution.md", import.meta.url), "utf8");
+  for (const text of ["~/.agents/skills/hypit", "~/.claude/skills/hypit", "~/.local/bin/hypit", "%LOCALAPPDATA%\\Hypit\\bin\\hypit.cmd", "Codex, Claymore Piko and Cursor", "重新扫描 Agent", "does not request or rewrite model credentials"]) assert.ok(guide.includes(text), `missing installation guidance: ${text}`);
+  assert.doesNotMatch(guide, /managed Codex Skill|restart Codex and Terminal/);
+});
 
 test("explicit uninstall enumerates every managed target and legacy tree without Agent detection", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "hypit-uninstall-all-"));

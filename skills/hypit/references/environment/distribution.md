@@ -42,10 +42,18 @@ is a configuration question, not evidence that Hypit needs reinstalling.
 
 ### Desktop installation
 
-Hypit Setup supplies the Distribution, its runtime, and a managed Codex Skill together. Use its
-installed launcher: `~/.local/bin/hypit` on macOS or `%LOCALAPPDATA%\Hypit\bin\hypit.cmd` on Windows.
-After installation, restart Codex and Terminal so they inherit the updated PATH. If command discovery
-has not refreshed, invoke that launcher by its quoted absolute path.
+Hypit Setup supplies the Distribution, its runtime, and a managed portable Skill at
+`~/.agents/skills/hypit`. Codex, Claymore Piko and Cursor use that portable copy. When Claude Code
+is detected, Hypit Setup installs a managed compatibility copy at `~/.claude/skills/hypit`.
+
+Use its installed launcher: `~/.local/bin/hypit` on macOS or
+`%LOCALAPPDATA%\Hypit\bin\hypit.cmd` on Windows. After installation, restart the Agent and Terminal
+so they inherit the updated PATH. If `hypit` is absent from a GUI Agent's PATH, expand the home or
+environment variable and invoke the installed launcher by its quoted absolute path.
+
+After installing another Agent, use “重新扫描 Agent” in Hypit Setup. This refreshes the detected
+Agent integrations and does not request or rewrite model credentials. Removing an Agent does not
+automatically delete its managed Skill copy during scanning.
 
 Run the installed launcher's `hypit paths --json` to locate `hostState`. For a new project, check for
 the desktop profile at `<hostState>/profiles/desktop-newapi.json`, then select it explicitly:
@@ -60,9 +68,12 @@ without asking the user to enter secrets again or copying secrets into project f
 project selection does not imply missing credentials; use the host profile and configuration status
 to distinguish them. If setup reports missing credentials, open Hypit Setup to configure them.
 
-Rerunning Hypit Setup owns updates to its bundled Distribution and managed Skill. It backs up an
-externally installed Skill before replacing it and restores that backup when desktop integration is
-removed. Integration uninstall retains Runtime Profiles, platform credentials, and video projects.
+Rerunning Hypit Setup owns updates to its bundled Distribution and managed Skill copies. Each target
+has its own backup; Setup backs up an externally installed Skill before replacing it and restores
+that backup when desktop integration is removed. A valid managed legacy copy at
+`~/.codex/skills/hypit` is migrated; unowned or invalid legacy content is left untouched. Treat that
+Codex-specific path only as a legacy/manual-recovery location. Integration uninstall retains Runtime
+Profiles, platform credentials, and video projects.
 
 If the shell cannot find the executable, inspect existing package records:
 

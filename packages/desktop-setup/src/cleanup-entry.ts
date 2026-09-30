@@ -18,7 +18,7 @@ export async function startIntegrationCleanup(): Promise<void> {
   try { await runIntegrationCleanup(process.argv.slice(2), () => removeDesktopIntegration({ paths, platform, home })); }
   catch {
     // Fixed paths only; no environment values, credentials or upstream errors.
-    process.stderr.write(`本机集成清理失败；用户配置、凭据与项目已保留。请检查：\n${paths.launcher}\n${paths.skill}\n`);
+    process.stderr.write(`本机集成清理失败；用户配置、凭据与项目已保留。请检查：\n${paths.launcher}\n通用 Skill：${paths.portableSkill}\nClaude Code 兼容副本：${paths.claudeSkill}\n旧版手动恢复：${paths.legacyCodexSkill}\n`);
     process.exitCode = 1;
   }
 }
