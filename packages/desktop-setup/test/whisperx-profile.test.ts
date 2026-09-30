@@ -112,6 +112,30 @@ test("exact managed configuration preserves existing Profile bytes", async (t) =
   assert.deepEqual(await prepared.dispose(true), []);
 });
 
+test("first activation preserves every unowned byte including numeric precision and JSON spelling", async t => {
+  const f = await fixture(t);
+  const original = '\r\n{\r\n\t"format":"hypit.runtime-local@1",\r\n\t"dataRoot":"../data",\r\n\t"custom":{"huge":9007199254740993123456789,"escape":"\\u4e2d","num":1.2300e+5},\r\n\t"endpoints" : { "other" : {"use":"custom","config":{"value":"\\u0061"}}\t},\r\n\t"bindings" : {\t}\r\n}\r\n';
+  await writeFile(f.profilePath, original);
+  const prepared = await prepareWhisperXProfile(f);
+  const expected = original.replace('"\\u0061"}}', '"\\u0061"}},"whisperx.local":' + JSON.stringify(endpoint))
+    .replace('"bindings" : {', '"bindings" : {"@hypit/whisperx@1#whisperx-alignment":"whisperx.local"');
+  assert.deepEqual(await readFile(prepared.candidatePath), Buffer.from(expected));
+  await prepared.commit();
+  assert.deepEqual(await readFile(f.profilePath), Buffer.from(expected));
+  await prepared.dispose(true);
+});
+
+for (const duplicate of ['"endpoints":{},', '"endpoints":{"whisperx.local":{"use":"custom"},"whisperx.local":' + JSON.stringify(endpoint) + '},']) {
+  test("ambiguous duplicate properties fail without changing the Profile or creating candidates", async t => {
+    const f = await fixture(t);
+    const bytes = '{"format":"hypit.runtime-local@1","dataRoot":"../data",' + duplicate + '"endpoints":{},"bindings":{}}';
+    await writeFile(f.profilePath, bytes);
+    await assert.rejects(prepareWhisperXProfile(f), /WHISPERX_PROFILE_INVALID/);
+    assert.equal(await readFile(f.profilePath, "utf8"), bytes);
+    assert.deepEqual(await readdir(dirname(f.profilePath)), ["desktop-newapi.json"]);
+  });
+}
+
 for (const value of [null, "user-owned", { ...endpoint, pool: "custom" }, { ...endpoint, config: { ...endpoint.config, expectedModel: "large-v3" } }, { ...endpoint, extra: true }]) {
   test(`rejects user-owned endpoint ${JSON.stringify(value)}`, async (t) => {
     const f = await fixture(t);

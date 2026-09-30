@@ -126,6 +126,18 @@ test("WhisperX projection takes each status getter exactly once", async () => {
   assert.doesNotMatch(JSON.stringify(structuredClone(reply)), /SECRET/);
 });
 
+test("cleanup warning is independent of the primary failure and rejects hostile warning values", async () => {
+  const reply = await whisperXController(whisperXService({ state: "failed", code: "WHISPERX_COMMAND_FAILED", cleanupIncomplete: true })).getWhisperXStatus();
+  assert.deepEqual(reply, { ok: true, value: { ...publicWhisperX, state: "failed", errorCode: "WHISPERX_COMMAND_FAILED", cleanupWarning: "WHISPERX_CLEANUP_INCOMPLETE" } });
+  let reads = 0;
+  const once = await whisperXController(whisperXService({ state: "ready", get cleanupIncomplete() { reads++; return reads === 1 ? true : "SECRET"; } })).getWhisperXStatus();
+  assert.equal(reads, 1); assert.equal(once.ok, true); assert.doesNotMatch(JSON.stringify(once), /SECRET/);
+  for (const value of ["SECRET", [true], { toJSON() { throw new Error("SECRET"); } }]) {
+    const bad = await whisperXController(whisperXService({ state: "ready", cleanupIncomplete: value })).getWhisperXStatus();
+    assert.equal(bad.ok, false); assert.doesNotMatch(JSON.stringify(bad), /SECRET/);
+  }
+});
+
 test("WhisperX shares the setup queue, coalesces installs, and outlives removed or failed observers", async () => {
   const calls: string[] = [];
   let release!: () => void;

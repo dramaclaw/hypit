@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, lstat, readFile, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
@@ -8,6 +9,9 @@ import type { DesktopPaths } from "./paths.js";
 import type { PreparedRemoval } from "./skill-install.js";
 import { LOCAL_WHISPERX_ENDPOINT, isWhisperXProfileActivated, prepareWhisperXProfile } from "./whisperx-profile.js";
 import type { PreparedWhisperXProfile } from "./whisperx-profile.js";
+import uvLock from "../uv-lock.json" with { type: "json" };
+import { patchProfileProperty } from "./profile-text.js";
+import { whisperXRecoveryIncomplete } from "./recovery-discovery.js";
 
 /** The CLI has no structured boundary inside Python + ASR + Chinese preparation. */
 export type WhisperXProgressStage = "preparing-runtime" | "preparing-en" | "starting-service" | "ready";
@@ -72,11 +76,38 @@ function programEnvironment(options: WhisperXProgramOptions): NodeJS.ProcessEnv 
 async function validateBundledUv(options: WhisperXProgramOptions): Promise<void> {
   try {
     const uv = options.bundledUv;
+    const arch = options.platform === "darwin" ? "arm64" : "x64";
+    const locked = uvLock.targets[options.platform === "darwin" ? "darwin-arm64" : "win32-x64"];
+    const name = options.platform === "win32" ? "uv.exe" : "uv";
     if (!isAbsolute(uv) || !isAbsolute(options.bundledBin)
       || resolve(uv) !== join(resolve(options.bundledBin), options.platform === "win32" ? "uv.exe" : "uv")
       || !(await lstat(uv)).isFile()
       || await realpath(uv) !== join(await realpath(options.bundledBin), options.platform === "win32" ? "uv.exe" : "uv")) throw new Error();
     await access(uv, options.platform === "win32" ? constants.F_OK : constants.X_OK);
+    const manifestPath = join(dirname(options.bundledBin), "resource-manifest.json");
+    const info = await lstat(manifestPath);
+    if (!info.isFile() || info.size > 16 * 1024 * 1024 || (await lstat(uv)).size !== locked.bytes) throw new Error();
+    const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
+    if (!record(manifest) || manifest.schemaVersion !== 1 || manifest.platform !== options.platform || manifest.arch !== arch
+      || !record(manifest.uv) || manifest.uv.name !== uvLock.name || manifest.uv.version !== uvLock.version
+      || manifest.uv.sha256 !== locked.sha256 || manifest.uv.bytes !== locked.bytes || !record(manifest.files)) throw new Error();
+    const entry = manifest.files[`bin/${name}`];
+    if (!record(entry) || entry.sha256 !== locked.sha256 || entry.bytes !== locked.bytes) throw new Error();
+    const bytes = await readFile(uv);
+    if (bytes.length !== locked.bytes || createHash("sha256").update(bytes).digest("hex") !== locked.sha256) throw new Error();
+    if (options.platform === "darwin") {
+      if (bytes.length < 32 || bytes.readUInt32LE(0) !== 0xfeedfacf || bytes.readUInt32LE(4) !== 0x0100000c || bytes.readUInt32LE(12) !== 2) throw new Error();
+    } else {
+      if (bytes.length < 64 || bytes.toString("ascii", 0, 2) !== "MZ") throw new Error();
+      const offset = bytes.readUInt32LE(0x3c);
+      if (offset < 64 || offset + 26 > bytes.length || bytes.toString("ascii", offset, offset + 4) !== "PE\0\0"
+        || bytes.readUInt16LE(offset + 4) !== 0x8664 || bytes.readUInt16LE(offset + 24) !== 0x20b) throw new Error();
+    }
+    // Only locked bytes may execute, including this bounded version probe.
+    const version = await new Promise<string>((done, reject) => execFile(uv, ["--version"], {
+      shell: false, windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, env: programEnvironment(options),
+    }, (error, stdout) => error ? reject(error) : done(stdout.trim())));
+    if (version !== `uv ${uvLock.version}` && !(version.startsWith(`uv ${uvLock.version} (`) && /^[^\r\n]+\)$/u.test(version))) throw new Error();
   } catch { throw new ProgramError("WHISPERX_BUNDLED_UV_INVALID"); }
 }
 
@@ -124,7 +155,8 @@ async function execute(options: WhisperXProgramOptions, action: Action, profile:
     });
   });
   let value: unknown;
-  try { value = JSON.parse(output); } catch { throw new ProgramError("WHISPERX_INVALID_REPORT"); }
+  try { value = JSON.parse(output); } catch { throw new ProgramError(exitCode === 0 ? "WHISPERX_INVALID_REPORT" : "WHISPERX_COMMAND_FAILED"); }
+  if (exitCode !== 0 && (!record(value) || value.format !== "hypit.cli-programs@1")) throw new ProgramError("WHISPERX_COMMAND_FAILED");
   if (!record(value) || value.format !== "hypit.cli-programs@1" || value.action !== action || value.programCount !== 1
     || typeof value.ok !== "boolean" || typeof value.ready !== "boolean" || !Array.isArray(value.programs)
     || ![0, 1].includes(value.readyCount as number) || value.ready !== (value.readyCount === 1)) throw new ProgramError("WHISPERX_INVALID_REPORT");
@@ -146,7 +178,13 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
   let current: WhisperXProgramStatus = { state: "not-installed" };
   let activeStage: WhisperXProgressStage | undefined;
   let mutationRevision = 0;
+  let operationCleanupIncomplete = false;
   let active: { operation: Operation; promise: Promise<WhisperXProgramStatus>; observers: Set<WhisperXProgressReporter> } | undefined;
+  const existingLog = async (value: WhisperXProgramStatus): Promise<WhisperXProgramStatus> => {
+    if (!value.logPath || (await lstat(value.logPath).catch(() => undefined))?.isFile()) return value;
+    const { logPath: _log, ...status } = value;
+    return status;
+  };
   const failure = (code: WhisperXProgramCode): WhisperXProgramStatus => ({ state: "failed", code,
     ...(activeStage ? { stage: activeStage } : {}), logPath: activeStage === "starting-service" ? paths.serviceLog : paths.installationLog });
   const errorStatus = (error: unknown): WhisperXProgramStatus => {
@@ -182,7 +220,10 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     let committed = false;
     try { await change.commit(); committed = true; }
     catch { await change.rollback(); throw new ProgramError("WHISPERX_STATE_FAILED"); }
-    finally { if ((await change.dispose(committed)).length) throw new ProgramError("WHISPERX_CLEANUP_INCOMPLETE"); }
+    finally {
+      try { operationCleanupIncomplete = (await change.dispose(committed)).length > 0 || operationCleanupIncomplete; }
+      catch { operationCleanupIncomplete = true; }
+    }
   };
   const project = (report: ProgramReport, saved: SavedState | undefined): WhisperXProgramStatus => {
     const program = report.program;
@@ -218,7 +259,9 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
       } catch (error) { result = statusError(error); }
     }
     // A probe started before a mutation cannot overwrite its newer progress, even after completion.
+    result = await existingLog(result);
     if (revision === mutationRevision) current = result;
+    cleanupIncomplete = await whisperXRecoveryIncomplete(options.paths) || cleanupIncomplete;
     if (cleanupIncomplete) current = { ...current, cleanupIncomplete: true, code: current.code ?? "WHISPERX_CLEANUP_INCOMPLETE" };
     return current;
   };
@@ -231,10 +274,9 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
       await validateBundledUv(options);
       candidate = await prepareWhisperXProfile({ profilePath: options.paths.profile, platform: options.platform });
       if (operation === "install") {
-        const document = JSON.parse(await readFile(candidate.candidatePath, "utf8"));
-        document.endpoints[LOCAL_WHISPERX_ENDPOINT].config.alignmentLanguages = ["zh"];
+        const document = patchProfileProperty(await readFile(candidate.candidatePath), ["endpoints", LOCAL_WHISPERX_ENDPOINT, "config", "alignmentLanguages"], ["zh"]);
         const firstPath = `${candidate.candidatePath}.zh.json`;
-        firstPass = prepareFileChange({ path: firstPath }, Buffer.from(`${JSON.stringify(document, null, 2)}\n`), options.platform, 0o600, "profile");
+        firstPass = prepareFileChange({ path: firstPath }, document, options.platform, 0o600, "profile");
         await firstPass.commit();
         stage("preparing-runtime");
         const zh = await execute(options, "prepare", firstPath);
@@ -264,16 +306,18 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     } catch (error) {
       current = publicationAttempted && !committed ? failure("WHISPERX_PROFILE_COMMIT_FAILED") : errorStatus(error);
     } finally {
-      let cleanupIncomplete = false;
-      try {
-        if (firstPass) { cleanupIncomplete = await firstPass.rollback(); cleanupIncomplete = (await firstPass.dispose(false)).length > 0 || cleanupIncomplete; }
-        if (candidate) {
-          if (!committed) cleanupIncomplete = await candidate.rollback() || cleanupIncomplete;
-          cleanupIncomplete = (await candidate.dispose(committed)).length > 0 || cleanupIncomplete;
-        }
-      } catch { cleanupIncomplete = true; }
+      let cleanupIncomplete = operationCleanupIncomplete;
+      for (const [change, published] of [[firstPass, false], [candidate, committed]] as const) {
+        if (!change) continue;
+        try { if (!published) cleanupIncomplete = await change.rollback() || cleanupIncomplete; }
+        catch { cleanupIncomplete = true; }
+        try { cleanupIncomplete = (await change.dispose(published)).length > 0 || cleanupIncomplete; }
+        catch { cleanupIncomplete = true; }
+      }
+      cleanupIncomplete = await whisperXRecoveryIncomplete(options.paths) || cleanupIncomplete;
       if (cleanupIncomplete) current = { ...current, cleanupIncomplete: true, code: current.code ?? "WHISPERX_CLEANUP_INCOMPLETE" };
     }
+    current = await existingLog(current);
     return current;
   };
   const observe = (report: WhisperXProgressReporter | undefined, signal: AbortSignal | undefined, run: NonNullable<typeof active>) => {
@@ -291,6 +335,7 @@ export function createWhisperXProgramService(options: WhisperXProgramOptions): W
     current = operation === "install" ? { state: "preparing", stage: "preparing-runtime" }
       : operation === "start" ? { state: "starting", stage: "starting-service" } : { state: "stopping" };
     mutationRevision++;
+    operationCleanupIncomplete = false;
     activeStage = operation === "stop" ? undefined : current.stage;
     const observers = new Set<WhisperXProgressReporter>();
     const promise = Promise.resolve().then(() => perform(operation)).finally(() => { active = undefined; activeStage = undefined; });

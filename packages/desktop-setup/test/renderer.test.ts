@@ -333,7 +333,7 @@ test("optional local card renders all public states and fixed Chinese actions", 
   const copies: Record<WhisperXPublicStatus["state"], [string, string | undefined]> = {
     "not-installed": ["尚未安装", "安装并启动"], preparing: ["正在准备", undefined],
     prepared: ["已准备，尚未启动", "启动服务"], stopped: ["服务已停止", "启动服务"],
-    starting: ["正在启动服务", undefined], stopping: ["正在停止服务", undefined],
+    starting: ["正在启动服务", "停止服务"], stopping: ["正在停止服务", undefined],
     ready: ["服务已就绪", "停止服务"], mismatch: ["本地配置需要检查", "重试安装"], failed: ["本地操作失败", "重试安装"],
   };
   for (const [name, [copy, action]] of Object.entries(copies)) {
@@ -476,6 +476,35 @@ test("pending stop announces stopping instead of the previous ready stage", asyn
   await tick(); root.querySelector<HTMLButtonElement>("[data-whisperx-action='stop']")!.click();
   assert.equal(root.querySelector("[data-whisperx] [role='status']")?.textContent, "正在停止服务");
   release({ ok: true, value: localStatus("stopped") }); await tick(); dispose();
+});
+
+test("a live starting service can be stopped and explicitly retried after reopening", async () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  let current = localStatus("starting");
+  const calls: string[] = [];
+  const dispose = mountWizard(root, localBridge({
+    getWhisperXStatus: async () => ({ ok: true, value: current }),
+    stopWhisperX: async () => { calls.push("stop"); current = localStatus("stopped"); return { ok: true, value: current }; },
+    startWhisperX: async () => { calls.push("start"); current = localStatus("ready"); return { ok: true, value: current }; },
+  }), storage);
+  await tick();
+  const stop = root.querySelector<HTMLButtonElement>("[data-whisperx-action='stop']");
+  assert.ok(stop); assert.equal(stop.disabled, false); stop.click(); await tick();
+  root.querySelector<HTMLButtonElement>("[data-whisperx-action='start']")!.click(); await tick();
+  assert.deepEqual(calls, ["stop", "start"]); dispose();
+});
+
+test("cleanup warning stays visible beside a primary WhisperX error", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const state = wizardReducer(wizardReducer(initialWizardState(), { type: "success", result }), { type: "whisperx-result",
+    status: localStatus("failed", { errorCode: "WHISPERX_COMMAND_FAILED", cleanupWarning: "WHISPERX_CLEANUP_INCOMPLETE" } as Partial<WhisperXPublicStatus>) });
+  renderWizard(root, state, () => {});
+  const alerts = Array.from(root.querySelectorAll("[data-whisperx] [role='alert']")).map(node => node.textContent);
+  assert.equal(alerts.length, 2);
+  assert.ok(alerts.some(text => text?.includes("临时文件清理未完成")));
+  assert.ok(alerts.some(text => text?.includes("本地准备或服务操作失败")));
 });
 
 test("terminal service failure remains visible after a fresh status loses its error code", async () => {

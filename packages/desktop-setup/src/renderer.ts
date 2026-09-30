@@ -297,6 +297,10 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   if (local.status?.logPath) {
     const log = node("details"); log.append(node("summary", "查看日志位置"), node("code", local.status.logPath)); card.append(log);
   }
+  if (local.status?.cleanupWarning === "WHISPERX_CLEANUP_INCOMPLETE") {
+    const warning = node("p", "临时文件清理未完成，恢复文件已保留。请打开配置目录人工检查；不要删除未知或修改过的文件。", "warning");
+    warning.setAttribute("role", "alert"); card.append(warning);
+  }
   const localActions = node("div", undefined, "actions");
   const localButton = (label: string, operation: WhisperXOperation, style = "secondary") => {
     const control = button(label, { type: `whisperx-${operation}` }, style); control.setAttribute("data-whisperx-action", operation); return control;
@@ -304,7 +308,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
   if (current === "not-installed") localActions.append(localButton("安装并启动", "install", "primary"));
   else if (current === "failed" || current === "mismatch") localActions.append(localButton("重试安装", "install", "primary"));
   else if (current === "prepared" || current === "stopped") localActions.append(localButton("启动服务", "start", "primary"));
-  else if (current === "ready") localActions.append(localButton("停止服务", "stop"));
+  else if (current === "ready" || current === "starting") localActions.append(localButton("停止服务", "stop"));
   localActions.append(localButton("检查状态", "status"));
   card.append(localActions, node("p", "此项可稍后设置。关闭窗口不会取消正在进行的本地准备。", "muted"));
   panel.append(card);

@@ -12,6 +12,7 @@ export type WhisperXPublicStatus = {
   readonly stage?: WhisperXProgressStage;
   readonly logPath?: string;
   readonly errorCode?: WhisperXProgramCode;
+  readonly cleanupWarning?: "WHISPERX_CLEANUP_INCOMPLETE";
 };
 
 /** Submitted from the wizard to the main process. Never include this in an outbound IPC event. */

@@ -5,6 +5,7 @@ import { prepareFileChange, snapshotFile } from "./launcher-install.js";
 import { parseDesktopProfileDocument } from "./profile.js";
 import type { DesktopProfileDocument } from "./profile.js";
 import type { PreparedRemoval } from "./skill-install.js";
+import { patchProfileProperty, validateProfileText } from "./profile-text.js";
 
 export const LOCAL_WHISPERX_ENDPOINT = "whisperx.local";
 export const WHISPERX_ALIGNMENT_CAPABILITY = "@hypit/whisperx@1#whisperx-alignment";
@@ -30,7 +31,7 @@ export async function isWhisperXProfileActivated(options: Pick<WhisperXProfileOp
   const snapshot = await snapshotFile(options.profilePath);
   if (snapshot.bytes === undefined) throw new Error("WHISPERX_PROFILE_REQUIRED");
   let profile;
-  try { profile = parseDesktopProfileDocument(snapshot.bytes); }
+  try { validateProfileText(snapshot.bytes); profile = parseDesktopProfileDocument(snapshot.bytes); }
   catch { throw new Error("WHISPERX_PROFILE_INVALID"); }
   return hasExactActivation(profile);
 }
@@ -40,12 +41,12 @@ export async function prepareWhisperXProfile(options: WhisperXProfileOptions): P
   const before = await snapshotFile(options.profilePath);
   if (before.bytes === undefined) throw new Error("WHISPERX_PROFILE_REQUIRED");
   let profile;
-  try { profile = parseDesktopProfileDocument(before.bytes); }
+  try { validateProfileText(before.bytes); profile = parseDesktopProfileDocument(before.bytes); }
   catch { throw new Error("WHISPERX_PROFILE_INVALID"); }
-  const activated = hasExactActivation(profile);
-  profile.endpoints[LOCAL_WHISPERX_ENDPOINT] = endpoint;
-  profile.bindings[WHISPERX_ALIGNMENT_CAPABILITY] = LOCAL_WHISPERX_ENDPOINT;
-  const bytes = activated ? before.bytes : Buffer.from(`${JSON.stringify(profile, null, 2)}\n`);
+  hasExactActivation(profile);
+  let bytes = before.bytes;
+  if (!Object.hasOwn(profile.endpoints, LOCAL_WHISPERX_ENDPOINT)) bytes = patchProfileProperty(bytes, ["endpoints", LOCAL_WHISPERX_ENDPOINT], endpoint);
+  if (!Object.hasOwn(profile.bindings, WHISPERX_ALIGNMENT_CAPABILITY)) bytes = patchProfileProperty(bytes, ["bindings", WHISPERX_ALIGNMENT_CAPABILITY], LOCAL_WHISPERX_ENDPOINT);
   const candidatePath = `${options.profilePath}.whisperx-${randomUUID()}.json`;
   const candidate = prepareFileChange({ path: candidatePath }, bytes, options.platform, 0o600, "profile");
   let candidateSnapshot;

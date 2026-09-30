@@ -2,7 +2,37 @@
 
 日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。本次 WhisperX 构建见下一节；其余章节为保留的历史记录。
 
-## 本次 Guided WhisperX 最终集成
+## 本次 Guided WhisperX 最终审查修复
+
+基于 `5fdd3bde` 修复 5 项 Important：真实 Distribution CLI 复用包内锁定依赖，不再为已捆绑的 `cjs-module-lexer` 运行系统 npm；运行前验证 uv 锁定版本、资源清单、大小、SHA-256 和原生架构；`starting` 非 pending 时可停止后重试；首次 Profile 激活仅补入拥有的 Endpoint/Binding，保留其余原文字节；候选文件/恢复目录在重启后仍触发独立固定清理警告，且不覆盖主要错误。
+
+新交付物在 `release/guided-whisperx-fixes-20260930-2122/`，旧 release、DMG/EXE、校验文件和用户应用未改动：
+
+| 文件 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `Hypit-Setup-0.1.0-arm64.dmg` | 245809109 | `9ed0bb3616432392b42a33c060866380b507e05d09c1dd2e57313633187e3b73` |
+| `Hypit-Setup-0.1.0-x64.exe` | 216392132 | `b5dd058b264171b80e1bae11b57bb286bbb4c7f401f7245c5a5f069f6b1829b4` |
+
+| 验证 | 本次结果 |
+| --- | --- |
+| 每组回归 RED → GREEN | CLI、uv 替换、Profile 字节、清理重启/IPC/UI 均先观察失败后修复 |
+| `pnpm check` / `git diff --check` | 通过 |
+| `pnpm test` | 1765 项：1740 通过、25 条件跳过、0 失败 |
+| `node --import tsx --test packages/desktop-setup/test/*.test.ts` | 426 项：424 通过、2 条件跳过、0 失败 |
+| `pnpm --filter @hypit/desktop-setup build` | 通过；根目录没有单独的 `build` script |
+| 新 DMG 实际挂载 / 新 EXE 实际双层解包 | 应用、ASAR、清单、文件 hash、uv 锁、架构、媒体能力、许可证、Skill 与 WhisperX 服务锁全部通过 |
+| 相邻 `.sha256` | 两项均 `OK` |
+| 实际 macOS 包内 CLI，无 npm | 隔离 HOME/hostState，PATH 仅包内 bin；已越过 `host.prepare` 并实际运行锁定 uv；`UV_OFFLINE=1` / `UV_PYTHON_DOWNLOADS=never` 在缺少 Python 的可控边界停止，生成真实 install.log，无模型下载 |
+| 实际包内 CLI 受控回归 | 同一包内 Electron/CLI、隔离 HOME、PATH 仅受控 uv，达到 uv 边界，1/1 通过 |
+| 密钥检查 | 15 个变更源码文件、10807 个包内文本、16 个 ASAR 文本条目模式扫描均 0 命中；`pre-commit` / `gitleaks` 未安装，不能替代专业 secret scanner |
+
+25 项条件跳过与此前相同；其中 2 项 staged-media 没有重新以 staging 测试入口执行，但本次最终 DMG/EXE 的 `inspectApp` 已调用同一媒体检查，macOS 真实执行 FFmpeg/FFprobe，Windows 检查静态架构/选项/哈希。
+
+首次 DMG 和 Windows NSIS 打包遇到磁盘空间不足。复用本轮已完成的应用本体重新生成，最终构建退出 0。只删除本轮重复 staging/解包应用，以及经明确批准的 `.superpowers/sdd/final-fixes-preserved-20260930-2122/resources`（724 MiB 的可再生中间 staging）；后者不可撤回删除，但可从 Distribution 重建。没有删除 `task-6-preserved`、任何旧 release、旧安装器/校验文件、用户安装或用户数据。本次解包副本均已清理，交付安装器保留。DMG 检查后普通 detach 报忙，已仅对本轮只读挂载执行强制 detach 并成功。
+
+依然未下载真实 WhisperX 模型、执行逐词转写或付费请求，未验证原生 Windows 安装/运行/凭据/卸载，也未签名、公证或发布。证据与 TDD 日志见 `.superpowers/sdd/final-fixes-report.md`；其余章节保留历史结果。
+
+## 此前 Guided WhisperX 最终集成
 
 基于 Tasks 1–5 的 `63a32201`，补充普通卸载保留 Program Home、所有模型缓存与本地 Profile 绑定的界面/原生提示和回归测试。测试也保留未知文件、共享缓存符号链接及绑定到 `newapi.personal` 的未来 Profile。最终安装包检查现在明确要求 CLI、WhisperX Provider、Python 服务、`pyproject.toml` 和冻结的 `uv.lock`。
 

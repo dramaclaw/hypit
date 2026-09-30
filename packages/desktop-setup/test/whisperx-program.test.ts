@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import fs, { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -11,6 +13,8 @@ import { createDesktopProfile } from "../src/profile.js";
 import { desktopPaths, whisperXProgramPaths } from "../src/paths.js";
 import { createWhisperXProgramService } from "../src/whisperx-program.js";
 import type { WhisperXProgramOptions, WhisperXProgressStage } from "../src/whisperx-program.js";
+import uvLock from "../uv-lock.json" with { type: "json" };
+import { executable } from "./resource-fixtures.js";
 
 // Actual child processes exercise argv, environment, output limits and lifetime.
 const fakeCli = `
@@ -35,6 +39,7 @@ if (control.hang === action) {
   await new Promise(() => setInterval(() => {}, 1000));
 }
 if (control.fail === action) { console.error('SECRET download failed'); process.exit(3); }
+if (control.cliError === action) { console.log(JSON.stringify({ error: 'SECRET host preparation failed' })); process.exit(1); }
 if (action === 'prepare') await writeFile(join(root, 'cache'), JSON.stringify(profile.endpoints['whisperx.local'].config.alignmentLanguages));
 if (action === 'up') { state = control.upState || 'ready'; await writeFile(join(root, 'fake-state'), state); }
 if (action === 'down') { state = 'down'; await writeFile(join(root, 'fake-state'), state); }
@@ -46,23 +51,37 @@ console.log(control.invalid ? 'SECRET invalid JSON' : JSON.stringify({ format: '
 if (control.nonzero === action) process.exitCode = 1;
 `;
 
-async function fixture(t: TestContext, control: Record<string, unknown> = {}) {
+async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = "darwin") {
   const root = await mkdtemp(join(tmpdir(), "hypit-whisperx-program-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const paths = desktopPaths({ platform: "darwin", home: root, appData: root });
   const bundledBin = join(root, "resources", "bin");
-  const bundledUv = join(bundledBin, "uv");
+  const bundledUv = join(bundledBin, platform === "darwin" ? "uv" : "uv.exe");
   const cliEntry = join(root, "resources", "hypit.mjs");
   await mkdir(dirname(paths.profile), { recursive: true });
   await mkdir(bundledBin, { recursive: true });
-  await writeFile(bundledUv, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const uvBytes = executable(platform);
+  const expected = uvLock.targets[platform === "darwin" ? "darwin-arm64" : "win32-x64"];
+  const original = { ...expected };
+  Object.assign(expected, { sha256: createHash("sha256").update(uvBytes).digest("hex"), bytes: uvBytes.length });
+  t.after(() => Object.assign(expected, original));
+  await writeFile(bundledUv, uvBytes, { mode: 0o755 });
+  await writeFile(join(root, "resources", "resource-manifest.json"), JSON.stringify({ schemaVersion: 1, platform, arch: platform === "darwin" ? "arm64" : "x64",
+    uv: { name: uvLock.name, version: uvLock.version, sha256: expected.sha256, bytes: expected.bytes }, files: { [platform === "darwin" ? "bin/uv" : "bin/uv.exe"]: { sha256: expected.sha256, bytes: expected.bytes } } }));
+  const originalExec = childProcess.execFile;
+  const uvVersion = t.mock.method(childProcess, "execFile", ((...args: any[]) => {
+    if (args[0] === bundledUv) { args.at(-1)(null, "uv 0.12.20 (fixture)", ""); return; }
+    return (originalExec as any)(...args);
+  }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  t.after(() => { uvVersion.mock.restore(); syncBuiltinESMExports(); });
   await writeFile(cliEntry, fakeCli);
   const bytes = Buffer.from(JSON.stringify(createDesktopProfile({ baseUrl: "https://example.test/v1" })));
   await writeFile(paths.profile, bytes);
   const configure = (value: Record<string, unknown>) => writeFile(join(paths.hostState, "fixture.json"), JSON.stringify(value));
   await configure(control);
   const calls = async (): Promise<any[]> => (await readFile(join(paths.hostState, "calls.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-  const options: WhisperXProgramOptions = { paths, platform: "darwin", electronExecutable: process.execPath, cliEntry, bundledBin, bundledUv,
+  const options: WhisperXProgramOptions = { paths, platform, electronExecutable: process.execPath, cliEntry, bundledBin, bundledUv,
     env: { PATH: "/inherited/bin", HOME: root, UV: "SECRET", NODE_OPTIONS: "SECRET", API_KEY: "SECRET" }, timeoutMs: 5000 };
   return { ...options, root, bytes, configure, calls, options, service: createWhisperXProgramService(options) };
 }
@@ -242,6 +261,14 @@ test("malformed output and Profile conflicts are sanitized", async (t) => {
   assert.equal((await f.calls()).length, before);
 });
 
+test("early CLI failure is a command failure and never advertises a nonexistent Program log", async t => {
+  const f = await fixture(t, { cliError: "prepare" });
+  const result = await f.service.installAndStart();
+  assert.equal(result.code, "WHISPERX_COMMAND_FAILED");
+  assert.equal(result.logPath, undefined);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+});
+
 test("a standalone failed status probe does not inherit a completed installation's ready stage", async (t) => {
   const f = await fixture(t);
   const installed = await f.service.installAndStart();
@@ -274,6 +301,62 @@ for (const invalid of ["relative", "outside", "symlink", "directory", "non-execu
     assert.deepEqual(await readFile(f.paths.profile), f.bytes);
   });
 }
+
+for (const invalid of ["shell", "hash", "size", "version", "arch", "manifest-hash", "manifest-symlink"]) test(`rejects substituted bundled uv ${invalid} before CLI execution`, async t => {
+  const f = await fixture(t);
+  const path = join(dirname(f.bundledBin), "resource-manifest.json");
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  if (invalid === "shell") await writeFile(f.bundledUv, "#!/bin/sh\nexit 0\n");
+  if (invalid === "hash") { const bytes = await readFile(f.bundledUv); bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1; await writeFile(f.bundledUv, bytes); }
+  if (invalid === "size") await writeFile(f.bundledUv, Buffer.concat([await readFile(f.bundledUv), Buffer.from("x")]));
+  if (invalid === "version") manifest.uv.version = "0.0.0";
+  if (invalid === "arch") manifest.arch = "x64";
+  if (invalid === "manifest-hash") manifest.uv.sha256 = "0".repeat(64);
+  await writeFile(path, JSON.stringify(manifest));
+  if (invalid === "manifest-symlink") { const target = `${path}.outside`; await copyFile(path, target); await rm(path); await symlink(target, path); }
+  const result = await f.service.installAndStart();
+  assert.equal(result.code, "WHISPERX_BUNDLED_UV_INVALID");
+  assert.equal((await f.calls()).length, 0);
+});
+
+test("a wrong uv executable version fails before the CLI", async t => {
+  const f = await fixture(t);
+  t.mock.method(childProcess, "execFile", ((...args: any[]) => { args.at(-1)(null, "uv 0.0.0", ""); }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  assert.equal((await f.service.installAndStart()).code, "WHISPERX_BUNDLED_UV_INVALID");
+  assert.equal((await f.calls()).length, 0);
+});
+
+test("native architecture is validated even if the fixture digest matches", async t => {
+  const f = await fixture(t);
+  const bytes = await readFile(f.bundledUv); bytes.writeUInt32LE(0x01000007, 4);
+  await writeFile(f.bundledUv, bytes);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  uvLock.targets["darwin-arm64"].sha256 = sha256;
+  const path = join(dirname(f.bundledBin), "resource-manifest.json");
+  const manifest = JSON.parse(await readFile(path, "utf8")); manifest.uv.sha256 = sha256; manifest.files["bin/uv"].sha256 = sha256;
+  await writeFile(path, JSON.stringify(manifest));
+  let probes = 0;
+  t.mock.method(childProcess, "execFile", ((...args: any[]) => { probes++; args.at(-1)(null, "uv 0.12.20", ""); }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  assert.equal((await f.service.installAndStart()).code, "WHISPERX_BUNDLED_UV_INVALID");
+  assert.equal(probes, 0); assert.equal((await f.calls()).length, 0);
+});
+
+test("Windows uv enforces the PE x64 lock and rejects rehashed non-PE bytes before execution", async t => {
+  const f = await fixture(t, {}, "win32");
+  assert.equal((await f.service.installAndStart()).state, "ready");
+  const before = (await f.calls()).length;
+  const bytes = await readFile(f.bundledUv); bytes.writeUInt16LE(0xaa64, bytes.readUInt32LE(0x3c) + 4);
+  await writeFile(f.bundledUv, bytes);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  uvLock.targets["win32-x64"].sha256 = sha256;
+  const path = join(dirname(f.bundledBin), "resource-manifest.json");
+  const manifest = JSON.parse(await readFile(path, "utf8")); manifest.uv.sha256 = sha256; manifest.files["bin/uv.exe"].sha256 = sha256;
+  await writeFile(path, JSON.stringify(manifest));
+  assert.equal((await f.service.start()).code, "WHISPERX_BUNDLED_UV_INVALID");
+  assert.equal((await f.calls()).length, before);
+});
 
 test("bundled uv is checked again before each mutating subprocess", async (t) => {
   const f = await fixture(t);
@@ -385,6 +468,11 @@ test("changed candidate cleanup preserves user bytes and returns a recovery warn
     return readFileSync(join(f.paths.hostState, "calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   }
   assert.equal(result.cleanupIncomplete, true);
+  assert.equal(result.code, "WHISPERX_COMMAND_FAILED");
+  await f.configure({ fail: "status" });
+  const reopened = await createWhisperXProgramService(f.options).status();
+  assert.equal(reopened.cleanupIncomplete, true, "a new service discovers the retained candidate and its recovery");
+  assert.equal(reopened.code, "WHISPERX_COMMAND_FAILED");
   assert.match(await readFile(candidatePath, "utf8"), /\n $/u);
   assert.deepEqual(await readFile(f.paths.profile), f.bytes);
 });

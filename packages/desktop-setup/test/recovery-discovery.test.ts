@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { desktopPaths } from "../src/paths.js";
-import { transactionRecoveryWarnings } from "../src/recovery-discovery.js";
+import { transactionRecoveryWarnings, whisperXRecoveryIncomplete } from "../src/recovery-discovery.js";
 
 test("transaction recovery discovery reports only exact approved siblings in sorted order", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "hypit-recovery-scan-"));
@@ -48,4 +48,24 @@ test("transaction recovery discovery caps per-parent work and result count", asy
   assert.ok(warnings.length <= 9);
   assert.ok(warnings.some(item => item.code === "profile" && item.path === undefined));
   assert.ok(warnings.every(item => item.reason === "CLEANUP_INCOMPLETE"));
+});
+
+test("WhisperX recovery scans only exact siblings, never follows candidate links, and is bounded", async t => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-whisperx-recovery-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: home });
+  await mkdir(dirname(paths.profile), { recursive: true });
+  for (const name of [".whisperx-user.json", ".whisperx-00000000-0000-0000-0000-000000000000.json", ".recovery-user-edits"]) {
+    await writeFile(paths.profile + name, "unrelated");
+  }
+  assert.equal(await whisperXRecoveryIncomplete(paths), false);
+  const candidate = `${paths.profile}.whisperx-00000000-0000-4000-8000-000000000001.json`;
+  await symlink(join(home, "nonexistent-secret-target"), candidate);
+  assert.equal(await whisperXRecoveryIncomplete(paths), true);
+  await rm(candidate);
+  await mkdir(`${candidate}.zh.json.recovery-A1b2C3`);
+  assert.equal(await whisperXRecoveryIncomplete(paths), true);
+  await rm(`${candidate}.zh.json.recovery-A1b2C3`, { recursive: true });
+  for (let index = 0; index < 260; index++) await writeFile(join(dirname(paths.profile), `unrelated-${index}`), "keep");
+  assert.equal(await whisperXRecoveryIncomplete(paths), true, "an incomplete bounded scan cannot clear the warning");
 });

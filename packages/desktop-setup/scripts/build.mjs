@@ -11,7 +11,7 @@ await build({ absWorkingDir: root, entryPoints: ["src/main.ts"], outfile: `${out
   // Native/external modules come from the target-locked runtime resources.
   banner: { js: 'if (process.resourcesPath) module.paths.unshift(require("node:path").join(process.resourcesPath, "runtime", "node_modules"));' },
   supported: { "dynamic-import": false },
-  external: ["electron", "koffi", "ali-oss", "yaml"],
+  external: ["electron", "koffi", "ali-oss", "yaml", "typescript"],
   plugins: [{ name: "credential-script-location", setup(context) {
     // Preserve the OS adapter's resource-relative lookup when flattening ESM into CJS.
     context.onLoad({ filter: /credential-store-os[/\\]src[/\\]windows\.ts$/ }, async ({ path }) => ({ loader: "ts",

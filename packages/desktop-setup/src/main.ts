@@ -129,14 +129,17 @@ function publicWhisperXStatus(value: unknown, logs: SetupServices["whisperXLogs"
   const rawStage: unknown = Reflect.get(value, "stage");
   const rawCode: unknown = Reflect.get(value, "code");
   const rawLog: unknown = Reflect.get(value, "logPath");
+  const rawCleanup: unknown = Reflect.get(value, "cleanupIncomplete");
   const state = whisperXStates.find(item => item === rawState);
   const stage = whisperXStages.find(item => item === rawStage);
   const errorCode = whisperXCodes.find(item => item === rawCode);
   if (!state || (rawStage !== undefined && !stage) || (rawCode !== undefined && !errorCode)
+    || (rawCleanup !== undefined && typeof rawCleanup !== "boolean")
     || (rawLog !== undefined && (typeof rawLog !== "string" || rawLog.length > 4096 || /[\u0000-\u001f\u007f]/u.test(rawLog)
       || !isAbsolute(rawLog) || (rawLog !== logs?.[0] && rawLog !== logs?.[1])))) throw new Error("Invalid WhisperX status");
   return { state, model: "small", device: "cpu", compute: "int8", languages: ["zh", "en"],
-    ...(stage ? { stage } : {}), ...(errorCode ? { errorCode } : {}), ...(rawLog === undefined ? {} : { logPath: rawLog as string }) };
+    ...(stage ? { stage } : {}), ...(errorCode ? { errorCode } : {}), ...(rawLog === undefined ? {} : { logPath: rawLog as string }),
+    ...(rawCleanup === true ? { cleanupWarning: "WHISPERX_CLEANUP_INCOMPLETE" as const } : {}) };
 }
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;

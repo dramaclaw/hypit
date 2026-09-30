@@ -2,6 +2,7 @@ import { lstat, opendir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { DiagnosticItem } from "./contracts.js";
 import type { DesktopPaths } from "./paths.js";
+import { whisperXProgramPaths } from "./paths.js";
 
 const MAX_DIRECTORY_ENTRIES = 256;
 const MAX_RECOVERIES_PER_PATH = 3;
@@ -15,7 +16,7 @@ function warning(root: RecoveryRoot, path?: string): DiagnosticItem {
 }
 
 /** Inspect a fixed parent only; recovery contents and symlink targets are never opened. */
-async function warningsAt(root: RecoveryRoot): Promise<DiagnosticItem[]> {
+async function warningsAt(root: RecoveryRoot, whisperXCandidates = false): Promise<DiagnosticItem[]> {
   const parent = dirname(root.path);
   const prefix = `${basename(root.path)}.recovery-`;
   const names: string[] = [];
@@ -27,11 +28,13 @@ async function warningsAt(root: RecoveryRoot): Promise<DiagnosticItem[]> {
     let inspected = 0;
     for await (const entry of directory) {
       if (++inspected > MAX_DIRECTORY_ENTRIES) { incomplete = true; break; }
-      if (!entry.name.startsWith(prefix) || !recoverySuffix.test(entry.name.slice(prefix.length))) continue;
+      const candidate = whisperXCandidates && entry.name.startsWith(`${basename(root.path)}.whisperx-`)
+        && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.json(?:\.zh\.json)?(?:\.recovery-[A-Za-z0-9]{6})?$/u.test(entry.name.slice(`${basename(root.path)}.whisperx-`.length));
+      if (!candidate && (!entry.name.startsWith(prefix) || !recoverySuffix.test(entry.name.slice(prefix.length)))) continue;
       const path = join(parent, entry.name);
       try {
         const info = await lstat(path);
-        if (info.isDirectory() || info.isSymbolicLink()) names.push(entry.name);
+        if (candidate || info.isDirectory() || info.isSymbolicLink()) names.push(entry.name);
       } catch { incomplete = true; }
     }
   } catch (error) {
@@ -44,6 +47,13 @@ async function warningsAt(root: RecoveryRoot): Promise<DiagnosticItem[]> {
   return paths;
 }
 
+/** Surviving, exactly named transaction artifacts are durable warning evidence; never open or remove them. */
+export async function whisperXRecoveryIncomplete(paths: Pick<DesktopPaths, "profile" | "hostState">): Promise<boolean> {
+  const warnings = await Promise.all([warningsAt({ path: paths.profile, code: "profile" }, true),
+    warningsAt({ path: whisperXProgramPaths(paths).state, code: "profile" })]);
+  return warnings.some(items => items.length > 0);
+}
+
 /** Matches only the four file transaction targets used by prepareFileChange. */
 export async function transactionRecoveryWarnings(options: { readonly paths: DesktopPaths; readonly home: string;
   readonly platform: "darwin" | "win32" }): Promise<readonly DiagnosticItem[]> {
@@ -53,7 +63,7 @@ export async function transactionRecoveryWarnings(options: { readonly paths: Des
     ...(options.platform === "darwin" ? [{ path: join(options.home, ".zprofile"), code: "launcher" as const }] : []),
     { path: options.paths.profile, code: "profile" },
   ];
-  const results = (await Promise.all(roots.map(warningsAt))).flat();
+  const results = (await Promise.all(roots.map(root => warningsAt(root)))).flat();
   const seen = new Set<string>();
   return results.filter(item => {
     const key = `${item.code}\0${item.path ?? ""}`;
