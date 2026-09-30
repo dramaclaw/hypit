@@ -42,7 +42,7 @@ test("Agent refresh joins the controller queue and returns projected status plus
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const controller = createSetupController({
-    getStatus: async () => { calls.push("status"); return result; },
+    getStatus: async () => { calls.push("status"); return { ...result, diagnostics: [{ code: "launcher", label: "命令入口", status: "pass" }] }; },
     commit: async () => { calls.push("commit"); await gate; return result; },
     install: async () => { calls.push("install"); },
     refreshAgents: async () => { calls.push("refresh"); },
@@ -58,7 +58,7 @@ test("Agent refresh joins the controller queue and returns projected status plus
   release();
   await submit;
   assert.deepEqual(await refresh, { ok: true, value: { ...result, diagnostics: [{ code: "launcher", label: "命令入口", status: "pass" }] } });
-  assert.deepEqual(calls, ["commit", "install", "diagnose", "refresh", "status", "diagnose"]);
+  assert.deepEqual(calls, ["commit", "install", "diagnose", "refresh", "status"]);
   assert.deepEqual(progress.slice(-2), ["installing-skill", "diagnosing"]);
 });
 
@@ -123,6 +123,22 @@ test("committed integration warnings survive submit and refresh through the safe
       assert.doesNotMatch(JSON.stringify(reply), /SECRET/);
     }
   }
+});
+
+test("Agent rescan uses local status diagnostics and never calls credential or network-dependent services", async () => {
+  const calls: string[] = [];
+  const local = { code: "skill" as const, label: "Claude Code Skill" as const, target: "claude" as const,
+    status: "pass" as const, path: "/claude/skill" };
+  const cleanup = { code: "skill" as const, label: "通用 Agent Skill" as const, target: "portable" as const,
+    status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const, path: "/fixed/recovery" };
+  const forbidden = async () => { calls.push("credential-dependent"); throw new Error("Credential/network services must not run"); };
+  const controller = createSetupController({ getStatus: async () => { calls.push("local-status"); return { ...result, diagnostics: [local, cleanup] }; },
+    refreshAgents: async () => { calls.push("refresh"); return { diagnostics: [cleanup] }; },
+    commit: forbidden, install: forbidden, diagnose: forbidden, clear: forbidden, openConfig: forbidden });
+  const reply = await controller.refreshAgentIntegration();
+  assert.equal(reply.ok, true);
+  assert.deepEqual(calls, ["refresh", "local-status"]);
+  if (reply.ok) assert.deepEqual(reply.value.diagnostics, [local, cleanup]);
 });
 
 test("failure serialization is total for hostile getters, revoked proxies, and primitive throws", () => {

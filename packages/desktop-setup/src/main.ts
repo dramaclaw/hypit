@@ -234,7 +234,9 @@ export function createSetupController(services: SetupServices) {
       const warnings = integrationDiagnostics(await services.refreshAgents());
       emit({ kind: "stage", stage: "diagnosing" });
       const result = publicResult(await services.getStatus());
-      return { ...result, diagnostics: [...warnings, ...publicDiagnostics(await services.diagnose())] };
+      // Rescanning is local maintenance: full diagnostics also resolve credentials and probe services.
+      return { ...result, diagnostics: [...result.diagnostics, ...warnings.filter(warning => !result.diagnostics.some(item =>
+        (["code", "target", "status", "path", "reason"] as const).every(key => item[key] === warning[key])))] };
     }),
     openConfigDirectory: () => enqueue(services.openConfig),
     clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
