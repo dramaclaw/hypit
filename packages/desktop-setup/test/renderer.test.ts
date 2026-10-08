@@ -2,12 +2,45 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { parseHTML } from "linkedom";
-import { canSubmit, initialWizardState, persistedWizardState, renderWizard, mountWizard, stageCopy, wizardReducer, EXAMPLE_PROMPT } from "../src/renderer.js";
+import { canSubmit, initialWizardState, persistedWizardState, renderWizard, mountWizard, setupInput, stageCopy, wizardReducer, EXAMPLE_PROMPT } from "../src/renderer.js";
 import type { SetupProgress, SetupResult } from "../src/contracts.js";
 import type { SetupBridge, SetupReply } from "../src/ipc.js";
 
 const fields = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" };
+const defaults = { baseUrl: "https://llm-gateway-test.cdnfg.com/v1", endpoint: "oss-cn-chengdu.aliyuncs.com", bucket: "claymore-llm-relay" };
 const result: SetupResult = { configured: true, modelCount: 2, relayVerified: true, profilePath: "/profile", skillTargets: [{ id: "portable", label: "通用 Agent Skill", path: "/skill", detectedAgents: ["codex"] }], launcherPath: "/launcher", diagnostics: [] };
+
+test("fresh setup prepopulates editable NewAPI and OSS values, not secrets", () => {
+  const initial = initialWizardState();
+  for (const [field, value] of Object.entries(defaults)) assert.equal(initial.fields[field as keyof typeof defaults], value);
+  for (const field of ["apiKey", "accessKeyId", "accessKeySecret"] as const) assert.equal(initial.fields[field], "");
+  const changed = wizardReducer(initial, { type: "field", field: "bucket", value: "team-bucket" });
+  assert.equal(changed.fields.bucket, "team-bucket");
+  assert.equal(persistedWizardState(changed).bucket, "team-bucket");
+  assert.deepEqual(setupInput(changed).relay, { enabled: true, endpoint: defaults.endpoint,
+    bucket: "team-bucket", accessKeyId: "", accessKeySecret: "" });
+  assert.equal(JSON.stringify(persistedWizardState(changed)).includes("apiKey"), false);
+});
+
+test("valid custom draft wins while missing, empty, or invalid fields use defaults", () => {
+  const custom = initialWizardState({ baseUrl: "https://custom.example/v1", endpoint: "oss.example", bucket: "team-bucket", apiKey: "unsafe" });
+  assert.deepEqual({ baseUrl: custom.fields.baseUrl, endpoint: custom.fields.endpoint, bucket: custom.fields.bucket },
+    { baseUrl: "https://custom.example/v1", endpoint: "oss.example", bucket: "team-bucket" });
+  assert.equal(custom.fields.apiKey, "");
+  const recovered = initialWizardState({ baseUrl: "", endpoint: "https://user:pass@oss.example", bucket: "BAD_BUCKET" });
+  assert.deepEqual({ baseUrl: recovered.fields.baseUrl, endpoint: recovered.fields.endpoint, bucket: recovered.fields.bucket }, defaults);
+});
+
+test("settings inputs display real default values and allow editing", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const state = wizardReducer(initialWizardState(), { type: "begin" });
+  renderWizard(root, state, () => {});
+  for (const [field, value] of Object.entries(defaults)) {
+    assert.equal(root.querySelector<HTMLInputElement>(`#${field}`)?.value, value);
+    assert.equal(root.querySelector<HTMLInputElement>(`#${field}`)?.disabled, false);
+  }
+});
 
 test("integration removal copy explicitly retains speech resources and Profile bindings", () => {
   const { document } = parseHTML("<main id='app'></main>");

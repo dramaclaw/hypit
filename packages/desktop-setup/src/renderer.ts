@@ -28,6 +28,11 @@ export type WizardAction =
   | { type: "failure"; error: SetupFailure };
 type UiAction = WizardAction | { type: "submit" | "diagnostics" | "open-config" | "clear" | "remove-integration" };
 const agentLabels = { codex: "Codex", "claymore-piko": "Claymore Piko", cursor: "Cursor", "claude-code": "Claude Code" } as const;
+const defaultAddresses = {
+  baseUrl: "https://llm-gateway-test.cdnfg.com/v1",
+  endpoint: "oss-cn-chengdu.aliyuncs.com",
+  bucket: "claymore-llm-relay",
+} as const;
 const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId: false, accessKeySecret: false });
 
 function resumableAddress(value: unknown, bare = false): string {
@@ -42,8 +47,10 @@ function resumableAddress(value: unknown, bare = false): string {
 export function initialWizardState(draft: unknown = {}): WizardState {
   const item = draft && typeof draft === "object" ? draft as Record<string, unknown> : {};
   return { screen: item.screen === "settings" ? "settings" : "welcome", fields: {
-    baseUrl: resumableAddress(item.baseUrl), apiKey: "", endpoint: resumableAddress(item.endpoint, true),
-    bucket: typeof item.bucket === "string" && /^[a-z0-9-]{1,63}$/u.test(item.bucket) ? item.bucket : "", accessKeyId: "", accessKeySecret: "",
+    baseUrl: resumableAddress(item.baseUrl) || defaultAddresses.baseUrl, apiKey: "",
+    endpoint: resumableAddress(item.endpoint, true) || defaultAddresses.endpoint,
+    bucket: typeof item.bucket === "string" && /^[a-z0-9-]{1,63}$/u.test(item.bucket) ? item.bucket : defaultAddresses.bucket,
+    accessKeyId: "", accessKeySecret: "",
   }, visible: hidden(), stage: "validating", confirmClear: false, returnScreen: "settings" };
 }
 
@@ -182,7 +189,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
     if (state.result) appendAgentTargets();
     const form = node("form");
     const labels: Record<keyof Fields, string> = { baseUrl: "NewAPI 地址", apiKey: "NewAPI API Key", endpoint: "OSS Endpoint", bucket: "OSS Bucket", accessKeyId: "OSS AccessKey ID", accessKeySecret: "OSS AccessKey Secret" };
-    const placeholders: Partial<Record<keyof Fields, string>> = { baseUrl: "https://newapi.example.com", endpoint: "oss-cn-hangzhou.aliyuncs.com", bucket: "my-video-bucket" };
+    const placeholders: Partial<Record<keyof Fields, string>> = { ...defaultAddresses };
     for (const field of Object.keys(labels) as (keyof Fields)[]) {
       const row = node("div", undefined, "field");
       const label = node("label", labels[field]); label.htmlFor = field;
