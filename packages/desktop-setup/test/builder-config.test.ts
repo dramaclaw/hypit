@@ -56,7 +56,10 @@ test("final application inspection requires packaged WhisperX frozen lock, provi
   const { checkWhisperXRuntime } = await loadScript("package.mjs");
   assert.equal(typeof checkWhisperXRuntime, "function");
   const paths = ["bin/hypit.mjs", "packages/provider-whisperx-local/src/program.ts",
-    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock", "services/whisperx/src/hypit_whisperx_service/application.py"];
+    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock",
+    "services/whisperx/src/hypit_whisperx_service/application.py",
+    "services/whisperx/src/hypit_whisperx_service/prepare.py",
+    "services/whisperx/src/hypit_whisperx_service/resources.py"];
   for (const path of paths) {
     const absolute = join(directory, "runtime/node_modules/@hypit/hypit", path);
     await mkdir(dirname(absolute), { recursive: true }); await writeFile(absolute, "fixture");

@@ -34,8 +34,12 @@ HYPIT_WHISPERX_ALIGNMENT_LANGUAGES="zh en" services/whisperx/.venv/bin/hypit-whi
 HYPIT_WHISPERX_ALIGNMENT_LANGUAGES="zh en" services/whisperx/.venv/bin/hypit-whisperx-check --models
 ```
 
-`hypit-whisperx-prepare` explicitly prepares the selected ASR model, language alignment weights and
-NLTK sentence data. `hypit-whisperx-check --models` reads those resources without downloading.
+`hypit-whisperx-prepare` explicitly prepares the selected ASR model and language alignment weights.
+For the desktop default (`zh` and `en`), it creates Hypit's minimal English Punkt parameters locally;
+neither a previous user NLTK cache nor NLTK's data server is needed. These parameters are authored by
+Hypit because NLTK's pretrained `punkt_tab` data has unclear redistribution terms. Sentence splits
+can differ from NLTK's pretrained English model, while the acoustic word timing still comes from
+WhisperX. `hypit-whisperx-check --models` reads the prepared resources without downloading.
 The service loads prepared resources only. Hugging Face calls use local-files-only APIs; the
 pinned WhisperX torchaudio and NLTK branches have no equivalent switch, so this dedicated inference
 process replaces their downloader entry points with an error. Preparation runs in a separate process
@@ -91,25 +95,13 @@ Transcripts and audio content are not included in these service progress entries
 after ASR loading; it does not report all language caches as ready. A first request can load a
 prepared aligner into memory, but cannot download it.
 
-## Preparing sentence data through a proxy
+## Sentence data
 
-NLTK's downloader refuses a proxied request unless the operator explicitly trusts that proxy:
-it cannot enforce its direct-connection address checks through a proxy. This can stop preparation
-while fetching the NLTK data index, even when uv and Hugging Face downloads work.
-
-For a proxy you trust, scope NLTK's native opt-in to the explicit preparation command:
-
-```bash
-NLTK_ALLOW_PROXIED_URLOPEN=1 hypit programs prepare --endpoint whisperx.local
-```
-
-Use your selected Endpoint instance id. On PowerShell, set `$env:NLTK_ALLOW_PROXIED_URLOPEN = "1"`
-for that preparation session, then restore its previous value. The preparation process already
-inherits its caller's environment; no Hypit-specific proxy flag is needed. This setting authorizes
-NLTK to use the configured proxy; it neither selects a mirror nor enables inference downloads.
-Without that trust choice, use a deliberately selected direct route or supply the sentence data
-in the selected NLTK data directory before preparation. Hypit does not change the choice automatically.
-Existing usable sentence data is read locally without refreshing the download index.
+The default Chinese and English setup creates four small, local NLTK-format files under the
+selected `nltk_data/tokenizers/punkt_tab/english` directory. It accepts already complete data at
+that exact root, and refuses to overwrite an incomplete directory or follow a symlink. Other
+languages require separately provisioned NLTK sentence data; their pretrained data is not bundled
+or downloaded by this command.
 
 ## Package preparation
 

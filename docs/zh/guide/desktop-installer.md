@@ -58,7 +58,7 @@ hypit doctor --workspace "<视频项目目录>"
 
 界面依次显示“准备运行环境、识别模型与中文对齐资源”“准备英文对齐资源”“启动本地服务”“服务已就绪”。前一阶段包含 Python/依赖/模型，当前没有更细下载百分比。资源和健康检查成功后才发布本地 Profile 绑定；发生自定义 Endpoint 或绑定冲突时保留用户修改。可以“重试安装”“启动服务”“停止服务”“检查状态”。关闭窗口不会取消主进程中的准备，重新打开会读取实际状态；强制退出应用或系统关机可能中断准备，稍后显式重试可复用有效缓存。
 
-包内有 uv 0.12.20、对应许可证、WhisperX 服务代码及冻结依赖锁；不需要另装 Homebrew、Winget、Python 或 uv。模型权重没有随包分发。Program Home 为 `<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`；其中有 `.venv`、`nltk_data`、`install.log`（安装日志）和 `program.log`（服务日志）。`hostState` 在 macOS 为 `~/Library/Application Support/Hypit`，Windows 为 `%LOCALAPPDATA%\Hypit`。Hugging Face、torch 模型缓存，以及 uv 缓存和下载的 Python，可能使用各自的上游默认位置，并非全部位于 Program Home。完整日志只留在本机，分享前应人工检查敏感内容。
+包内有 uv 0.12.20、对应许可证、WhisperX 服务代码及冻结依赖锁；不需要另装 Homebrew、Winget、Python 或 uv。首次准备会在本机生成中文和英文所需的最小 NLTK 句子参数，不访问 NLTK 下载站，也不读取用户以前的 NLTK 缓存。Whisper `small` 与对齐模型权重没有随包分发，点击安装后仍需联网下载。Program Home 为 `<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`；其中有 `.venv`、`nltk_data`、`install.log`（安装日志）和 `program.log`（服务日志）。`hostState` 在 macOS 为 `~/Library/Application Support/Hypit`，Windows 为 `%LOCALAPPDATA%\Hypit`。Hugging Face、torch 模型缓存，以及 uv 缓存和下载的 Python，可能使用各自的上游默认位置，并非全部位于 Program Home。完整日志只留在本机，分享前应人工检查敏感内容。
 
 本地绑定已成功发布后，可在终端只读检查或停止已托管服务：
 

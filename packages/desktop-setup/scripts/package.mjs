@@ -70,7 +70,10 @@ export async function inspectApp(appRoot, platform, arch) {
 }
 export async function checkWhisperXRuntime(resources) {
   for (const path of ["bin/hypit.mjs", "packages/provider-whisperx-local/src/program.ts",
-    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock", "services/whisperx/src/hypit_whisperx_service/application.py"]) {
+    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock",
+    "services/whisperx/src/hypit_whisperx_service/application.py",
+    "services/whisperx/src/hypit_whisperx_service/prepare.py",
+    "services/whisperx/src/hypit_whisperx_service/resources.py"]) {
     const bytes = await readFile(join(resources, "runtime/node_modules/@hypit/hypit", path));
     assert.ok(bytes.length, `Missing WhisperX runtime resource: ${path}`);
   }

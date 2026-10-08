@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -16,7 +17,8 @@ from hypit_whisperx_service.application import RequestError, WhisperXApplication
 from hypit_whisperx_service.audio import AudioInputError, CanonicalAudio, read_canonical_audio  # noqa: E402
 from hypit_whisperx_service.config import ServiceConfig  # noqa: E402
 from hypit_whisperx_service.engine import InferenceBusyError, normalize_alignment, normalize_language  # noqa: E402
-from hypit_whisperx_service.resources import assert_punkt_tab, UnpreparedResourceError  # noqa: E402
+from hypit_whisperx_service import prepare as prepare_cli  # noqa: E402
+from hypit_whisperx_service.resources import assert_punkt_tab, assert_sentence_data, prepare_punkt_tab, UnpreparedResourceError  # noqa: E402
 
 
 def write_wav(path: Path, frames: int = 32_000, rate: int = 16_000, channels: int = 1) -> None:
@@ -115,6 +117,114 @@ class ResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, "hypit-whisperx-prepare"):
                 assert_punkt_tab(Path(directory))
+
+    def test_fresh_sentence_data_is_created_without_nltk_download_or_user_cache(self) -> None:
+        import nltk
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(nltk, "download", side_effect=AssertionError("NLTK network download attempted")):
+                prepared = prepare_punkt_tab(root)
+                self.assertEqual(prepared, (root / "tokenizers" / "punkt_tab").resolve())
+                assert_sentence_data(root, "zh")
+                assert_sentence_data(root, "en")
+                splitter = nltk.data.load("tokenizers/punkt_tab/english.pickle")
+                text = "Dr. Smith arrived. He left."
+                self.assertEqual([text[start:end] for start, end in splitter.span_tokenize(text)],
+                                 ["Dr. Smith arrived.", "He left."])
+                chinese = "今天开会。明天继续。"
+                self.assertEqual([chinese[start:end] for start, end in splitter.span_tokenize(chinese)], [chinese])
+
+    def test_partial_sentence_data_is_not_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "tokenizers" / "punkt_tab" / "english"
+            target.mkdir(parents=True)
+            marker = target / "user-note.txt"
+            marker.write_text("keep me", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                prepare_punkt_tab(Path(directory))
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep me")
+
+    def test_sentence_data_does_not_follow_existing_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            tokenizers = Path(directory) / "tokenizers"
+            tokenizers.mkdir()
+            try:
+                (tokenizers / "punkt_tab").symlink_to(Path(outside), target_is_directory=True)
+            except OSError as error:
+                if sys.platform == "win32":
+                    self.skipTest(f"Windows does not permit a test symlink: {error}")
+                raise
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                prepare_punkt_tab(Path(directory))
+            self.assertEqual(list(Path(outside).iterdir()), [])
+
+    def test_sentence_data_does_not_follow_root_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory) / "nltk_data"
+            try:
+                root.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as error:
+                if sys.platform == "win32":
+                    self.skipTest(f"Windows does not permit a test symlink: {error}")
+                raise
+            with self.assertRaisesRegex(UnpreparedResourceError, "symlink"):
+                prepare_punkt_tab(root)
+            self.assertEqual(list(Path(outside).iterdir()), [])
+
+    def test_prepare_command_reaches_models_without_nltk_download(self) -> None:
+        import nltk
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"HYPIT_WHISPERX_ALIGNMENT_LANGUAGES": "zh en"}, clear=True), \
+                    patch.object(sys, "argv", ["hypit-whisperx-prepare", "--nltk-data", directory]), \
+                    patch.object(nltk, "download", side_effect=AssertionError("NLTK network download attempted")), \
+                    patch.object(prepare_cli, "prepare_models") as prepare_models:
+                prepare_cli.main()
+            prepare_models.assert_called_once()
+            assert_sentence_data(Path(directory), "zh")
+            assert_sentence_data(Path(directory), "en")
+
+    def test_prepare_command_rejects_env_root_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory) / "nltk_data"
+            try:
+                root.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as error:
+                if sys.platform == "win32":
+                    self.skipTest(f"Windows does not permit a test symlink: {error}")
+                raise
+            with patch.dict("os.environ", {"HYPIT_WHISPERX_NLTK_DATA": str(root),
+                                        "HYPIT_WHISPERX_ALIGNMENT_LANGUAGES": "zh en"}, clear=True), \
+                    patch.object(sys, "argv", ["hypit-whisperx-prepare"]), \
+                    patch.object(prepare_cli, "prepare_models") as prepare_models:
+                with self.assertRaisesRegex(UnpreparedResourceError, "symlink"):
+                    prepare_cli.main()
+            prepare_models.assert_not_called()
+            self.assertEqual(list(Path(outside).iterdir()), [])
+
+    def test_prepare_command_expands_user_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"HOME": directory,
+                                        "HYPIT_WHISPERX_NLTK_DATA": "~/sentence-data",
+                                        "HYPIT_WHISPERX_ALIGNMENT_LANGUAGES": "zh en"}, clear=True), \
+                    patch.object(sys, "argv", ["hypit-whisperx-prepare"]), \
+                    patch.object(prepare_cli, "prepare_models") as prepare_models:
+                prepare_cli.main()
+            prepare_models.assert_called_once()
+            assert_sentence_data(Path(directory) / "sentence-data", "en")
+
+    def test_prepare_command_does_not_download_missing_other_language(self) -> None:
+        import nltk
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"HYPIT_WHISPERX_ALIGNMENT_LANGUAGES": "fr"}, clear=True), \
+                    patch.object(sys, "argv", ["hypit-whisperx-prepare", "--nltk-data", directory]), \
+                    patch.object(nltk, "download", side_effect=AssertionError("NLTK network download attempted")), \
+                    patch.object(prepare_cli, "prepare_models") as prepare_models:
+                with self.assertRaisesRegex(UnpreparedResourceError, "sentence data for fr"):
+                    prepare_cli.main()
+            prepare_models.assert_not_called()
 
 
 class EvidenceTests(unittest.TestCase):
