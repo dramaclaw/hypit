@@ -76,7 +76,10 @@ async function fixture(t: TestContext, control: Record<string, unknown> = {}, pl
   syncBuiltinESMExports();
   t.after(() => { uvVersion.mock.restore(); syncBuiltinESMExports(); });
   await writeFile(cliEntry, fakeCli);
-  const bytes = Buffer.from(JSON.stringify(createDesktopProfile({ baseUrl: "https://example.test/v1" })));
+  // This legacy service is exercised against a pre-NewAPI-alignment Profile.
+  const legacyProfile = createDesktopProfile({ baseUrl: "https://example.test/v1" }) as any;
+  delete legacyProfile.bindings["@hypit/whisperx@1#whisperx-alignment"];
+  const bytes = Buffer.from(JSON.stringify(legacyProfile));
   await writeFile(paths.profile, bytes);
   const configure = (value: Record<string, unknown>) => writeFile(join(paths.hostState, "fixture.json"), JSON.stringify(value));
   await configure(control);

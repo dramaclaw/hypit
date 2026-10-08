@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { posix, win32 } from "node:path";
 import test from "node:test";
 
-import { completeNewApiSetup, newApiDefaultBindings } from "@dramaclaw/provider-newapi";
+import { completeNewApiSetup, newApiDefaultBindings, newApiRoutes } from "@dramaclaw/provider-newapi";
 import { parseLocalRuntimeProfile } from "@hypit/runtime-local";
 
-import { createDesktopProfile } from "../src/profile.js";
+import { createDesktopProfile, prepareDesktopNewApiBindingsRefresh } from "../src/profile.js";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 test("desktop media providers use both packaged tools explicitly", () => {
   const profile = createDesktopProfile({}, { ffmpegPath: "/Applications/Hypit Setup.app/bin/ffmpeg", ffprobePath: "/Applications/Hypit Setup.app/bin/ffprobe" }) as any;
@@ -39,4 +42,51 @@ test("desktop profile uses host-relative runtime data and only credential refere
   assert.equal(profile.endpoints["hyperframes.local"]!.use, "@hypit/provider-hyperframes-local");
   assert.doesNotThrow(() => parseLocalRuntimeProfile(profile));
   for (const secret of secrets) assert.equal(JSON.stringify(profile).includes(secret), false);
+});
+
+test("existing desktop profile gains all missing NewAPI speech bindings without changing custom settings", async t => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-speech-refresh-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, "profiles", "desktop-newapi.json");
+  await mkdir(dirname(path), { recursive: true });
+  const profile = createDesktopProfile({}, undefined) as any;
+  const key = "@hypit/whisperx@1#whisperx-alignment";
+  for (const capability of Object.keys(newApiDefaultBindings)) if (!newApiRoutes.some(route => route.key === capability)) delete profile.bindings[capability];
+  profile.custom = { keep: "user-value" };
+  await writeFile(path, JSON.stringify(profile));
+  const prepared = await prepareDesktopNewApiBindingsRefresh({ profile: path, platform: "darwin" });
+  assert.ok(prepared);
+  await prepared.commit();
+  await prepared.dispose(true);
+  const updated = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(updated.bindings[key], "newapi.personal");
+  assert.deepEqual(updated.bindings, newApiDefaultBindings);
+  assert.deepEqual(updated.custom, { keep: "user-value" });
+  updated.bindings[key] = "custom.speech";
+  await writeFile(path, JSON.stringify(updated));
+  assert.equal(await prepareDesktopNewApiBindingsRefresh({ profile: path, platform: "darwin" }), undefined);
+  assert.equal((await readFile(path, "utf8")).includes("custom.speech"), true);
+});
+
+test("managed legacy local WhisperX binding migrates; modified local provider remains untouched", async t => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-managed-speech-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, "desktop-newapi.json");
+  const profile = createDesktopProfile({}) as any;
+  const key = "@hypit/whisperx@1#whisperx-alignment";
+  profile.bindings[key] = "whisperx.local";
+  profile.endpoints["whisperx.local"] = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
+    expectedModel: "small", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
+  } };
+  await writeFile(path, JSON.stringify(profile));
+  const prepared = await prepareDesktopNewApiBindingsRefresh({ profile: path, platform: "darwin" });
+  assert.ok(prepared);
+  await prepared.commit(); await prepared.dispose(true);
+  const migrated = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(migrated.bindings[key], "newapi.personal");
+  assert.equal(migrated.endpoints["whisperx.local"], undefined);
+  profile.endpoints["whisperx.local"].config.expectedModel = "custom";
+  await writeFile(path, JSON.stringify(profile));
+  assert.equal(await prepareDesktopNewApiBindingsRefresh({ profile: path, platform: "darwin" }), undefined);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).bindings[key], "whisperx.local");
 });

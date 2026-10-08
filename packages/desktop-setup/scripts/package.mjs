@@ -55,7 +55,7 @@ export async function inspectApp(appRoot, platform, arch) {
     const { cp } = await import("node:fs/promises");
     for (const name of ["runtime", "skill", "bin", "licenses", "resource-manifest.json"]) await cp(join(resources, name), join(temporary, name), { recursive: true, verbatimSymlinks: true });
     await checkArtifact({ out: temporary, platform, arch });
-    await checkWhisperXRuntime(resources);
+    await checkNewApiSpeechRuntime(resources);
     await checkMediaRuntime(resources, { platform, arch });
     const asar = require(require.resolve("@electron/asar", { paths: [dirname(require.resolve("electron-builder/package.json"))] }));
     const archive = join(resources, "app.asar");
@@ -68,14 +68,10 @@ export async function inspectApp(appRoot, platform, arch) {
     assert.ok((await readFile(join(resources, "app.asar.unpacked/dist/credential-store/runtime/windows-credential.ps1"))).length);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
-export async function checkWhisperXRuntime(resources) {
-  for (const path of ["bin/hypit.mjs", "packages/provider-whisperx-local/src/program.ts",
-    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock",
-    "services/whisperx/src/hypit_whisperx_service/application.py",
-    "services/whisperx/src/hypit_whisperx_service/prepare.py",
-    "services/whisperx/src/hypit_whisperx_service/resources.py"]) {
+export async function checkNewApiSpeechRuntime(resources) {
+  for (const path of ["bin/hypit.mjs", "packages/provider-newapi/src/provider.ts", "packages/whisperx/src/index.ts"]) {
     const bytes = await readFile(join(resources, "runtime/node_modules/@hypit/hypit", path));
-    assert.ok(bytes.length, `Missing WhisperX runtime resource: ${path}`);
+    assert.ok(bytes.length, `Missing NewAPI speech runtime resource: ${path}`);
   }
 }
 export async function packageDesktop(platform, arch) {

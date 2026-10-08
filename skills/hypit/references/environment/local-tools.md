@@ -3,6 +3,13 @@
 Read this when assessing local preparation, selecting local WhisperX, or preparing and repairing a
 local Endpoint's executable or Managed Program.
 
+The current Hypit desktop installer is an exception to the local WhisperX
+steps below: its default Profile sends word-aligned transcription to NewAPI
+through `audio-transcribe`. The desktop package has no local WhisperX Provider,
+uv, Python service or model installer. Use the local preparation steps only
+for a separately installed local Provider explicitly selected in another
+Profile; never infer local installation from the `@hypit/whisperx` capability name.
+
 Go to [host tools](#supply-host-executables-at-machine-scope),
 [local media configuration](#configure-local-media-tools),
 [Program lifecycle](#let-the-selected-endpoint-own-its-program),

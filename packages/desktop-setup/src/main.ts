@@ -4,18 +4,16 @@ import { mkdir, readFile } from "node:fs/promises";
 import type { BrowserWindowConstructorOptions, WebContents } from "electron";
 import { completeNewApiSetup, newApiDefaultBindings, parseNewApiEndpointConfig } from "@dramaclaw/provider-newapi";
 import { PlatformCredentialStore } from "@hypit/credential-store-platform";
-import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult, WhisperXPublicStatus } from "./contracts.js";
+import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./contracts.js";
 import { IPC_CHANNELS } from "./ipc.js";
 import type { SetupFailure, SetupReply } from "./ipc.js";
-import { desktopPaths, whisperXProgramPaths } from "./paths.js";
-import { createWhisperXProgramService } from "./whisperx-program.js";
-import type { WhisperXProgramService } from "./whisperx-program.js";
+import { desktopPaths } from "./paths.js";
 import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
 import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
 import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
 import { isManagedLauncherInstalled } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
-import { desktopMediaAvailable, prepareDesktopMediaRefresh } from "./profile.js";
+import { desktopMediaAvailable, prepareDesktopMediaRefresh, prepareDesktopNewApiBindingsRefresh } from "./profile.js";
 import { commitDesktopSetup } from "./setup-core.js";
 import { installDesktopIntegration, removeDesktopIntegration } from "./lifecycle.js";
 import type { DesktopIntegrationOptions } from "./lifecycle.js";
@@ -75,7 +73,6 @@ export function validateIpcArguments(channel: string, args: readonly unknown[]):
     return { baseUrl: input.baseUrl, apiKey: input.apiKey, relay: { ...input.relay } };
   }
   if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.refreshAgents,
-    IPC_CHANNELS.whisperXStatus, IPC_CHANNELS.whisperXInstall, IPC_CHANNELS.whisperXStart, IPC_CHANNELS.whisperXStop,
     IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
   return undefined;
 }
@@ -113,34 +110,7 @@ export type SetupServices = {
   readonly clear: () => Promise<SetupResult>;
   readonly removeIntegration?: () => Promise<SetupResult>;
   readonly refreshAgents?: () => Promise<unknown>;
-  readonly whisperX?: WhisperXProgramService;
-  /** Computed by the main process; service-reported paths must exactly match these local logs. */
-  readonly whisperXLogs?: readonly [installation: string, service: string];
 };
-
-const whisperXStates = ["not-installed", "preparing", "prepared", "stopped", "stopping", "starting", "ready", "mismatch", "failed"] as const;
-const whisperXStages = ["preparing-runtime", "preparing-en", "starting-service", "ready"] as const;
-const whisperXCodes = ["WHISPERX_BUNDLED_UV_INVALID", "WHISPERX_PROFILE_REQUIRED", "WHISPERX_PROFILE_INVALID", "WHISPERX_PROFILE_CONFLICT",
-  "WHISPERX_PROFILE_PREPARE_FAILED", "WHISPERX_PROFILE_COMMIT_FAILED", "WHISPERX_COMMAND_FAILED", "WHISPERX_INVALID_REPORT",
-  "WHISPERX_OUTPUT_LIMIT", "WHISPERX_TIMEOUT", "WHISPERX_NOT_READY", "WHISPERX_STATE_FAILED", "WHISPERX_CLEANUP_INCOMPLETE"] as const;
-function publicWhisperXStatus(value: unknown, logs: SetupServices["whisperXLogs"]): WhisperXPublicStatus {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid WhisperX status");
-  const rawState: unknown = Reflect.get(value, "state");
-  const rawStage: unknown = Reflect.get(value, "stage");
-  const rawCode: unknown = Reflect.get(value, "code");
-  const rawLog: unknown = Reflect.get(value, "logPath");
-  const rawCleanup: unknown = Reflect.get(value, "cleanupIncomplete");
-  const state = whisperXStates.find(item => item === rawState);
-  const stage = whisperXStages.find(item => item === rawStage);
-  const errorCode = whisperXCodes.find(item => item === rawCode);
-  if (!state || (rawStage !== undefined && !stage) || (rawCode !== undefined && !errorCode)
-    || (rawCleanup !== undefined && typeof rawCleanup !== "boolean")
-    || (rawLog !== undefined && (typeof rawLog !== "string" || rawLog.length > 4096 || /[\u0000-\u001f\u007f]/u.test(rawLog)
-      || !isAbsolute(rawLog) || (rawLog !== logs?.[0] && rawLog !== logs?.[1])))) throw new Error("Invalid WhisperX status");
-  return { state, model: "small", device: "cpu", compute: "int8", languages: ["zh", "en"],
-    ...(stage ? { stage } : {}), ...(errorCode ? { errorCode } : {}), ...(rawLog === undefined ? {} : { logPath: rawLog as string }),
-    ...(rawCleanup === true ? { cleanupWarning: "WHISPERX_CLEANUP_INCOMPLETE" as const } : {}) };
-}
 
 const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
 const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
@@ -275,29 +245,11 @@ export function createSetupController(services: SetupServices) {
     tail = pending.then(() => undefined, () => undefined);
     return pending;
   }
-  const whisperX = () => {
-    if (!services.whisperX) throw new Error("Unavailable [SETUP_UNAVAILABLE]");
-    return services.whisperX;
-  };
-  const reportWhisperX = (value: unknown) => {
-    const stage = whisperXStages.find(item => item === value);
-    if (stage) emit({ kind: "whisperx-stage", stage });
-  };
-  let installation: Promise<SetupReply<WhisperXPublicStatus>> | undefined;
   return {
     /** Snapshot only work already queued; subsequent requests cannot extend this wait. */
     whenIdle: () => tail.then(() => undefined),
     subscribe(listener: (progress: SetupProgress) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     getStatus: () => enqueue(async () => publicResult(await services.getStatus())),
-    getWhisperXStatus: () => enqueue(async () => publicWhisperXStatus(await whisperX().status(), services.whisperXLogs)),
-    installWhisperX: () => {
-      if (installation) return installation;
-      installation = enqueue(async () => publicWhisperXStatus(await whisperX().installAndStart(reportWhisperX), services.whisperXLogs))
-        .finally(() => { installation = undefined; });
-      return installation;
-    },
-    startWhisperX: () => enqueue(async () => publicWhisperXStatus(await whisperX().start(reportWhisperX), services.whisperXLogs)),
-    stopWhisperX: () => enqueue(async () => publicWhisperXStatus(await whisperX().stop(), services.whisperXLogs)),
     submit: (input: SetupInput) => enqueue(async () => {
       emit({ kind: "stage", stage: "validating" });
       const validated = validateIpcArguments(IPC_CHANNELS.submit, [input])!;
@@ -355,6 +307,7 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
       if (profile?.format !== "hypit.runtime-local@1" || typeof profile.dataRoot !== "string" || !profile.dataRoot.trim()
         || profile.credentials?.platform?.use !== "@hypit/credential-store-platform"
         || endpoint?.use !== "@dramaclaw/provider-newapi" || endpoint.pool !== "newapi.personal"
+        || profile.endpoints?.["whisperx.local"]?.use === "@hypit/provider-whisperx-local"
         || profile.endpoints?.["media.local"]?.use !== "@hypit/provider-media-local"
         || profile.endpoints?.["hyperframes.local"]?.use !== "@hypit/provider-hyperframes-local"
         || Object.entries(newApiDefaultBindings).some(([key, value]) => profile.bindings?.[key] !== value)) return false;
@@ -392,9 +345,30 @@ export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" |
 
 /** Startup-only repair uses the saved profile; it never reads or asks for credentials. */
 export async function refreshDesktopStatus(options: DesktopIntegrationOptions): Promise<SetupResult> {
+  // PR #2 adds the cloud speech binding to newly created Profiles. Preserve
+  // existing credentials and unrelated settings when upgrading an older one.
+  let speech: Awaited<ReturnType<typeof prepareDesktopNewApiBindingsRefresh>>;
+  let speechWarnings: readonly DiagnosticItem[] = [];
+  try {
+    speech = await prepareDesktopNewApiBindingsRefresh({ profile: options.paths.profile, platform: options.platform });
+    if (speech) {
+      await speech.commit();
+      const checked = await readDesktopStatus(options);
+      if (!checked.diagnostics.some(item => item.code === "profile" && item.status === "pass")) throw new Error("Profile upgrade failed");
+      speechWarnings = await speech.dispose(true);
+    }
+  } catch {
+    const rollbackFailed = speech ? await speech.rollback() : false;
+    const warnings = speech ? await speech.dispose(false) : [];
+    const result = await readDesktopStatus(options);
+    return rollbackFailed || warnings.length ? { ...result, configured: false,
+      diagnostics: mergeDiagnostics(result.diagnostics.map(item => item.code === "profile"
+        ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), warnings) } : result;
+  }
   const before = await readDesktopStatus(options);
-  if (before.configured || !before.diagnostics.some(item => item.code === "profile" && item.status === "pass")) return before;
-  if (!(await Promise.all(options.targets.map(canRefreshManagedSkill))).every(Boolean)) return before;
+  const withSpeechWarnings = (result: SetupResult): SetupResult => ({ ...result, diagnostics: mergeDiagnostics(result.diagnostics, speechWarnings) });
+  if (before.configured || !before.diagnostics.some(item => item.code === "profile" && item.status === "pass")) return withSpeechWarnings(before);
+  if (!(await Promise.all(options.targets.map(canRefreshManagedSkill))).every(Boolean)) return withSpeechWarnings(before);
   let media: Awaited<ReturnType<typeof prepareDesktopMediaRefresh>>;
   let profileRollbackFailed = false;
   let committed = false;
@@ -413,7 +387,7 @@ export async function refreshDesktopStatus(options: DesktopIntegrationOptions): 
   const result = await readDesktopStatus(options);
   return profileRollbackFailed ? { ...result, configured: false,
     diagnostics: mergeDiagnostics(result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), warnings) }
-    : { ...result, diagnostics: mergeDiagnostics(result.diagnostics, integrationWarnings, warnings) };
+    : { ...result, diagnostics: mergeDiagnostics(result.diagnostics, integrationWarnings, warnings, speechWarnings) };
 }
 
 /** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
@@ -447,19 +421,14 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     if (!window || window.isDestroyed()) throw new Error("No active session [CONFIRMATION_REQUIRED]");
     const issued = confirmation.issue(action, targets);
     const response = await dialog.showMessageBox(window, { type: "warning", title: action === "clear" ? "清除本机配置和凭据" : "卸载本机集成",
-      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。本地语音资源、模型缓存和 Profile 绑定会保留；如需释放空间，请先停止服务，再按桌面安装指南人工检查。",
+      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。旧版安装的本地语音资源和缓存不会自动删除。",
       detail: targets.join("\n"), buttons: ["取消", "确认"], defaultId: 0, cancelId: 0, noLink: true });
     if (response.response !== 1) { confirmation.invalidate(); throw new Error("Cancelled [CONFIRMATION_REQUIRED]"); }
     return issued.token;
   };
   const suffix = platform === "win32" ? ".exe" : "";
-  const whisperX = createWhisperXProgramService({ paths: { profile: paths.profile, hostState: paths.hostState }, platform,
-    electronExecutable: integration.electronExecutable, cliEntry: integration.cliEntry, bundledBin: join(resources, "bin"),
-    bundledUv: join(resources, "bin", `uv${suffix}`) });
-  const whisperXPaths = whisperXProgramPaths(paths);
   const controller = createSetupController({
     getStatus,
-    whisperX, whisperXLogs: [whisperXPaths.installationLog, whisperXPaths.serviceLog],
     commit: async (input) => {
       const result = await commitDesktopSetup(input, { paths, targets: lifecycle.integration.targets, platform, credentialStore,
         media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } });
@@ -496,9 +465,7 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
   };
   const operations = { [IPC_CHANNELS.status]: controller.getStatus, [IPC_CHANNELS.submit]: controller.submit,
     [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration,
-    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration,
-    [IPC_CHANNELS.whisperXStatus]: controller.getWhisperXStatus, [IPC_CHANNELS.whisperXInstall]: controller.installWhisperX,
-    [IPC_CHANNELS.whisperXStart]: controller.startWhisperX, [IPC_CHANNELS.whisperXStop]: controller.stopWhisperX };
+    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration };
   for (const channel of Object.keys(operations) as (keyof typeof operations)[]) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       try {

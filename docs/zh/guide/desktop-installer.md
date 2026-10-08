@@ -50,28 +50,13 @@ hypit runtime use "<桌面 Profile 的实际绝对路径>" --workspace "<视频�
 hypit doctor --workspace "<视频项目目录>"
 ```
 
-每个项目独立选择 Runtime Profile；向导不会把桌面 Profile 强加到已有项目。Agent Skill 会在新项目中引导选择已安装的桌面 Profile，无需再输入已保存的密钥。`doctor` 用于诊断配置与依赖；正式生成前仍应核对所选模型、参数与费用。Chrome、WhisperX 和模型权重没有随安装包分发，选用相关功能时可能另外下载、安装或配置。
+每个项目独立选择 Runtime Profile；向导不会把桌面 Profile 强加到已有项目。Agent Skill 会在新项目中引导选择已安装的桌面 Profile，无需再输入已保存的密钥。`doctor` 用于诊断配置与依赖；正式生成前仍应核对所选模型、参数与费用。Chrome 可能在首次使用时下载；语音转写使用已配置的 NewAPI，不需要安装本地 WhisperX 模型。
 
-## 本地语音识别与字幕对齐（可选）
+## 语音识别与字幕对齐
 
-首次配置完成或重新打开 Hypit Setup 后，可点击“安装并启动”。跳过此卡片仍可使用 NewAPI/OSS；应用不会自动下载模型。默认采用 `small / cpu / int8`，准备中文 `zh`、英文 `en` 对齐资源。安装包含 Python 依赖和模型下载，可能较大且耗时，实际取决于网络和已有缓存。本地运行不收取 NewAPI 模型费用，也不读取或改写 NewAPI/OSS 凭据。
+桌面 Profile 默认把逐词对齐能力 `@hypit/whisperx@1#whisperx-alignment` 交给 `newapi.personal`。名称沿用 Hypit 的能力契约；实际通过 NewAPI 的 `audio-transcribe` 接口转写，返回逐词或逐字时间戳。NewAPI 账户须开放对应模型与接口，调用可能产生费用。安装包不包含本地 WhisperX、uv、Python 环境或模型权重，也不会引导下载多 GB 的本地模型。
 
-界面依次显示“准备运行环境、识别模型与中文对齐资源”“准备英文对齐资源”“启动本地服务”“服务已就绪”。前一阶段包含 Python/依赖/模型，当前没有更细下载百分比。资源和健康检查成功后才发布本地 Profile 绑定；发生自定义 Endpoint 或绑定冲突时保留用户修改。可以“重试安装”“启动服务”“停止服务”“检查状态”。关闭窗口不会取消主进程中的准备，重新打开会读取实际状态；强制退出应用或系统关机可能中断准备，稍后显式重试可复用有效缓存。
-
-包内有 uv 0.12.20、对应许可证、WhisperX 服务代码及冻结依赖锁；不需要另装 Homebrew、Winget、Python 或 uv。首次准备会在本机生成中文和英文所需的最小 NLTK 句子参数，不访问 NLTK 下载站，也不读取用户以前的 NLTK 缓存。Whisper `small` 与对齐模型权重没有随包分发，点击安装后仍需联网下载。Program Home 为 `<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`；其中有 `.venv`、`nltk_data`、`install.log`（安装日志）和 `program.log`（服务日志）。`hostState` 在 macOS 为 `~/Library/Application Support/Hypit`，Windows 为 `%LOCALAPPDATA%\Hypit`。Hugging Face、torch 模型缓存，以及 uv 缓存和下载的 Python，可能使用各自的上游默认位置，并非全部位于 Program Home。完整日志只留在本机，分享前应人工检查敏感内容。
-
-本地绑定已成功发布后，可在终端只读检查或停止已托管服务：
-
-```bash
-hypit programs status --runtime "<桌面 Profile 的绝对路径>" --endpoint whisperx.local --json
-hypit programs down --runtime "<桌面 Profile 的绝对路径>" --endpoint whisperx.local --json
-```
-
-准备失败且尚未发布绑定时，请回到卡片重试；上述命令无法检查 Profile 中不存在的 Endpoint。后续 `programs prepare` / `programs up` 可能触发依赖或模型准备，需要显式同意下载，优先使用向导操作。
-
-### 未来 NewAPI 对齐
-
-本地能力沿用 `@hypit/whisperx@1#whisperx-alignment` 与 `AlignedTranscriptEvidence`，需要输入规范的 16 kHz 单声道语音与明确语言，并返回逐词或逐字开始/结束时间。句子级时间戳和纯文本不能替代逐词对齐。未来 NewAPI 适配器满足该契约后，仅将绑定从 `whisperx.local` 切换到 `newapi.personal`；无需重写项目、Sources、Runs、字幕或语义时间线，也不删除本地模型。当前没有该云端对齐适配器或切换按钮；切回本地前须重新检查就绪状态。
+升级时，向导会为缺少这项绑定的旧桌面 Profile 补上 NewAPI 绑定，同时保留密钥引用和其他设置；已有自定义语音绑定不会自动改写。若旧版曾安装本地语音服务，升级不会自动停止或删除旧环境、模型及共享缓存，请确认服务已不再使用后自行检查。
 
 ## 更新与卸载
 
@@ -83,11 +68,9 @@ hypit programs down --runtime "<桌面 Profile 的绝对路径>" --endpoint whis
 
 若还要清除这台电脑上的桌面 NewAPI/OSS 配置，请先在向导中点击“清除本机配置和凭据”，确认删除桌面 Profile 及三项固定的系统凭据，然后再卸载应用。此操作不会删除视频项目，也不会清理其他项目自行建立的 Profile 或凭据。已经选用该桌面 Profile 的项目需要重新选择可用 Profile。
 
-### 本地语音资源的保留与人工检查
+### 旧版本地语音资源
 
-普通卸载或“卸载本机集成”默认保留 WhisperX Program Home、所有模型缓存和桌面 Profile 的本地 capability binding。卸载不会自动停止服务；先在卡片点击“停止服务”，或运行上面的 `programs down` 并检查状态，再卸载应用。重装后可复用原有资源。单独确认“清除本机配置和凭据”会删除整个桌面 Profile，包括本地绑定，但不会删除语音资源。
-
-当前没有“一键删除本地语音资源”功能：Program Home 没有完整内容归属清单，模型可能位于共享的上游缓存，不能仅凭目录名安全删除。释放空间前先运行 `hypit paths --json` 查看 `hostState`，在文件管理器打开上述精确 Program Home，人工检查 `.venv`、`nltk_data`、日志和未知文件。仅在服务已停、确认文件属于此安装且不再需要后，按操作系统方式移入废纸篓或回收站。不要清空整个 Hypit 主目录、共享 Hugging Face/torch/uv 缓存，不要跟随符号链接，也不要删除其他项目的 Profile。无法确认归属时保留并寻求维护者帮助。
+新版安装器不再使用或安装本地 WhisperX。普通升级、卸载和清除桌面 Profile 都不会删除旧版留下的 Program Home、模型或共享缓存。若此前启动过本地服务，请先用旧版命令或系统工具确认它已停止；检查 `<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765` 的归属后，再决定是否移入废纸篓或回收站。不要递归清空整个 Hypit 主目录，也不要删除共享的 Hugging Face、torch 或 uv 缓存。
 
 ## 排查
 
@@ -95,9 +78,8 @@ hypit programs down --runtime "<桌面 Profile 的绝对路径>" --endpoint whis
 - NewAPI 失败：核对地址和 API Key，确认该地址提供模型列表接口，检查网络与账户权限。
 - OSS 失败：核对 Endpoint、Bucket、AccessKey 权限和时效；如界面列出测试对象键，请手动删除后重试。
 - 本机依赖失败：在向导中“重新运行诊断”。诊断会检查安装资源、Hypit、FFmpeg/FFprobe、Skill、Profile、凭据与连接，不会生成素材。
-- WhisperX 下载失败或磁盘不足：展开卡片的日志位置，查看 `install.log`；检查网络、代理、磁盘空间与目录写入权限，修复后点“重试安装”。已完成缓存会复用，不必先删除环境。
-- 中文或英文资源缺失：按失败阶段重试准备；推理不会隐式补下载。启动失败看 `program.log`，确认回环地址 `127.0.0.1:8765` 未被其他服务占用；不要停止不属于 Hypit 的进程。
-- `WHISPERX_BUNDLED_UV_INVALID`：重新核对安装包 SHA-256 并从可信渠道重装；不要用系统 uv 替换包内文件。`WHISPERX_PROFILE_CONFLICT`：人工检查桌面 Profile 的 `whisperx.local` 与对齐绑定，保留自定义内容后再决定如何恢复；不要直接覆盖整个 Profile。健康但未激活时可显式“启动服务”重试绑定发布。
+- NewAPI 语音转写失败：确认账户开放 `audio-transcribe` 接口与对应模型，返回逐词或逐字时间戳；检查服务错误和用量。本安装包不提供本地模型回退。
+- 升级后 Profile 被判未配置：检查是否保留了自定义语音绑定或旧 `whisperx.local` 端点。安装器只迁移完全匹配旧托管设置的端点，不会覆盖自定义内容；请先备份 Profile，再明确选择可用的 NewAPI 或独立 Provider。
 - 恢复文件未清理：先检查界面给出的恢复路径，确认无需恢复后再人工处理；不要删除未知或修改过的内容。
 - Windows 安装、启动、凭据和卸载的完整流程仍需真实 Windows x64 机器验收；遇到问题请记录系统版本、向导显示的错误代码和诊断项，不要分享密钥或带签名的 URL。
 

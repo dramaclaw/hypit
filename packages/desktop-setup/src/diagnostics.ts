@@ -88,6 +88,7 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
     if (profile.format !== "hypit.runtime-local@1" || typeof profile.dataRoot !== "string" || !profile.dataRoot.trim()
       || profile.credentials?.platform?.use !== "@hypit/credential-store-platform"
       || profile.endpoints?.["newapi.personal"]?.use !== "@dramaclaw/provider-newapi" || profile.endpoints?.["newapi.personal"]?.pool !== "newapi.personal"
+      || profile.endpoints?.["whisperx.local"]?.use === "@hypit/provider-whisperx-local"
       || profile.endpoints?.["media.local"]?.use !== "@hypit/provider-media-local" || profile.endpoints?.["hyperframes.local"]?.use !== "@hypit/provider-hyperframes-local"
       || Object.entries(newApiDefaultBindings).some(([key, value]) => profile.bindings?.[key] !== value)) throw new Error();
     const parsed = parseNewApiEndpointConfig(profile.endpoints["newapi.personal"].config);

@@ -75,10 +75,16 @@ for (const [baseUrl, expected] of cases) {
   });
 }
 
-test("setup and provider reject base URLs with credentials, query parameters or fragments", () => {
-  for (const baseUrl of ["https://user:secret@gateway.example", "https://gateway.example?key=secret", "https://gateway.example/v1#secret",
+test("setup and provider reject credentials in base URLs", () => {
+  const baseUrl = "https://user:secret@gateway.example";
+  assert.throws(() => validateNewApiSetupUrl(baseUrl), /must not contain credentials/u);
+  assert.throws(() => createNewApiProvider({ baseUrl }), /must not contain credentials/u);
+});
+
+test("setup and provider reject query parameters and fragments, including empty ones", () => {
+  for (const baseUrl of ["https://gateway.example?key=secret", "https://gateway.example/v1#secret",
     "https://gateway.example?", "https://gateway.example/v1#"]) {
-    assert.throws(() => validateNewApiSetupUrl(baseUrl), /credentials, query parameters or fragments/u);
-    assert.throws(() => createNewApiProvider({ baseUrl }), /credentials, query parameters or fragments/u);
+    assert.throws(() => validateNewApiSetupUrl(baseUrl), /must not contain a query or fragment/u);
+    assert.throws(() => createNewApiProvider({ baseUrl }), /must not contain a query or fragment/u);
   }
 });

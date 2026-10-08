@@ -50,25 +50,21 @@ test("internal installers use explicit architectures and per-user unsigned setti
   assert.equal(config.nsis.artifactName, "Hypit-Setup-${version}-${arch}.${ext}");
 });
 
-test("final application inspection requires packaged WhisperX frozen lock, provider, service and CLI", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hypit-whisperx-artifact-"));
+test("final application inspection requires NewAPI speech adapter, capability and CLI", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hypit-newapi-speech-artifact-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const { checkWhisperXRuntime } = await loadScript("package.mjs");
-  assert.equal(typeof checkWhisperXRuntime, "function");
-  const paths = ["bin/hypit.mjs", "packages/provider-whisperx-local/src/program.ts",
-    "services/whisperx/pyproject.toml", "services/whisperx/uv.lock",
-    "services/whisperx/src/hypit_whisperx_service/application.py",
-    "services/whisperx/src/hypit_whisperx_service/prepare.py",
-    "services/whisperx/src/hypit_whisperx_service/resources.py"];
+  const { checkNewApiSpeechRuntime } = await loadScript("package.mjs");
+  assert.equal(typeof checkNewApiSpeechRuntime, "function");
+  const paths = ["bin/hypit.mjs", "packages/provider-newapi/src/provider.ts", "packages/whisperx/src/index.ts"];
   for (const path of paths) {
     const absolute = join(directory, "runtime/node_modules/@hypit/hypit", path);
     await mkdir(dirname(absolute), { recursive: true }); await writeFile(absolute, "fixture");
   }
-  await checkWhisperXRuntime(directory);
+  await checkNewApiSpeechRuntime(directory);
   for (const path of paths) {
     const absolute = join(directory, "runtime/node_modules/@hypit/hypit", path);
     await writeFile(absolute, "");
-    await assert.rejects(checkWhisperXRuntime(directory), /Missing WhisperX runtime resource/);
+    await assert.rejects(checkNewApiSpeechRuntime(directory), /Missing NewAPI speech runtime resource/);
     await writeFile(absolute, "fixture");
   }
 });

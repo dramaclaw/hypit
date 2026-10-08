@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { extract, list } from "tar";
 import { unzipSync } from "fflate";
-import { assertSafePath, checkArtifact, checkMediaBinary, checkUvBinary, checkoutRoot, cliOptions, digest, distributionPath, inventory, knownDependencyFixtures, knownProfiles, readMediaLock, readRuntimeLock, readUvLock, resourceDigests, targetFor } from "./check-artifact.mjs";
+import { assertSafePath, checkArtifact, checkMediaBinary, checkUvBinary, checkoutRoot, cliOptions, digest, distributionPath, excludedLocalSpeechPaths, inventory, knownDependencyFixtures, knownProfiles, readMediaLock, readRuntimeLock, resourceDigests, targetFor } from "./check-artifact.mjs";
 
 const exec = promisify(execFile);
 
@@ -137,7 +137,7 @@ async function npmCliPath() {
   throw new Error("npm CLI not found; run through npm or install npm alongside Node.js");
 }
 
-export async function prepareResources({ platform, arch, hypitTgz, out, checkoutRoot: sourceRoot = checkoutRoot, executeUv }) {
+export async function prepareResources({ platform, arch, hypitTgz, out, checkoutRoot: sourceRoot = checkoutRoot }) {
   const target = targetFor({ platform, arch });
   const output = resolve(out);
   if (await lstat(output).catch(error => { if (error.code === "ENOENT") return null; throw error; })) throw new Error(`Output already exists: ${output}`);
@@ -149,10 +149,6 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
   const release = media.lock.targets[`${platform}-${arch}`];
   const executable = await lockedMedia(sourceRoot, release, target, "ffmpeg");
   const probeExecutable = await lockedMedia(sourceRoot, release, target, "ffprobe");
-  const uv = await readUvLock(sourceRoot);
-  const uvExecutable = await lockedUv(sourceRoot, uv.lock.targets[`${platform}-${arch}`], target);
-  const uvNotices = await inventory(join(sourceRoot, "packages/desktop-setup/uv-licenses"));
-  assert.ok(uvNotices["LICENSE-APACHE"] && uvNotices["LICENSE-MIT"], "uv license notices required");
   // Validate the entire source Skill before copying anything, including links.
   await inventory(join(sourceRoot, "skills/hypit"));
   await mkdir(dirname(output), { recursive: true });
@@ -186,6 +182,14 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await rename(unpacked, join(stage, distributionPath));
     const strippedProfiles = await stripKnownFiles(stage, knownProfiles);
     const strippedDependencyFixtures = await stripKnownFiles(stage, knownDependencyFixtures);
+    for (const path of excludedLocalSpeechPaths) {
+      const absolute = join(stage, path);
+      const info = await lstat(absolute).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+      if (!info) continue;
+      if (!info.isDirectory()) throw new Error(`Unexpected local speech resource: ${path}`);
+      await inventory(absolute);
+      await rm(absolute, { recursive: true });
+    }
     await mkdir(join(stage, "skill"));
     await cp(join(sourceRoot, "skills/hypit"), join(stage, "skill/hypit"), { recursive: true, dereference: false });
     await mkdir(join(stage, "bin"));
@@ -193,15 +197,12 @@ export async function prepareResources({ platform, arch, hypitTgz, out, checkout
     await chmod(join(stage, "bin", target.executable), 0o755);
     await writeFile(join(stage, "bin", target.probe.executable), probeExecutable);
     await chmod(join(stage, "bin", target.probe.executable), 0o755);
-    await writeFile(join(stage, "bin", target.uv.executable), uvExecutable);
-    await chmod(join(stage, "bin", target.uv.executable), 0o755);
     await cp(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`), join(stage, "licenses"), { recursive: true, dereference: false });
-    await cp(join(sourceRoot, "packages/desktop-setup/uv-licenses"), join(stage, "licenses/uv"), { recursive: true, dereference: false });
     const files = await inventory(stage, { target, allowBinLinks: true });
     const installed = JSON.parse(await readFile(join(stage, distributionPath, "package.json"), "utf8"));
-    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, uv: { name: target.uv.name, version: target.uv.version, ...digest(uvExecutable) }, runtimeLock: runtimeLock.digests, mediaLock: media.digest, uvLock: uv.digest, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
+    const manifest = { schemaVersion: 1, platform, arch, hypit: { name: installed.name, version: installed.version, tarball: tarballDigest }, ffmpeg: { name: target.name, version: target.version }, ffprobe: { name: target.probe.name, version: target.probe.version }, runtimeLock: runtimeLock.digests, mediaLock: media.digest, excludedLocalSpeechPaths, strippedProfiles, strippedDependencyFixtures, files, resources: resourceDigests(files) };
     await writeFile(join(stage, "resource-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-    await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot, executeUv });
+    await checkArtifact({ out: stage, platform, arch, checkoutRoot: sourceRoot });
     await rename(stage, output);
     return manifest;
   } finally { await rm(stage, { recursive: true, force: true }); }

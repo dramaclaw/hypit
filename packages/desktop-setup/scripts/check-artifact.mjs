@@ -16,6 +16,10 @@ export const knownProfiles = ["examples/provider-package/hypit.runtime.json", "e
 // A published dependency includes this unused browser test asset. Remove this
 // exact fixture only; do not broaden the media allowlist for dependency trees.
 export const knownDependencyFixtures = ["runtime/node_modules/stream-http/test/server/static/browserify.png"];
+export const excludedLocalSpeechPaths = [
+  `${distributionPath}/packages/provider-whisperx-local`,
+  `${distributionPath}/services/whisperx`,
+];
 
 export function targetFor({ platform, arch }) {
   const release = mediaLock.targets[`${platform}-${arch}`];
@@ -113,10 +117,8 @@ function assertAllowedPath(path, target, directory = false) {
     || path.startsWith("skill/hypit/")
     || path === `bin/${target.executable}`
     || path === `bin/${target.probe.executable}`
-    || path === `bin/${target.uv.executable}`
-    || /^licenses\/uv\/LICENSE-(?:APACHE|MIT)$/.test(path)
     || /^licenses\/(?:COPYING|SOURCES\.md|VERSIONS\.txt)$/.test(path)
-    || (directory && ["runtime", "runtime/node_modules", "skill", "skill/hypit", "bin", "licenses", "licenses/uv"].includes(path));
+    || (directory && ["runtime", "runtime/node_modules", "skill", "skill/hypit", "bin", "licenses"].includes(path));
   if (!allowed) throw new Error(`Resource outside allowlist: ${path}`);
 }
 
@@ -198,14 +200,14 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   assert.deepEqual(manifest.runtimeLock, runtimeLock.digests, "Runtime lock digest mismatch");
   const media = await readMediaLock(sourceRoot);
   assert.deepEqual(manifest.mediaLock, media.digest, "Media lock digest mismatch");
-  const uv = await readUvLock(sourceRoot);
-  assert.deepEqual(manifest.uvLock, uv.digest, "uv lock digest mismatch");
-  const lockedUv = uv.lock.targets[`${platform}-${arch}`];
-  const uvDigest = { sha256: lockedUv.sha256, bytes: lockedUv.bytes };
-  assert.deepEqual(manifest.uv, { name: target.uv.name, version: target.uv.version, ...uvDigest }, "uv manifest mismatch");
+  assert.equal(manifest.uv, undefined, "Local Python runtime must not be bundled");
+  assert.equal(manifest.uvLock, undefined, "Local Python runtime must not be bundled");
+  assert.deepEqual(manifest.excludedLocalSpeechPaths, excludedLocalSpeechPaths, "Local speech exclusion list mismatch");
   assert.ok(/^[a-f0-9]{64}$/.test(manifest.hypit.tarball.sha256) && Number.isSafeInteger(manifest.hypit.tarball.bytes) && manifest.hypit.tarball.bytes > 0, "Invalid tarball digest");
   for (const path of Object.keys(manifest.files)) assertAllowedPath(path, target);
   const files = await inventory(root, { target, allowBinLinks: true });
+  for (const path of excludedLocalSpeechPaths) assert.ok(!Object.keys(files).some(file => file.startsWith(`${path}/`)), `Local speech resource remains: ${path}`);
+  assert.ok(Object.keys(files).some(file => file.startsWith(`${distributionPath}/packages/whisperx/`)), "WhisperX capability contract is missing");
   assert.deepEqual(files, manifest.files, "Resource digest, size or inventory mismatch");
   assert.deepEqual(resourceDigests(files), manifest.resources, "Top-level resource digest mismatch");
   const installed = JSON.parse(await readFile(join(root, distributionPath, "package.json"), "utf8"));
@@ -223,22 +225,10 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   const probe = join(root, "bin", target.probe.executable);
   checkMediaBinary(await readFile(probe), target, "ffprobe");
   assert.deepEqual(files[`bin/${target.probe.executable}`], { sha256: locked.ffprobe.sha256, bytes: locked.ffprobe.bytes }, "FFprobe differs from locked binary");
-  const uvBinary = join(root, "bin", target.uv.executable);
-  checkUvBinary(await readFile(uvBinary), target);
-  assert.deepEqual(files[`bin/${target.uv.executable}`], uvDigest, "uv differs from locked binary");
-  if (platform === "darwin") assert.ok((await lstat(uvBinary)).mode & 0o111, "uv is not executable");
   const notices = await inventory(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`));
   assert.ok(notices.COPYING && notices["SOURCES.md"] && notices["VERSIONS.txt"], "Media license and source notices required");
-  const uvNotices = await inventory(join(sourceRoot, "packages/desktop-setup/uv-licenses"));
-  assert.ok(uvNotices["LICENSE-APACHE"] && uvNotices["LICENSE-MIT"], "uv license notices required");
-  assert.deepEqual(await inventory(join(root, "licenses")), { ...notices, ...Object.fromEntries(Object.entries(uvNotices).map(([path, value]) => [`uv/${path}`, value])) }, "Media or uv license notices differ from checkout");
+  assert.deepEqual(await inventory(join(root, "licenses")), notices, "Media license notices differ from checkout");
   if (platform === "darwin") assert.ok((await lstat(probe)).mode & 0o111, "FFprobe is not executable");
-  // Execute only verified bytes, and only when the host can run this target.
-  if (platform === process.platform && arch === process.arch) {
-    const { stdout } = await executeUv(uvBinary, ["--version"], { timeout: 15_000, maxBuffer: 64 * 1024 });
-    const line = stdout.trim();
-    assert.ok(line === `uv ${target.uv.version}` || (line.startsWith(`uv ${target.uv.version} (`) && /^[^\r\n]+\)$/.test(line)), "uv version mismatch");
-  }
   return manifest;
 }
 

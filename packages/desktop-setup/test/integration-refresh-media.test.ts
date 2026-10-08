@@ -48,6 +48,47 @@ async function fixture(t: TestContext, platform: "darwin" | "win32") {
 }
 
 for (const platform of ["darwin", "win32"] as const) {
+  test(`${platform} startup upgrades a legacy desktop Profile without asking for credentials`, async t => {
+    const f = await fixture(t, platform);
+    const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    for (const key of Object.keys(legacy.bindings)) if (key.startsWith("@hypit/whisperx@") || key.startsWith("@hypit/cosyvoice@")) delete legacy.bindings[key];
+    legacy.customSetting = "preserved";
+    await writeFile(f.paths.profile, JSON.stringify(legacy));
+    assert.equal((await readDesktopStatus(f.old)).configured, false);
+    const refreshed = await refreshDesktopStatus(f.old);
+    assert.equal(refreshed.configured, true);
+    const updated = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    assert.equal(updated.bindings["@hypit/whisperx@1#whisperx-alignment"], "newapi.personal");
+    assert.equal(Object.keys(updated.bindings).length, 13);
+    assert.equal(updated.customSetting, "preserved");
+  });
+  test(`${platform} startup removes only an exactly managed legacy speech endpoint`, async t => {
+    const f = await fixture(t, platform);
+    const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    legacy.bindings["@hypit/whisperx@1#whisperx-alignment"] = "whisperx.local";
+    legacy.endpoints["whisperx.local"] = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
+      expectedModel: "small", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
+    } };
+    await writeFile(f.paths.profile, JSON.stringify(legacy));
+    assert.equal((await refreshDesktopStatus(f.old)).configured, true);
+    const updated = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    assert.equal(updated.bindings["@hypit/whisperx@1#whisperx-alignment"], "newapi.personal");
+    assert.equal(updated.endpoints["whisperx.local"], undefined);
+  });
+  test(`${platform} modified local speech configuration is preserved and reported incomplete`, async t => {
+    const f = await fixture(t, platform);
+    const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
+    legacy.bindings["@hypit/whisperx@1#whisperx-alignment"] = "whisperx.local";
+    legacy.endpoints["whisperx.local"] = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
+      expectedModel: "custom", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
+    } };
+    const bytes = JSON.stringify(legacy);
+    await writeFile(f.paths.profile, bytes);
+    const result = await refreshDesktopStatus(f.old);
+    assert.equal(result.configured, false);
+    assert.equal(result.diagnostics.find(item => item.code === "profile")?.status, "fail");
+    assert.equal(await readFile(f.paths.profile, "utf8"), bytes);
+  });
   test(`${platform} Profile recovery cleanup warning keeps a committed refresh configured`, async (t) => {
     const f = await fixture(t, platform);
     const unlink = fs.unlink;

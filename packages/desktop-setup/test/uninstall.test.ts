@@ -56,11 +56,22 @@ test("successful native cleanup prints retained local speech resources and safe 
   assert.match(output, /人工检查/);
 });
 
-test("desktop guidance states optional preparation, upstream caches, retention and provider-neutral future binding", async () => {
+test("desktop guidance describes NewAPI speech and safe legacy resource retention", async () => {
   for (const path of ["../../../docs/zh/guide/desktop-installer.md", "../README.md"]) {
     const guide = await readFile(new URL(path, import.meta.url), "utf8");
-    for (const text of ["本地语音识别与字幕对齐（可选）", "small", "int8", "Program Home", "Hugging Face", "uv", "模型缓存", "newapi.personal", "@hypit/whisperx@1#whisperx-alignment", "逐词", "句子级", "人工检查"]) assert.ok(guide.includes(text), `${path}: missing ${text}`);
+    for (const text of ["NewAPI", "newapi.personal", "@hypit/whisperx@1#whisperx-alignment", "逐词", "本地", "模型"]) assert.ok(guide.includes(text), `${path}: missing ${text}`);
+    assert.doesNotMatch(guide, /“安装并启动”|“重试安装”/);
   }
+});
+
+test("packaged Skill directs desktop users to NewAPI speech, not local installation", async () => {
+  const distribution = await readFile(new URL("../../../skills/hypit/references/environment/distribution.md", import.meta.url), "utf8");
+  const localTools = await readFile(new URL("../../../skills/hypit/references/environment/local-tools.md", import.meta.url), "utf8");
+  assert.match(distribution, /audio-transcribe/);
+  assert.match(distribution, /no local speech installation card/);
+  assert.doesNotMatch(distribution, /Future NewAPI alignment|The optional “本地语音识别与字幕对齐/);
+  assert.match(localTools, /desktop installer is an exception/);
+  assert.match(localTools, /separately installed local Provider/);
 });
 
 test("integration confirmation names every supported destination and explicit legacy recovery on both platforms", () => {

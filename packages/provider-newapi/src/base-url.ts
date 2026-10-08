@@ -11,8 +11,11 @@ export function normalizeNewApiBaseUrl(value: string): string {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHosts.has(url.hostname))) {
     throw new Error("DramaClaw NewAPI baseUrl must use HTTPS or loopback HTTP");
   }
-  if (url.username || url.password || url.href.includes("?") || url.href.includes("#")) {
-    throw new Error("DramaClaw NewAPI baseUrl must not contain credentials, query parameters or fragments");
+  if (url.username || url.password) {
+    throw new Error("DramaClaw NewAPI baseUrl must not contain credentials");
+  }
+  if (url.href.includes("?") || url.href.includes("#")) {
+    throw new Error("DramaClaw NewAPI baseUrl must not contain a query or fragment");
   }
   // An explicit non-root path is already the caller's API prefix.
   url.pathname = url.pathname.replace(/\/+$/u, "") || "/v1";

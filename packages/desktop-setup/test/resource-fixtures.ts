@@ -34,6 +34,7 @@ export async function fixture(extra: Record<string, string> = {}) {
   const packageRoot = join(root, "package");
   await put(packageRoot, "package.json", JSON.stringify({ name: "@hypit/hypit", version: "7.8.9", type: "module", bin: { hypit: "bin/hypit.mjs" }, scripts: { postinstall: "exit 99" } }));
   await put(packageRoot, "bin/hypit.mjs", "console.log('7.8.9');\n");
+  await put(packageRoot, "packages/whisperx/src/index.ts", "export const alignment = true;\n");
   for (const [path, value] of Object.entries(extra)) await put(packageRoot, path, value);
   const tarball = join(root, "hypit.tgz");
   await createTar({ file: tarball, cwd: root, gzip: true, portable: true }, ["package"]);

@@ -75,32 +75,27 @@ that backup when desktop integration is removed. A valid managed legacy copy at
 Codex-specific path only as a legacy/manual-recovery location. Integration uninstall retains Runtime
 Profiles, platform credentials, and video projects.
 
-The optional “本地语音识别与字幕对齐（可选）” card prepares local WhisperX only after an explicit
-“安装并启动” action, with `small/cpu/int8` and `zh/en`. It uses bundled, locked uv 0.12.20;
-do not install a system uv as a substitute. No NewAPI model fee or NewAPI/OSS credential access is
-involved. Use “重试安装”, “启动服务”, “停止服务” and “检查状态” for recovery. Closing a window
-does not cancel preparation; force-quitting the application may interrupt it.
+The current desktop installer binds `@hypit/whisperx@1#whisperx-alignment` to
+`newapi.personal` by default. This is the capability contract name, not a local
+WhisperX installation. Transcription uses NewAPI's `audio-transcribe` interface
+and must return measured word/character timestamps. NewAPI usage may incur model
+charges. Hypit Setup does not include uv, a Python speech service or model
+weights, and it has no local speech installation card or action. Do not tell a
+desktop user to install uv or download a local model for this Profile.
 
-The Program Home is `<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`; `.venv`,
-`nltk_data`, `install.log` and `program.log` live there. Hugging Face/torch model caches and uv's
-package/Python downloads may use their upstream default locations. Do not claim all model data is
-contained in Program Home. For an activated endpoint, inspect without downloads using
-`hypit programs status --runtime "<profile>" --endpoint whisperx.local --json`; stop it with
-`programs down` and the same options before application removal. Preparation and `up` can download
-dependencies or models; obtain explicit user intent before running either.
+When upgrading an older desktop Profile, Hypit Setup fills missing NewAPI bindings
+and migrates only an exactly matching, installer-managed `whisperx.local`
+endpoint. It preserves custom bindings. If a custom local endpoint remains,
+the new desktop package does not provide its local Provider; inspect the Profile
+and use an independently installed compatible Provider or select NewAPI. Do
+not claim that an unverified custom endpoint works.
 
-Ordinary uninstall retains all local speech resources and the Profile alignment binding. Explicit
-configuration clearing removes the desktop Profile, including that binding, but retains models.
-There is no automatic speech-resource deletion action: inspect the exact Program Home manually
-after stopping the service, preserve unknown/modified files and symlinks, and never clear shared
-Hugging Face/torch/uv caches or the whole hostState directory merely to remove this installation.
-
-Future NewAPI alignment must implement `@hypit/whisperx@1#whisperx-alignment` and return the same
-`AlignedTranscriptEvidence` with measured word/character start and end times for canonical 16 kHz
-mono speech and an explicit language. Sentence-only timestamps or plain text are insufficient.
-When that adapter exists, switching the binding from `whisperx.local` to `newapi.personal` needs
-no project/Source/Run/caption rewrite or local cache deletion; check local readiness before switching
-back. The cloud alignment adapter and UI switch are not currently implemented.
+Older installations may have a Program Home at
+`<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`. Upgrading,
+removing desktop integration or clearing the desktop Profile does not delete
+that home, downloaded models or shared caches. Confirm an old service is stopped
+and inspect exact ownership before manual cleanup; never clear all of hostState
+or shared Hugging Face/torch/uv caches.
 
 If the shell cannot find the executable, inspect existing package records:
 

@@ -12,7 +12,12 @@ import { LOCAL_WHISPERX_ENDPOINT, WHISPERX_ALIGNMENT_CAPABILITY, isWhisperXProfi
 const endpoint = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
   expectedModel: "small", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
 } };
-async function fixture(t: TestContext, document: any = createDesktopProfile({ baseUrl: "https://newapi.example/v1" })) {
+function createLegacyProfile(): any {
+  const profile = createDesktopProfile({ baseUrl: "https://newapi.example/v1" }) as any;
+  delete profile.bindings[WHISPERX_ALIGNMENT_CAPABILITY];
+  return profile;
+}
+async function fixture(t: TestContext, document: any = createLegacyProfile()) {
   const root = await mkdtemp(join(tmpdir(), "hypit-whisperx-profile-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const profilePath = join(root, "profiles", "desktop-newapi.json");
@@ -82,7 +87,7 @@ test("read-only activation refuses conflicting, invalid and missing Profiles", a
 });
 
 test("commit preserves unrelated document values and original permissions", async (t) => {
-  const document = createDesktopProfile({ baseUrl: "https://newapi.example/v1" }) as any;
+  const document = createLegacyProfile();
   document.dataRoot = "../my-custom-runtime";
   document.worker = { executionMemoryMb: 2048 };
   document.endpoints.custom = { use: "@hypit/provider-whisperx-local", config: { expectedModel: "large-v3" } };

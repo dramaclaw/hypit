@@ -214,7 +214,7 @@ for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32
     assert.equal(m.platform, platform); assert.equal(m.arch, arch);
     assert.equal(m.hypit.name, "@hypit/hypit"); assert.equal(m.hypit.version, "7.8.9");
     assert.equal(JSON.parse(await readFile(join(f.out, distributionPath, "package.json"), "utf8")).version, "7.8.9");
-    assert.deepEqual(await readdir(join(f.out, "bin")), [filename, platform === "win32" ? "ffprobe.exe" : "ffprobe", platform === "win32" ? "uv.exe" : "uv"]);
+    assert.deepEqual(await readdir(join(f.out, "bin")), [filename, platform === "win32" ? "ffprobe.exe" : "ffprobe"]);
     assert.deepEqual(await readFile(join(f.out, "bin", filename)), executable(platform));
     if (platform === "darwin") assert.ok((await stat(join(f.out, "bin", filename))).mode & 0o111);
     assert.equal(await readFile(join(f.out, "skill/hypit/references/nested/example.svml"), "utf8"), "<Video />");
@@ -241,144 +241,20 @@ test("strips only known example profiles and records them without changing the t
   assert.deepEqual(await readFile(f.hypitTgz), before);
 });
 
-for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
-  test(`stages locked uv and both license notices for ${platform}`, async (t) => {
-    const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-    const { prepareResources } = await loadScript("prepare-resources.mjs");
-    const name = platform === "win32" ? "uv.exe" : "uv";
-    const calls: string[] = [];
-    const result = await prepareResources({ ...f, platform, arch, executeUv: async (path: string, args: string[]) => {
-      assert.equal(path.endsWith(join("bin", name)), true); assert.deepEqual(args, ["--version"]); calls.push(path); return f.executeUv();
-    } });
-    assert.deepEqual(result.uv, { name: "astral-sh/uv", version: "0.12.20", ...result.files[`bin/${name}`] });
-    await access(join(f.out, "bin", name), constants.X_OK);
-    assert.equal(calls.length, process.platform === platform && process.arch === arch ? 1 : 0);
-    for (const license of ["LICENSE-APACHE", "LICENSE-MIT"]) assert.equal(await readFile(join(f.out, "licenses/uv", license), "utf8"), `Fixture ${license}`);
+test("desktop resources omit local Python and WhisperX runtime while retaining capability", async t => {
+  const f = await fixture({
+    "services/whisperx/uv.lock": "legacy",
+    "packages/provider-whisperx-local/src/program.ts": "legacy",
   });
-}
-
-test("rejects uv lock changes to targets, version, URL, member and integrity", async (t) => {
-  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-  const { readUvLock } = await loadScript("check-artifact.mjs");
-  assert.equal(typeof readUvLock, "function");
-  const path = "packages/desktop-setup/uv-lock.json";
-  const original = JSON.parse(await readFile(join(f.source, path), "utf8"));
-  const mutations = [
-    (l: any) => { l.targets["linux-x64"] = l.targets["win32-x64"]; },
-    (l: any) => { delete l.targets["win32-x64"]; },
-    (l: any) => { l.name = "unknown/uv"; },
-    (l: any) => { l.version = "0.0.0"; },
-    (l: any) => { l.license = "unknown"; },
-    (l: any) => { l.targets["darwin-arm64"].url = "https://example.invalid/latest.tar.gz"; },
-    (l: any) => { l.targets["darwin-arm64"].entry = "../uv"; },
-    (l: any) => { l.targets["win32-x64"].entry = "uv-x86_64-pc-windows-msvc/uv.exe"; },
-    (l: any) => { l.targets["darwin-arm64"].archiveSha256 = "invalid"; },
-    (l: any) => { l.targets["darwin-arm64"].members.push("unexpected"); },
-    (l: any) => { l.targets["darwin-arm64"].sha256 = "invalid"; },
-    (l: any) => { l.targets["darwin-arm64"].bytes = 0; },
-  ];
-  for (const mutate of mutations) {
-    const lock = structuredClone(original); mutate(lock); await put(f.source, path, JSON.stringify(lock));
-    await assert.rejects(readUvLock(f.source), /uv|resource path/i);
-  }
-});
-
-for (const platform of ["darwin", "win32"] as const) {
-  test(`uv download rejects archive/member tampering and unexpected members (${platform})`, async (t) => {
-    const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-    const { lockedUv } = await loadScript("prepare-resources.mjs");
-    assert.equal(typeof lockedUv, "function");
-    const { digest, targetFor } = await loadScript("check-artifact.mjs");
-    const key = platform === "darwin" ? "darwin-arm64" : "win32-x64";
-    const target = targetFor({ platform, arch: platform === "darwin" ? "arm64" : "x64" });
-    const lock = JSON.parse(await readFile(join(f.source, "packages/desktop-setup/uv-lock.json"), "utf8"));
-    const item = lock.targets[key];
-    await rm(join(f.source, "packages/desktop-setup/node_modules/.cache/hypit-uv", item.sha256));
-    const bytes = executable(platform);
-    async function archive(extra?: string) {
-      if (platform === "win32") return Buffer.from(zipSync({ "uv.exe": bytes, "uvw.exe": bytes, "uvx.exe": bytes, ...(extra ? { [extra]: bytes } : {}) }));
-      const entries = ["uv-aarch64-apple-darwin/", "uv-aarch64-apple-darwin/uvx", item.entry, ...(extra ? [extra] : [])];
-      const blocks: Buffer[] = [];
-      for (const path of entries) {
-        const directory = path.endsWith("/");
-        const data = directory ? Buffer.alloc(0) : bytes;
-        const header = new Header({ path, type: directory ? "Directory" : "File", size: data.length, mode: 0o755 }); header.encode();
-        blocks.push(header.block!, data, Buffer.alloc((512 - data.length % 512) % 512));
-      }
-      return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
-    }
-    let download = await archive();
-    t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(download)));
-    await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: "0".repeat(64) }, target), /uv archive integrity mismatch/);
-    await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256, sha256: "0".repeat(64) }, target), /uv binary integrity mismatch/);
-    await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256, bytes: item.bytes + 1 }, target), /uv binary integrity mismatch/);
-    for (const extra of ["unexpected", "../uv", item.entry]) {
-      if (platform === "win32" && extra === item.entry) continue;
-      download = await archive(extra);
-      await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256 }, target), /uv archive|resource path/i);
-    }
-    if (platform === "win32") {
-      download = Buffer.from(zipSync({ "uv.exe": bytes, "ux.exe": bytes, "uvw.exe": bytes, "uvx.exe": bytes }));
-      for (let offset = download.indexOf("ux.exe"); offset !== -1; offset = download.indexOf("ux.exe", offset + 6)) download.write("uv.exe", offset);
-      await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256 }, target), /uv archive/);
-      download = Buffer.from(zipSync({ "uvw.exe": bytes, "uvx.exe": bytes }));
-      await assert.rejects(lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256 }, target), /uv archive/);
-    }
-    download = await archive();
-    assert.deepEqual(await lockedUv(f.source, { ...item, archiveSha256: digest(download).sha256 }, target), bytes);
-    t.mock.method(globalThis, "fetch", async () => { throw new Error("cache should avoid downloading"); });
-    assert.deepEqual(await lockedUv(f.source, item, target), bytes);
-  });
-}
-
-test("rejects cached uv substitution, architecture mismatch and symlinks", async (t) => {
-  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-  const { lockedUv } = await loadScript("prepare-resources.mjs"); assert.equal(typeof lockedUv, "function");
-  const { digest, targetFor } = await loadScript("check-artifact.mjs");
-  for (const [platform, arch] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
-    const bytes = executable(platform, true); const item = { ...digest(bytes) };
-    const path = `packages/desktop-setup/node_modules/.cache/hypit-uv/${item.sha256}`;
-    await put(f.source, path, bytes);
-    await assert.rejects(lockedUv(f.source, item, targetFor({ platform, arch })), /architecture/);
-    await put(f.source, path, Buffer.from("tampered"));
-    await assert.rejects(lockedUv(f.source, item, targetFor({ platform, arch })), /uv binary integrity mismatch/);
-    await rm(join(f.source, path)); await symlink(f.hypitTgz, join(f.source, path));
-    await assert.rejects(lockedUv(f.source, item, targetFor({ platform, arch })), /regular files/);
-  }
-});
-
-test("rejects wrong uv --version output before publishing and missing source licenses", async (t) => {
-  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  t.after(() => rm(f.root, { recursive: true, force: true }));
   const { prepareResources } = await loadScript("prepare-resources.mjs");
-  const platform = process.platform === "win32" ? "win32" : "darwin";
-  const arch = platform === "win32" ? "x64" : "arm64";
-  if (process.platform === platform && process.arch === arch) {
-    await assert.rejects(prepareResources({ ...f, platform, arch, executeUv: async () => ({ stdout: "uv 0.12.200\n" }) }), /uv version mismatch/);
-    await assert.rejects(access(f.out));
-  }
-  for (const name of ["LICENSE-APACHE", "LICENSE-MIT"]) {
-    await rm(join(f.source, "packages/desktop-setup/uv-licenses", name));
-    await assert.rejects(prepareResources({ ...f, platform, arch }), /uv license/i);
-    await put(f.source, `packages/desktop-setup/uv-licenses/${name}`, `Fixture ${name}`);
-  }
-});
-
-test("rehashed manifests cannot bless substituted uv or omit its licenses", async (t) => {
-  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
-  const { prepareResources } = await loadScript("prepare-resources.mjs");
-  const { checkArtifact, inventory, resourceDigests, targetFor } = await loadScript("check-artifact.mjs");
-  const options = { ...f, platform: "darwin", arch: "arm64" };
-  await prepareResources(options); const m = await manifest(f.out);
-  for (const attack of ["binary", "LICENSE-APACHE", "LICENSE-MIT", "version"]) {
-    if (attack === "binary") await put(f.out, "bin/uv", Buffer.concat([executable("darwin"), Buffer.from("substitution")]));
-    else if (attack === "version") m.uv.version = "0.0.0";
-    else await rm(join(f.out, "licenses/uv", attack));
-    m.files = await inventory(f.out, { target: targetFor(options), allowBinLinks: true }); m.resources = resourceDigests(m.files);
-    await put(f.out, "resource-manifest.json", JSON.stringify(m));
-    await assert.rejects(checkArtifact(options), /uv|license/i);
-    if (attack === "binary") await put(f.out, "bin/uv", executable("darwin"));
-    else if (attack !== "version") await put(f.out, `licenses/uv/${attack}`, `Fixture ${attack}`);
-  }
+  const { checkArtifact } = await loadScript("check-artifact.mjs");
+  await prepareResources({ ...f, platform: "darwin", arch: "arm64" });
+  const files = Object.keys((await manifest(f.out)).files);
+  assert.ok(files.some(path => path.endsWith("/packages/whisperx/src/index.ts")));
+  assert.ok(!files.some(path => path.includes("/services/whisperx/") || path.includes("/provider-whisperx-local/") || path === "bin/uv"));
+  await assert.rejects(access(join(f.out, "bin/uv")));
+  await checkArtifact({ ...f, platform: "darwin", arch: "arm64" });
 });
 
 for (const path of [".env", ".env.production", "hypit.runtime.json", "examples/provider-package/nested/hypit.runtime.json", "secrets/credentials.json", "keys/service-account.json", "private.pem", "output/final.mp4", "movie.webm", "generated-frame.png", "audio.aac", "secrets/api-key.txt"]) {

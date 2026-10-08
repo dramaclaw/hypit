@@ -2,6 +2,7 @@ import { newApiDefaultBindings } from "@dramaclaw/provider-newapi";
 import type { CanonicalValue } from "@hypit/protocol";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, posix, win32 } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { isManagedLauncherInstalled, prepareFileChange, snapshotFile } from "./launcher-install.js";
 import type { LauncherOptions } from "./launcher-install.js";
 import type { PreparedRemoval } from "./skill-install.js";
@@ -66,6 +67,35 @@ export async function prepareDesktopMediaRefresh(options: LauncherOptions): Prom
     }
   }
   return changed ? prepareFileChange(snapshot, Buffer.from(`${JSON.stringify(profile, null, 2)}\n`), options.platform, snapshot.mode, "profile") : undefined;
+}
+
+/** Upgrade only missing NewAPI bindings and an exactly installer-managed legacy speech binding. */
+export async function prepareDesktopNewApiBindingsRefresh(options: { readonly profile: string; readonly platform: "darwin" | "win32" }): Promise<PreparedRemoval | undefined> {
+  const snapshot = await snapshotFile(options.profile);
+  if (!snapshot.bytes) return undefined;
+  let profile: DesktopProfileDocument;
+  try { profile = parseDesktopProfileDocument(snapshot.bytes); } catch { return undefined; }
+  const endpoint = profile.endpoints["newapi.personal"];
+  if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)
+    || (endpoint as Record<string, unknown>).use !== "@dramaclaw/provider-newapi"
+    || (endpoint as Record<string, unknown>).pool !== "newapi.personal") return undefined;
+  const key = "@hypit/whisperx@1#whisperx-alignment";
+  const managedLegacySpeech = { use: "@hypit/provider-whisperx-local", pool: "whisperx.local", config: {
+    expectedModel: "small", expectedDevice: "cpu", expectedCompute: "int8", alignmentLanguages: ["zh", "en"],
+  } };
+  let changed = false;
+  if (profile.bindings[key] === "whisperx.local" && isDeepStrictEqual(profile.endpoints["whisperx.local"], managedLegacySpeech)) {
+    profile.bindings[key] = "newapi.personal";
+    changed = true;
+    if (!Object.values(profile.bindings).includes("whisperx.local")) delete profile.endpoints["whisperx.local"];
+  }
+  for (const [capability, target] of Object.entries(newApiDefaultBindings)) {
+    if (Object.hasOwn(profile.bindings, capability)) continue;
+    profile.bindings[capability] = target;
+    changed = true;
+  }
+  if (!changed) return undefined;
+  return prepareFileChange(snapshot, Buffer.from(`${JSON.stringify(profile, null, 2)}\n`), options.platform, snapshot.mode, "profile");
 }
 
 /** Accepts the secret-free endpoint config returned by completeNewApiSetup. */
