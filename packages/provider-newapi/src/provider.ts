@@ -598,6 +598,17 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
       const passages = interpretWhisperXTranscript(response as WhisperXTranscriptResponse, request.sampleFrames);
       assert(!hasSpokenTranscriptText(response) || passages.some((passage) => passage.words.length > 0),
         "DramaClaw NewAPI transcription response has no timed words");
+      const segments = Array.isArray(response.segments) ? response.segments : [];
+      const usesSegmentWords = passages.length === segments.length
+        && passages.some((passage) => passage.words.length > 0);
+      if (usesSegmentWords) {
+        for (let index = 0; index < passages.length; index += 1) {
+          const segment = segments[index] as Record<string, unknown>;
+          assert(typeof segment.text !== "string" || segment.text.trim().length === 0
+            || passages[index]!.words.length > 0,
+          "DramaClaw NewAPI transcription segment has no timed words");
+        }
+      }
       for (const passage of passages) for (const word of passage.words) {
         assert(word.startSample !== undefined && word.endSampleExclusive !== undefined,
           "DramaClaw NewAPI transcription word is missing a timestamp");

@@ -126,6 +126,19 @@ test("NewAPI transcription refuses spoken segments without timed words", async (
   );
 });
 
+test("NewAPI transcription refuses a spoken segment missing words when another segment has them", async () => {
+  await assert.rejects(
+    () => invokeTranscription(wav(32_000), async () => Response.json({
+      text: "Hello world.",
+      segments: [
+        { start: 0.1, end: 0.4, text: "Hello", words: [{ word: "Hello", start: 0.1, end: 0.4 }] },
+        { start: 0.5, end: 0.8, text: "world" },
+      ],
+    })),
+    /timed words/u,
+  );
+});
+
 test("NewAPI transcription refuses recognized words without timestamps", async () => {
   await assert.rejects(
     () => invokeTranscription(wav(32_000), async () => Response.json({
