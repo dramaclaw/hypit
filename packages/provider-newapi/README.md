@@ -1,6 +1,6 @@
 # `@dramaclaw/provider-newapi`
 
-这是 Hypit 对 DramaClaw NewAPI 网关的图片、视频和语音 Provider。它只注册 Hypit 已经有精确定义、并且 DramaClaw 当前目录也支持的模型；不会额外伪造尚未定义的 Hypit 模型。
+这是 Hypit 对 DramaClaw NewAPI 网关的图片、视频、语音生成和语音转文字 Provider。它只注册 Hypit 已经有精确定义、并且网关已验证可用的能力；不会额外伪造尚未定义的 Hypit 模型。
 
 | Hypit Capability | NewAPI 模型名 | 类型 |
 | --- | --- | --- |
@@ -14,6 +14,9 @@
 | `@hypit/seedance@1#seedance-2.5` | `seedance-2.5` | 视频 |
 | `@hypit/minimax-h3@1#minimax-h3` | `MiniMax-H3` | 视频 |
 | `@hypit/mimo-speech@1#mimo-v2.5-tts-voiceclone` | `index-tts-2` | 参考音频克隆配音 |
+| `@hypit/cosyvoice@1#cosyvoice-v3.5-flash-voice-design` | `voice-enrollment` → `cosyvoice-v3.5-flash` | 文本设计可复用音色与预览 |
+| `@hypit/cosyvoice@1#cosyvoice-v3.5-flash-speech` | `cosyvoice-v3.5-flash` | 使用设计音色配音 |
+| `@hypit/whisperx@1#whisperx-alignment` | `audio-transcribe` | 逐词时间戳语音转文字 |
 
 ## 首次使用
 
@@ -26,7 +29,7 @@ hypit runtime up
 
 `runtime init` 在尚无 Profile 时创建并选择可编辑的 `hypit.runtime.json`；已有 Profile 会保留。
 此命令不会登录或启动服务。起始 Profile 保留
-HypiHub，并将上表十项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
+HypiHub，并将上表十三项能力默认绑定到 `newapi.personal`。首次 `runtime up` 会询问 NewAPI 地址和
 API Key，再询问是否配置 OSS 中转。仅用文字生成图片或视频时可以选择不配置 OSS。
 
 地址写入 Profile 的 `baseUrl`，必须使用 HTTPS；本机服务可以使用 loopback HTTP。API Key
@@ -68,6 +71,32 @@ hypit runtime up
 Provider 只在请求实际包含参考素材时上传 OSS，路径为 `relay/hypit/YYYYMMDD/<uuid>.<扩展名>`，并把临时签名 URL 交给 NewAPI。纯文本请求不会创建 OSS 客户端，也不会上传任何内容。未配置 OSS 却使用参考素材时，请求会在调用付费生成接口之前失败，并给出明确错误。
 
 `index-tts-2` 复用 Hypit 官方的 `<mimo:VoiceClone>` 作者接口。Provider 把朗读文字、唯一参考音频和可选演绎指令转换为 NewAPI `/audio/speech` 请求；返回音频会进入当前 Build 的 ResourceStore。它不提供无参考音频的预设音色或声音设计。由于参考音频是必需输入，使用 `index-tts-2` 前必须配置 OSS。
+
+`cosyvoice-v3.5-flash` 使用独立的音色设计和配音接口。设计请求的 `model` 必须是 `voice-enrollment`，`target_model` 才是 `cosyvoice-v3.5-flash`；配音请求直接使用 `cosyvoice-v3.5-flash`。例如：
+
+```xml
+<cosy:VoiceDesign id="host" name="host1" language="zh" speech={story.segment.voiceSample.speech}>
+  温暖自然的年轻女性声音，音色清亮，语速平稳，吐字清晰。
+</cosy:VoiceDesign>
+<cosy:Speech id="narration" speech={story.segment.line.speech} voice={host.voice}/>
+```
+
+`host.voice` 保存网关返回的可复用音色 ID，`host.preview` 是预览 WAV，`narration.audio` 是配音音频。网关若返回 `audio.url`，Provider 会下载该音频并放入 Build 的 ResourceStore；音色设计与配音均不需要 OSS。音色 ID 与网关账号或渠道可能绑定，请在同一 NewAPI Endpoint 下设计和使用；不要将生成的 ID 或签名音频 URL 写入 Source、Profile 或日志。已有 Profile 不会自动覆盖；要接入这两项，手动将对应 `bindings` 加入：
+
+```json
+{
+  "@hypit/cosyvoice@1#cosyvoice-v3.5-flash-voice-design": "newapi.personal",
+  "@hypit/cosyvoice@1#cosyvoice-v3.5-flash-speech": "newapi.personal"
+}
+```
+
+`audio-transcribe` 复用现有的 WhisperX 对齐能力，向 NewAPI `/audio/transcriptions` 直接上传已校验的 16 kHz 单声道 PCM WAV，并请求逐词时间戳；返回结果仍是 Hypit 的 `AlignedTranscriptEvidence`。这一路径不需要 OSS 中转，也不再需要本地 WhisperX 服务。新建 Runtime Profile 会自动选择它。已有 Profile 不会被覆盖；如需切换，将其 `bindings` 中的对应项设为：
+
+```json
+{
+  "@hypit/whisperx@1#whisperx-alignment": "newapi.personal"
+}
+```
 
 视频生成通过 `POST /video/generations` 提交并轮询 `GET /video/generations/{taskId}`；图片根据是否有参考图调用 `/images/generations` 或 `/images/edits`。下载后的图片、视频都会进入当前 Hypit Build 的 ResourceStore。错误信息中的 HTTP(S) URL 会被脱敏，避免签名地址进入日志。
 

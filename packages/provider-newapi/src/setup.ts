@@ -1,4 +1,7 @@
+import { capabilityKey } from "@hypit/protocol";
 import type { CanonicalValue } from "@hypit/protocol";
+import { whisperXCapabilities } from "@hypit/whisperx";
+import { cosyVoiceCapabilities } from "@hypit/cosyvoice";
 
 import { normalizeNewApiBaseUrl } from "./base-url.js";
 import { newApiRoutes } from "./routes.js";
@@ -26,7 +29,9 @@ export type NewApiSetupCredential = {
 };
 
 export const newApiDefaultBindings: Readonly<Record<string, "newapi.personal">> = Object.freeze(Object.fromEntries(
-  newApiRoutes.map((route) => [route.key, "newapi.personal"] as const),
+  [...newApiRoutes.map((route) => route.key), capabilityKey(whisperXCapabilities.alignment),
+    capabilityKey(cosyVoiceCapabilities.design), capabilityKey(cosyVoiceCapabilities.speech)]
+    .map((key) => [key, "newapi.personal"] as const),
 ));
 
 export function inspectNewApiSetup(config: CanonicalValue): NewApiSetupInspection {

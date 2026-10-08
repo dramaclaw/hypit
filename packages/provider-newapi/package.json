@@ -7,11 +7,15 @@
   "hypit": { "activation": "./src/activation.ts" },
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
+    "@hypit/artifact": "workspace:*",
+    "@hypit/cosyvoice": "workspace:*",
     "@hypit/endpoint-kit": "workspace:*",
     "@hypit/generation": "workspace:*",
     "@hypit/protocol": "workspace:*",
     "@hypit/runtime": "workspace:*",
     "@hypit/runtime-kit": "workspace:*",
+    "@hypit/speech-evidence": "workspace:*",
+    "@hypit/whisperx": "workspace:*",
     "ali-oss": "^6.23.0"
   },
   "devDependencies": {
@@ -22,6 +26,7 @@
     "@hypit/nano-banana": "workspace:*",
     "@hypit/seedance": "workspace:*",
     "@hypit/seedream": "workspace:*",
+    "@hypit/speech": "workspace:*",
     "@types/ali-oss": "^6.16.11"
   }
 }

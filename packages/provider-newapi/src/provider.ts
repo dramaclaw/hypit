@@ -1,4 +1,5 @@
 import { requestDeadline } from "@hypit/runtime-kit";
+import { artifactTypes } from "@hypit/artifact";
 import {
   EndpointResponseError,
   EndpointHttpError,
@@ -20,8 +21,22 @@ import type {
 import type { GenerationArtifactUrlResolver } from "@hypit/generation";
 import { canonicalize } from "@hypit/protocol";
 import type { BlobRef } from "@hypit/protocol";
+import {
+  cosyVoiceCapabilities,
+  cosyVoiceTypes,
+  verifyCosyVoiceDesignRequest,
+  verifyCosyVoiceSpeechRequest,
+} from "@hypit/cosyvoice";
 import { credentialRef } from "@hypit/runtime";
 import type { CredentialRef } from "@hypit/runtime";
+import { sealAlignedTranscriptEvidence, speechEvidenceTypes } from "@hypit/speech-evidence";
+import {
+  assertWhisperXEvidenceWav,
+  interpretWhisperXTranscript,
+  verifyWhisperXAlignmentRequest,
+  whisperXCapabilities,
+} from "@hypit/whisperx";
+import type { WhisperXTranscriptResponse } from "@hypit/whisperx";
 
 import { normalizeNewApiBaseUrl } from "./base-url.js";
 import type { NewApiRelayConfig } from "./config.js";
@@ -76,8 +91,8 @@ function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function publicText(value: string, credentials: Credentials = {}): string {
-  for (const secret of Object.values(credentials).map((item) => item.secret)
+function publicText(value: string, credentials: Credentials = {}, sensitive: readonly string[] = []): string {
+  for (const secret of [...Object.values(credentials).map((item) => item.secret), ...sensitive]
     .filter((secret): secret is string => typeof secret === "string" && secret.length > 0)
     .sort((a, b) => b.length - a.length)) {
     value = value.replaceAll(secret, "[redacted]");
@@ -94,9 +109,16 @@ function publicError(value: unknown): string | undefined {
   return item.error === undefined ? undefined : publicError(item.error);
 }
 
-function safeError(error: unknown, credentials: Credentials): EndpointServiceError {
+function hasSpokenTranscriptText(response: Record<string, unknown>): boolean {
+  const segmentTexts = Array.isArray(response.segments) ? response.segments.map((segment: unknown) =>
+    segment !== null && typeof segment === "object" && !Array.isArray(segment)
+      ? (segment as Record<string, unknown>).text : undefined) : [];
+  return [response.text, ...segmentTexts].some((value) => typeof value === "string" && value.trim().length > 0);
+}
+
+function safeError(error: unknown, credentials: Credentials, sensitive: readonly string[] = []): EndpointServiceError {
   return new EndpointServiceError(error instanceof EndpointServiceError ? error.code : "DRAMACLAW_NEWAPI_ERROR",
-    publicText(failureMessage(error), credentials));
+    publicText(failureMessage(error), credentials, sensitive));
 }
 
 function failure(error: unknown, credentials: Credentials): EndpointOutcome {
@@ -164,7 +186,7 @@ class NewApiClient {
         signal: deadline.signal,
         headers: {
           authorization: `Bearer ${credential(credentials, "apiKey")}`,
-          ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+          ...(typeof init.body === "string" ? { "content-type": "application/json" } : {}),
           ...(init.headers ?? {}),
         },
       })));
@@ -201,7 +223,7 @@ class NewApiClient {
     }
   }
 
-  async audio(path: string, credentials: Credentials, init: RequestInit): Promise<{
+  async audio(path: string, credentials: Credentials, init: RequestInit, allowUrl = false): Promise<{
     readonly bytes: Uint8Array;
     readonly mediaType: string;
   }> {
@@ -230,6 +252,19 @@ class NewApiClient {
         );
       }
       const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+      if (allowUrl && mediaType === "application/json") {
+        let body: Record<string, unknown>;
+        try { body = object(await transport(deadline.wait(response.json())), "DramaClaw NewAPI speech response"); }
+        catch { throw new EndpointResponseError("DramaClaw NewAPI speech response contains invalid JSON"); }
+        const audio = body.audio;
+        const url = audio !== null && typeof audio === "object" && !Array.isArray(audio)
+          ? (audio as Record<string, unknown>).url : undefined;
+        assert(typeof url === "string" && /^https:\/\//u.test(url), "DramaClaw NewAPI speech response has no audio URL");
+        const asset = await this.asset(url, "audio/wav");
+        assert(asset.mediaType.startsWith("audio/"), "DramaClaw NewAPI speech download is not audio");
+        assert(asset.bytes.byteLength > 0, "DramaClaw NewAPI speech download is empty");
+        return asset;
+      }
       assert(mediaType.startsWith("audio/"), "DramaClaw NewAPI speech response is not audio");
       const bytes = new Uint8Array(await transport(deadline.wait(response.arrayBuffer())));
       assert(bytes.byteLength > 0, "DramaClaw NewAPI speech response contains empty audio");
@@ -348,6 +383,47 @@ function decodedImage(base64: string): { bytes: Uint8Array; mediaType: string } 
   return { bytes, mediaType };
 }
 
+function decodedWav(value: unknown): Uint8Array {
+  assert(typeof value === "string" && value.length > 0 && /^[A-Za-z0-9+/]+={0,2}$/u.test(value)
+    && value.length % 4 === 0, "DramaClaw NewAPI voice design has no valid Base64 WAV preview");
+  const bytes = Buffer.from(value, "base64");
+  assert(bytes.toString("base64") === value && bytes.byteLength >= 44
+    && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WAVE",
+  "DramaClaw NewAPI voice design preview is not WAV audio");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = view.getUint32(4, true) + 8;
+  assert(end >= 44 && end <= bytes.byteLength, "DramaClaw NewAPI voice design preview has an invalid WAV size");
+  let offset = 12;
+  let blockAlign: number | undefined;
+  let dataBytes = 0;
+  while (offset + 8 <= end) {
+    const name = bytes.toString("ascii", offset, offset + 4);
+    const size = view.getUint32(offset + 4, true);
+    const body = offset + 8;
+    assert(body + size <= end, "DramaClaw NewAPI voice design preview has a truncated WAV chunk");
+    if (name === "fmt ") {
+      assert(size >= 16, "DramaClaw NewAPI voice design preview has an invalid WAV format");
+      const codec = view.getUint16(body, true);
+      const channels = view.getUint16(body + 2, true);
+      const sampleRate = view.getUint32(body + 4, true);
+      const byteRate = view.getUint32(body + 8, true);
+      const align = view.getUint16(body + 12, true);
+      const bits = view.getUint16(body + 14, true);
+      assert((codec === 1 && [8, 16, 24, 32].includes(bits)) || (codec === 3 && [32, 64].includes(bits)),
+        "DramaClaw NewAPI voice design preview has an unsupported WAV codec");
+      assert(channels > 0 && sampleRate > 0 && align === channels * bits / 8 && byteRate === sampleRate * align,
+        "DramaClaw NewAPI voice design preview has an invalid WAV format");
+      blockAlign = align;
+    } else if (name === "data") {
+      dataBytes += size;
+    }
+    offset = body + size + (size % 2);
+  }
+  assert(offset === end && blockAlign !== undefined && dataBytes > 0 && dataBytes % blockAlign === 0,
+    "DramaClaw NewAPI voice design preview has no decodable WAV samples");
+  return bytes;
+}
+
 function videoEndpoint(client: NewApiClient, publish: AssetPublisher | undefined, pollIntervalMs: number, operationTimeoutMs: number): AsyncEndpoint {
   return {
     async start(context) {
@@ -453,6 +529,87 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
       throw safeError(error, context.credentials);
     }
   };
+  const voiceDesignEndpoint: ImmediateEndpointHandler = async (context) => {
+    try {
+      const request = context.need.constraints;
+      verifyCosyVoiceDesignRequest(request);
+      const response = await client.json("/audio/voice-designs", context.credentials, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "voice-enrollment",
+          target_model: "cosyvoice-v3.5-flash",
+          preferred_name: request.preferredName,
+          voice_prompt: request.voicePrompt,
+          preview_text: request.previewText,
+          language: request.language,
+          sample_rate: 24_000,
+          response_format: "wav",
+        }),
+      });
+      assert(typeof response.voice === "string" && response.voice.trim().length > 0,
+        "DramaClaw NewAPI voice design response has no voice identifier");
+      assert(response.target_model === "cosyvoice-v3.5-flash",
+        "DramaClaw NewAPI voice design response has the wrong target model");
+      const preview = object(response.preview_audio, "DramaClaw NewAPI voice design preview");
+      const bytes = decodedWav(preview.data);
+      const artifact = await context.resources.put(bytes, "audio/wav");
+      return { value: { kind: "inline", value: canonicalize({
+        voice: response.voice, targetModel: "cosyvoice-v3.5-flash", preview: artifact,
+      }) } };
+    } catch (error) {
+      throw safeError(error, context.credentials);
+    }
+  };
+  const cosySpeechEndpoint: ImmediateEndpointHandler = async (context) => {
+    let voiceHandle: string | undefined;
+    try {
+      const request = context.need.constraints;
+      verifyCosyVoiceSpeechRequest(request);
+      voiceHandle = request.voice.voice;
+      const asset = await client.audio("/audio/speech", context.credentials, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "cosyvoice-v3.5-flash",
+          input: request.text,
+          voice: voiceHandle,
+          response_format: "wav",
+        }),
+      }, true);
+      return { value: await context.resources.put(asset.bytes, asset.mediaType) };
+    } catch (error) {
+      throw safeError(error, context.credentials, voiceHandle === undefined ? [] : [voiceHandle]);
+    }
+  };
+  const transcriptionEndpoint: ImmediateEndpointHandler = async (context) => {
+    try {
+      const request = verifyWhisperXAlignmentRequest(context.need.constraints);
+      const bytes = await context.resources.get(request.audio.resource);
+      assert(bytes !== undefined && bytes.byteLength === request.audio.size,
+        `DramaClaw NewAPI evidence Resource ${request.audio.resource} is unavailable or has changed`);
+      assertWhisperXEvidenceWav(bytes, request.sampleFrames);
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(bytes)], { type: "audio/wav" }), "evidence.wav");
+      form.append("model", "audio-transcribe");
+      form.append("response_format", "verbose_json");
+      form.append("language", request.language);
+      form.append("timestamp_granularities[]", "segment");
+      form.append("timestamp_granularities[]", "word");
+      const response = await client.json("/audio/transcriptions", context.credentials, { method: "POST", body: form });
+      const passages = interpretWhisperXTranscript(response as WhisperXTranscriptResponse, request.sampleFrames);
+      assert(!hasSpokenTranscriptText(response) || passages.some((passage) => passage.words.length > 0),
+        "DramaClaw NewAPI transcription response has no timed words");
+      for (const passage of passages) for (const word of passage.words) {
+        assert(word.startSample !== undefined && word.endSampleExclusive !== undefined,
+          "DramaClaw NewAPI transcription word is missing a timestamp");
+      }
+      const evidence = sealAlignedTranscriptEvidence({
+        passages,
+      });
+      return { value: { kind: "inline", value: canonicalize(evidence) } };
+    } catch (error) {
+      throw safeError(error, context.credentials);
+    }
+  };
   return defineEndpointPackage({
     module: newApiProviderModuleRef,
     facet: "gateway",
@@ -474,10 +631,20 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
     },
     defaultConcurrency: options.defaultConcurrency ?? 2,
     ...(options.actionLimits === undefined ? { actionLimits: { submit: { concurrency: 2 }, poll: { concurrency: 8 }, collect: { concurrency: 2 } } } : { actionLimits: options.actionLimits }),
-    capabilities: newApiRoutes.map((route) => route.result === "video"
+    capabilities: [...newApiRoutes.map((route) => route.result === "video"
       ? { capability: route.capability, returns: route.returns, lifecycle: "asynchronous" as const, endpoint: asyncEndpoint, capacity: route.capability.name, supports: route.supports }
       : { capability: route.capability, returns: route.returns, lifecycle: "immediate" as const,
         handler: route.result === "audio" ? audioEndpoint : imageEndpoint,
         capacity: route.capability.name, supports: route.supports }),
+      { capability: cosyVoiceCapabilities.design, returns: cosyVoiceTypes.designedVoice,
+        lifecycle: "immediate" as const, handler: voiceDesignEndpoint, capacity: "cosyvoice-design" },
+      { capability: cosyVoiceCapabilities.speech, returns: artifactTypes.blob,
+        lifecycle: "immediate" as const, handler: cosySpeechEndpoint, capacity: "cosyvoice-speech" }, {
+      capability: whisperXCapabilities.alignment,
+      returns: speechEvidenceTypes.alignedTranscript,
+      lifecycle: "immediate" as const,
+      handler: transcriptionEndpoint,
+      capacity: "transcription",
+    }],
   });
 }
