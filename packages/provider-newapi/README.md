@@ -81,7 +81,7 @@ Provider 只在请求实际包含参考素材时上传 OSS，路径为 `relay/hy
 <cosy:Speech id="narration" speech={story.segment.line.speech} voice={host.voice}/>
 ```
 
-`host.voice` 保存网关返回的可复用音色 ID，`host.preview` 是预览 WAV，`narration.audio` 是配音音频。网关若返回 `audio.url`，Provider 会下载该音频并放入 Build 的 ResourceStore；音色设计与配音均不需要 OSS。音色 ID 与网关账号或渠道可能绑定，请在同一 NewAPI Endpoint 下设计和使用；不要将生成的 ID 或签名音频 URL 写入 Source、Profile 或日志。已有 Profile 不会自动覆盖；要接入这两项，手动将对应 `bindings` 加入：
+`host.voice` 保存网关返回的可复用音色 ID，`host.preview` 是预览 WAV，`narration.audio` 是配音音频。网关若返回 `audio.url`，Provider 会下载该音频并放入 Build 的 ResourceStore；音色设计与配音均不需要 OSS。音频下载默认只接受与 NewAPI 网关同源的地址和公开的阿里云 OSS 地址，不跟随重定向，也不向下载地址发送 NewAPI API Key。若网关确实使用其他音频素材源，可在 Endpoint 的 `config` 中加入完整的可信 origin，例如 `"audioAssetOrigins": ["https://audio.example"]`。只填写协议和主机，不填写路径、查询参数或签名 URL；非 HTTPS 地址和非默认端口不接受，本机 loopback HTTP 网关的同源地址除外。音色 ID 与网关账号或渠道可能绑定，请在同一 NewAPI Endpoint 下设计和使用；不要将生成的 ID 或签名音频 URL 写入 Source、Profile 或日志。已有 Profile 不会自动覆盖；要接入这两项，手动将对应 `bindings` 加入：
 
 ```json
 {

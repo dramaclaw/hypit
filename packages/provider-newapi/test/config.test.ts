@@ -12,6 +12,19 @@ test("NewAPI endpoint configuration does not require OSS", () => {
   });
 });
 
+test("NewAPI endpoint preserves audio asset origins", () => {
+  const audioAssetOrigins = ["https://audio.example", "https://assets.example"];
+  assert.deepEqual(parseNewApiEndpointConfig({ baseUrl: "https://gateway.example/v1", apiKey, audioAssetOrigins }), {
+    baseUrl: "https://gateway.example/v1", apiKey, audioAssetOrigins,
+  });
+});
+
+test("NewAPI endpoint rejects non-string audio asset origins", () => {
+  assert.throws(() => parseNewApiEndpointConfig({
+    baseUrl: "https://gateway.example/v1", apiKey, audioAssetOrigins: ["https://audio.example", 42],
+  }), /audioAssetOrigins.*string/u);
+});
+
 test("NewAPI endpoint rejects a partial OSS relay group", () => {
   assert.throws(() => parseNewApiEndpointConfig({
     baseUrl: "https://gateway.example/v1",

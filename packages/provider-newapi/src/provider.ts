@@ -38,6 +38,7 @@ import {
 } from "@hypit/whisperx";
 import type { WhisperXTranscriptResponse } from "@hypit/whisperx";
 
+import { assertTrustedAudioAssetUrl } from "./audio-url.js";
 import { normalizeNewApiBaseUrl } from "./base-url.js";
 import type { NewApiRelayConfig } from "./config.js";
 import { createOssPublisher } from "./relay.js";
@@ -51,6 +52,7 @@ export type CreateNewApiProviderOptions = {
   readonly instance?: string;
   readonly pool?: string;
   readonly baseUrl?: string;
+  readonly audioAssetOrigins?: readonly string[];
   readonly apiKey?: CredentialRef;
   readonly relay?: NewApiRelayConfig;
   readonly publish?: AssetPublisher;
@@ -176,7 +178,8 @@ function dataUrl(value: string): { readonly bytes: Uint8Array; readonly mediaTyp
 }
 
 class NewApiClient {
-  constructor(readonly baseUrl: string, readonly timeout: number, readonly fetcher: typeof globalThis.fetch) {}
+  constructor(readonly baseUrl: string, readonly timeout: number, readonly fetcher: typeof globalThis.fetch,
+    readonly audioAssetOrigins: readonly string[]) {}
 
   async json(path: string, credentials: Credentials, init: RequestInit = {}): Promise<Record<string, unknown>> {
     const deadline = requestDeadline(this.timeout, () => new EndpointTransportError("DramaClaw NewAPI request timed out"));
@@ -207,12 +210,15 @@ class NewApiClient {
     }
   }
 
-  async asset(url: string, fallbackType: string): Promise<{ readonly bytes: Uint8Array; readonly mediaType: string }> {
+  async asset(url: string, fallbackType: string, redirect?: RequestRedirect): Promise<{ readonly bytes: Uint8Array; readonly mediaType: string }> {
     const inline = dataUrl(url);
     if (inline !== undefined) return inline;
     const deadline = requestDeadline(this.timeout, () => new EndpointTransportError("DramaClaw NewAPI asset download timed out"));
     try {
-      const response = await transport(deadline.wait(this.fetcher(url, { signal: deadline.signal })));
+      const response = await transport(deadline.wait(this.fetcher(url, {
+        signal: deadline.signal,
+        ...(redirect === undefined ? {} : { redirect }),
+      })));
       if (!response.ok) throw new EndpointServiceError("DRAMACLAW_NEWAPI_ASSET_ERROR", `DramaClaw NewAPI asset returned HTTP ${response.status}`);
       return {
         bytes: new Uint8Array(await transport(deadline.wait(response.arrayBuffer()))),
@@ -259,8 +265,9 @@ class NewApiClient {
         const audio = body.audio;
         const url = audio !== null && typeof audio === "object" && !Array.isArray(audio)
           ? (audio as Record<string, unknown>).url : undefined;
-        assert(typeof url === "string" && /^https:\/\//u.test(url), "DramaClaw NewAPI speech response has no audio URL");
-        const asset = await this.asset(url, "audio/wav");
+        assert(typeof url === "string" && url.length > 0, "DramaClaw NewAPI speech response has no audio URL");
+        assertTrustedAudioAssetUrl(url, this.baseUrl, this.audioAssetOrigins);
+        const asset = await this.asset(url, "audio/wav", "error");
         assert(asset.mediaType.startsWith("audio/"), "DramaClaw NewAPI speech download is not audio");
         assert(asset.bytes.byteLength > 0, "DramaClaw NewAPI speech download is empty");
         return asset;
@@ -496,7 +503,8 @@ export function createNewApiProvider(options: CreateNewApiProviderOptions = {}) 
   for (const [name, value] of Object.entries({ requestTimeoutMs, operationTimeoutMs })) {
     assert(Number.isSafeInteger(value) && value > 0, `DramaClaw NewAPI ${name} must be a positive integer`);
   }
-  const client = new NewApiClient(normalizeNewApiBaseUrl(options.baseUrl ?? "https://newapi.example/v1"), requestTimeoutMs, options.fetch ?? globalThis.fetch);
+  const client = new NewApiClient(normalizeNewApiBaseUrl(options.baseUrl ?? "https://newapi.example/v1"), requestTimeoutMs,
+    options.fetch ?? globalThis.fetch, options.audioAssetOrigins ?? []);
   const publish = options.publish ?? (options.relay === undefined ? undefined : createOssPublisher(options.relay));
   const asyncEndpoint = videoEndpoint(client, publish, options.pollIntervalMs ?? 10_000, operationTimeoutMs);
   const imageEndpoint: ImmediateEndpointHandler = async (context) => {

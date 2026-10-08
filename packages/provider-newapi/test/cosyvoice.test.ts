@@ -12,7 +12,7 @@ import { createNewApiProvider } from "../src/provider.js";
 
 const credentials = { apiKey: { secret: "test-secret-key" } };
 const voice = "opaque-voice.handle";
-const signedUrl = "https://audio.example/signed.wav?signature=private";
+const signedUrl = "https://voice-assets.oss-cn-shanghai.aliyuncs.com/signed.wav?signature=private";
 const wav = new Uint8Array(46);
 wav.set(Buffer.from("RIFF", "ascii"), 0);
 wav.set(Buffer.from("WAVE", "ascii"), 8);
@@ -34,11 +34,13 @@ function need(capability: Need["capability"], returns: Need["returns"], constrai
   return { id: "need:cosy", capability, returns, constraints: constraints as CanonicalValue, result: "record:cosy" };
 }
 
-async function invoke(request: Need, fetcher: typeof fetch, resources = new MemoryResourceStore()) {
+async function invoke(request: Need, fetcher: typeof fetch, resources = new MemoryResourceStore(),
+  audioAssetOrigins?: readonly string[], baseUrl = "https://gateway.example/v1") {
   const registry = new EndpointRegistry();
   await createNewApiProvider({
-    baseUrl: "https://gateway.example/v1",
+    baseUrl,
     apiKey: credentialRef("platform", "newapi.key"),
+    ...(audioAssetOrigins === undefined ? {} : { audioAssetOrigins }),
     fetch: fetcher,
   }).install(registry);
   const resolution = registry.resolve(request);
@@ -80,6 +82,7 @@ test("voice design stores WAV preview; returned opaque ID drives signed-URL spee
     }
     assert.equal(url, signedUrl);
     assert.equal(init?.headers, undefined, "signed audio download must not forward API credentials");
+    assert.equal(init?.redirect, "error", "signed audio download must reject redirects");
     return new Response(wav, { headers: { "content-type": "audio/wav" } });
   };
   const resources = new MemoryResourceStore();
@@ -99,6 +102,67 @@ test("voice design stores WAV preview; returned opaque ID drives signed-URL spee
   assert.equal(speech.result.value.mediaType, "audio/wav");
   assert.deepEqual(await resources.get(speech.result.value.resource), wav);
   assert.deepEqual(requests, ["https://gateway.example/v1/audio/voice-designs", "https://gateway.example/v1/audio/speech", signedUrl]);
+});
+
+test("rejects untrusted CosyVoice audio destinations before download", async () => {
+  const resources = new MemoryResourceStore();
+  const preview = await resources.put(wav, "audio/wav");
+  const request = need(cosyVoiceCapabilities.speech, artifactTypes.blob, {
+    voice: { voice, targetModel: "cosyvoice-v3.5-flash", preview }, text: "Hello there",
+  });
+  for (const url of [
+    "https://127.0.0.1/private.wav",
+    "https://user:password@voice-assets.oss-cn-shanghai.aliyuncs.com/private.wav",
+    "https://voice-assets.oss-cn-shanghai.aliyuncs.com.evil.example/private.wav",
+    "https://voice-assets.oss-cn-shanghai-internal.aliyuncs.com/private.wav",
+    "https://voice-assets.oss-cn-shanghai.aliyuncs.com:8443/private.wav",
+    "https://voice-assets.oss-cn-shanghai.aliyuncs.com/private.wav#fragment",
+  ]) {
+    let calls = 0;
+    await assert.rejects(() => invoke(request, async () => {
+      calls++;
+      return Response.json({ audio: { url } });
+    }, resources), `must reject ${url}`);
+    assert.equal(calls, 1, `must reject ${url} before a second fetch`);
+  }
+});
+
+test("accepts an explicitly trusted audio origin only when configured", async () => {
+  const resources = new MemoryResourceStore();
+  const preview = await resources.put(wav, "audio/wav");
+  const request = need(cosyVoiceCapabilities.speech, artifactTypes.blob, {
+    voice: { voice, targetModel: "cosyvoice-v3.5-flash", preview }, text: "Hello there",
+  });
+  const url = "https://audio.example/signed.wav?signature=private";
+  let calls = 0;
+  const fetcher: typeof fetch = async (input) => {
+    calls++;
+    return String(input).endsWith("/audio/speech") ? Response.json({ audio: { url } })
+      : new Response(wav, { headers: { "content-type": "audio/wav" } });
+  };
+  await assert.rejects(() => invoke(request, fetcher, resources));
+  assert.equal(calls, 1);
+  const { result } = await invoke(request, fetcher, resources, ["https://audio.example"]);
+  assert.equal(result.value.kind, "blob");
+  assert.equal(calls, 3);
+});
+
+test("accepts same-origin audio from an explicit loopback HTTP gateway", async () => {
+  const resources = new MemoryResourceStore();
+  const preview = await resources.put(wav, "audio/wav");
+  const request = need(cosyVoiceCapabilities.speech, artifactTypes.blob, {
+    voice: { voice, targetModel: "cosyvoice-v3.5-flash", preview }, text: "Hello there",
+  });
+  const url = "http://127.0.0.1:3000/audio/signed.wav";
+  const requests: string[] = [];
+  const { result } = await invoke(request, async (input, init) => {
+    requests.push(String(input));
+    if (String(input).endsWith("/audio/speech")) return Response.json({ audio: { url } });
+    assert.equal(init?.redirect, "error");
+    return new Response(wav, { headers: { "content-type": "audio/wav" } });
+  }, resources, undefined, "http://127.0.0.1:3000/v1");
+  assert.equal(result.value.kind, "blob");
+  assert.deepEqual(requests, ["http://127.0.0.1:3000/v1/audio/speech", url]);
 });
 
 test("speech accepts a binary WAV response", async () => {
