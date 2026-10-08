@@ -77,12 +77,12 @@ async function resolved(request: Need, fetcher: typeof fetch, publish?: Provider
   return resolution.registration;
 }
 
-test("registers four image, five video and one audio model", () => {
+test("registers four image, five video, three speech/design and one transcription capability", () => {
   const provider = createNewApiProvider({
     baseUrl: "https://newapi.example/v1",
     apiKey: credentialRef("platform", "newapi.key"),
   });
-  assert.equal(provider.offers.length, 10);
+  assert.equal(provider.offers.length, 13);
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.imageSet.name).length, 4);
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.videoSet.name).length, 5);
   assert.equal(provider.offers.filter((offer) => offer.returns.name === generationTypes.audioSet.name).length, 1);

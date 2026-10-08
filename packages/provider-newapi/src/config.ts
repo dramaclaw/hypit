@@ -20,6 +20,7 @@ export type NewApiRelayConfig = {
 
 export type NewApiEndpointConfig = {
   readonly baseUrl: string;
+  readonly audioAssetOrigins?: readonly string[];
   readonly apiKey: CredentialRef;
   readonly relay?: NewApiRelayConfig;
   readonly defaultConcurrency?: number;
@@ -32,12 +33,17 @@ export type NewApiEndpointConfig = {
 export function parseNewApiEndpointConfig(value: CanonicalValue): NewApiEndpointConfig {
   const config = runtimeConfigObject(value, "DramaClaw NewAPI");
   runtimeConfigExact(config, [
-    "baseUrl", "apiKey",
+    "baseUrl", "apiKey", "audioAssetOrigins",
     "relayEndpoint", "relayBucket", "relayAccessKeyId", "relayAccessKeySecret", "relayTtlSeconds",
     "defaultConcurrency", "actionLimits", "pollIntervalMs", "requestTimeoutMs", "operationTimeoutMs",
   ], "DramaClaw NewAPI");
   const baseUrl = runtimeConfigString(config.baseUrl, "DramaClaw NewAPI baseUrl");
   const apiKey = runtimeConfigCredentialRef(config.apiKey, "DramaClaw NewAPI apiKey");
+  const audioAssetOrigins = config.audioAssetOrigins;
+  if (audioAssetOrigins !== undefined && (!Array.isArray(audioAssetOrigins)
+    || audioAssetOrigins.some((origin) => typeof origin !== "string"))) {
+    throw new Error("DramaClaw NewAPI audioAssetOrigins must be an array of strings");
+  }
   if (baseUrl === undefined || apiKey === undefined) {
     throw new Error("DramaClaw NewAPI requires baseUrl and apiKey CredentialRef");
   }
@@ -65,6 +71,7 @@ export function parseNewApiEndpointConfig(value: CanonicalValue): NewApiEndpoint
   return {
     baseUrl,
     apiKey,
+    ...(audioAssetOrigins === undefined ? {} : { audioAssetOrigins: audioAssetOrigins as string[] }),
     ...(relay === undefined ? {} : { relay }),
     ...(defaultConcurrency === undefined ? {} : { defaultConcurrency }),
     ...(actionLimits === undefined ? {} : { actionLimits }),

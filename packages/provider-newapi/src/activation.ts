@@ -14,6 +14,7 @@ const adapter = createRuntimeEndpointAdapterFacet({
         pool: context.pool,
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
+        ...(config.audioAssetOrigins === undefined ? {} : { audioAssetOrigins: config.audioAssetOrigins }),
         ...(config.relay === undefined ? {} : { relay: config.relay }),
         ...(config.defaultConcurrency === undefined ? {} : { defaultConcurrency: config.defaultConcurrency }),
         ...(config.actionLimits === undefined ? {} : { actionLimits: config.actionLimits }),

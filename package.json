@@ -203,6 +203,7 @@
     "@hypit/comment-sticker": "workspace:*",
     "@hypit/comment-sticker-studio": "workspace:*",
     "@hypit/composition": "workspace:*",
+    "@hypit/cosyvoice": "workspace:*",
     "@hypit/credential-store-env": "workspace:*",
     "@hypit/credential-store-file": "workspace:*",
     "@hypit/credential-store-os": "workspace:*",

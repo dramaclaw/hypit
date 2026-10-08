@@ -90,6 +90,9 @@ importers:
       '@hypit/composition':
         specifier: workspace:*
         version: link:packages/composition
+      '@hypit/cosyvoice':
+        specifier: workspace:*
+        version: link:packages/cosyvoice
       '@hypit/credential-store-env':
         specifier: workspace:*
         version: link:packages/credential-store-env
@@ -992,6 +995,27 @@ importers:
       '@hypit/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/cosyvoice:
+    dependencies:
+      '@hypit/artifact':
+        specifier: workspace:*
+        version: link:../artifact
+      '@hypit/component-kit':
+        specifier: workspace:*
+        version: link:../component-kit
+      '@hypit/elaborator':
+        specifier: workspace:*
+        version: link:../elaborator
+      '@hypit/markup':
+        specifier: workspace:*
+        version: link:../markup
+      '@hypit/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@hypit/text':
+        specifier: workspace:*
+        version: link:../text
 
   packages/credential-store-env:
     dependencies:
@@ -2533,6 +2557,12 @@ importers:
 
   packages/provider-newapi:
     dependencies:
+      '@hypit/artifact':
+        specifier: workspace:*
+        version: link:../artifact
+      '@hypit/cosyvoice':
+        specifier: workspace:*
+        version: link:../cosyvoice
       '@hypit/endpoint-kit':
         specifier: workspace:*
         version: link:../endpoint-kit
@@ -2548,6 +2578,12 @@ importers:
       '@hypit/runtime-kit':
         specifier: workspace:*
         version: link:../runtime-kit
+      '@hypit/speech-evidence':
+        specifier: workspace:*
+        version: link:../speech-evidence
+      '@hypit/whisperx':
+        specifier: workspace:*
+        version: link:../whisperx
       ali-oss:
         specifier: ^6.23.0
         version: 6.23.0
@@ -2573,6 +2609,9 @@ importers:
       '@hypit/seedream':
         specifier: workspace:*
         version: link:../seedream
+      '@hypit/speech':
+        specifier: workspace:*
+        version: link:../speech
       '@types/ali-oss':
         specifier: ^6.16.11
         version: 6.23.3
@@ -3667,6 +3706,9 @@ importers:
       '@hypit/composition':
         specifier: workspace:*
         version: link:../composition
+      '@hypit/cosyvoice':
+        specifier: workspace:*
+        version: link:../cosyvoice
       '@hypit/credential-store-file':
         specifier: workspace:*
         version: link:../credential-store-file
