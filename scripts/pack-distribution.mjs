@@ -1,8 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { "json-path": { type: "boolean", default: false } } });
+const jsonPath = values["json-path"];
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "dist/release");
@@ -16,7 +20,7 @@ if (!npmCli || !npmCli.endsWith("npm-cli.js")) {
 }
 function npm(args, cwd, capture = false) {
   return execFileSync(process.execPath, [npmCli, ...args], {
-    cwd, encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
+    cwd, encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : jsonPath ? ["ignore", 2, 2] : "inherit",
   });
 }
 
@@ -51,7 +55,13 @@ try {
   await mkdir(output, { recursive: true });
   const packed = npm(["pack", "--ignore-scripts", "--pack-destination", output, "--json"], stage, true);
   await writeFile(resolve(output, "README.md"), readme);
-  console.log(packed);
+  if (jsonPath) {
+    const [result] = JSON.parse(packed);
+    if (!result?.filename?.endsWith(".tgz") || basename(result.filename) !== result.filename) throw new Error("npm pack returned an invalid tarball filename");
+    // npm --silent run pack:distribution -- --json-path yields one JSON string
+    // on stdout; the normal invocation retains npm's inventory output.
+    console.log(JSON.stringify(resolve(output, result.filename)));
+  } else console.log(packed);
 } finally {
   await rm(stage, { recursive: true, force: true });
 }

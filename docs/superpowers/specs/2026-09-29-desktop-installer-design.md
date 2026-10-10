@@ -1,5 +1,7 @@
 # Hypit 一键桌面安装器设计
 
+> 2026-09-30 更新：Skill 安装与 Agent 集成以[通用 Agent 设计](2026-09-30-universal-agent-skill-installation-design.md)及其[实施计划](../plans/2026-09-30-universal-agent-skill-installation.md)为准，使用通用 Skill 与按需 Claude Code 兼容副本。下文保留首版设计的历史描述。
+
 ## 目标
 
 为不熟悉命令行和代码的团队成员提供 Hypit 的一键安装体验。首版交付两个未签名的内部测试安装包：

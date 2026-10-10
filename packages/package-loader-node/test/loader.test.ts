@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -75,8 +75,8 @@ test("Distribution requirements leave project packages to npm and follow interna
     assert.deepEqual(await distributionExternalPackageRequirements(
       ["@hypit/provider-example", "@studio/provider-art", "another-provider"], root,
     ), [
-      { name: "example-sdk", version: "2.3.4", specifier: "example-sdk@2.3.4" },
-      { name: "example-transport", version: "1.2.3", specifier: "example-transport@1.2.3" },
+      { name: "example-sdk", version: "2.3.4", specifier: "example-sdk@2.3.4", requirers: [await realpath(join(root, "packages/provider-example"))] },
+      { name: "example-transport", version: "1.2.3", specifier: "example-transport@1.2.3", requirers: [await realpath(join(root, "packages/transport-example"))] },
     ]);
     assert.deepEqual(await distributionExternalPackageRequirements(["@studio/provider-art"], root), []);
   } finally {
@@ -96,6 +96,7 @@ test("selected packages own dependency install options and conflicting declarati
     }
     assert.deepEqual(await distributionExternalPackageRequirements(["@hypit/first"], root), [{
       name: "example-sdk", version: "1.2.3", specifier: "example-sdk@1.2.3", env: { SDK_SKIP_DOWNLOAD: "yes" },
+      requirers: [await realpath(join(root, "packages/first"))],
     }]);
     await assert.rejects(distributionExternalPackageRequirements(["@hypit/first", "@hypit/second"], root), /Conflicting installation environment/u);
     const path = join(root, "packages", "first", "package.json");
@@ -104,6 +105,35 @@ test("selected packages own dependency install options and conflicting declarati
     await writeFile(path, JSON.stringify(manifest));
     await assert.rejects(distributionExternalPackageRequirements(["@hypit/first"], root), /must name a direct external dependency/u);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Distribution dependency traversal retains all physical requirers, versions and cycles", async t => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-requirer-graph-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const contribution = `{ format: "hypit.node-package@1" }`;
+  await projectPackage(root, "@hypit/first", contribution, { "example-sdk": "1.2.3", "@hypit/shared": "workspace:*" });
+  await projectPackage(root, "@hypit/second", contribution, { "example-sdk": "1.2.3", "@hypit/shared": "workspace:*" });
+  await projectPackage(root, "@hypit/shared", contribution, { "example-sdk": "2.0.0", "@hypit/first": "workspace:*" });
+  await projectPackage(root, "@hypit/unused", contribution, { "unselected-sdk": "9.0.0" });
+  const nested = join(root, "packages/first/node_modules/@hypit/shared");
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(nested, "package.json"), JSON.stringify({ name: "@hypit/shared", version: "1.0.0",
+    dependencies: { "example-sdk": "3.0.0", "@hypit/first": "workspace:*" } }));
+  assert.deepEqual(await distributionExternalPackageRequirements(["@hypit/first", "@hypit/second", "@hypit/first", "project-provider"], root), [
+    { name: "example-sdk", version: "1.2.3", specifier: "example-sdk@1.2.3", requirers: [await realpath(join(root, "packages/first")), await realpath(join(root, "packages/second"))] },
+    { name: "example-sdk", version: "2.0.0", specifier: "example-sdk@2.0.0", requirers: [await realpath(join(root, "packages/shared"))] },
+    { name: "example-sdk", version: "3.0.0", specifier: "example-sdk@3.0.0", requirers: [await realpath(nested)] },
+  ]);
+});
+
+test("Distribution dependency traversal rejects a selected internal package escaping its root", async t => {
+  const root = await mkdtemp(join(tmpdir(), "hypit-requirer-boundary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await projectPackage(root, "@hypit/outside", `{ format: "hypit.node-package@1" }`, { "example-sdk": "1.2.3" });
+  const distribution = join(root, "distribution");
+  await mkdir(join(distribution, "packages"), { recursive: true });
+  await symlink(join(root, "packages/outside"), join(distribution, "packages/outside"), process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(distributionExternalPackageRequirements(["@hypit/outside"], distribution), /outside.*Distribution/u);
 });
 
 test("a Distribution package accepts an exact CLI-only dependency from the machine npm home", async () => {

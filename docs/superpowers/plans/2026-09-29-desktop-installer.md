@@ -1,5 +1,7 @@
 # Hypit One-Click Desktop Installer Implementation Plan
 
+> 2026-09-30 update: Skill installation and Agent integration now follow the [universal Agent design](../specs/2026-09-30-universal-agent-skill-installation-design.md) and [implementation plan](2026-09-30-universal-agent-skill-installation.md), with a portable Skill and a conditional Claude Code compatibility copy. The original task descriptions below remain as historical implementation records.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build an unsigned Apple Silicon DMG and a cross-built Windows x64 NSIS installer that install Hypit, its Codex Skill, FFmpeg, and a Chinese NewAPI/OSS setup application for non-technical users.

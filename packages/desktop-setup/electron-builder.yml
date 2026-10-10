@@ -1,0 +1,47 @@
+appId: ai.hypit.setup
+productName: Hypit Setup
+asar: true
+asarUnpack:
+  - dist/credential-store/runtime/**
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+  - '!node_modules/**'
+extraResources:
+  - from: resources/${os}-${arch}
+    to: .
+    filter:
+      - '**/*'
+npmRebuild: false
+forceCodeSigning: false
+publish: null
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+  artifactName: Hypit-Setup-${version}-${arch}.${ext}
+  identity: null
+  notarize: false
+  hardenedRuntime: false
+  entitlements: build/entitlements.mac.plist
+  category: public.app-category.video
+dmg:
+  sign: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  signAndEditExecutable: false
+  signExecutable: false
+nsis:
+  artifactName: Hypit-Setup-${version}-${arch}.${ext}
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  packElevateHelper: false
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  include: build/installer.nsh

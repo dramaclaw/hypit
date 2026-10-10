@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 class UnpreparedResourceError(RuntimeError):
@@ -25,22 +26,32 @@ def assert_punkt_tab(root: Path) -> None:
 
 
 def prepare_punkt_tab(root: Path) -> Path:
-    import nltk
-
-    root = root.expanduser().resolve()
+    root = root.expanduser()
+    if root.is_symlink():
+        raise UnpreparedResourceError("NLTK sentence data path contains a symlink")
+    root = root.resolve()
     target = root / "tokenizers" / "punkt_tab"
-    # Already installed is already done. `nltk.download` fetches its index before it looks at what is
-    # on disk, so preparing an installation that needs nothing still needed the network, and a machine
-    # without it failed at the step whose whole job is to make the machine ready offline.
+    english = target / "english"
+    if (root / "tokenizers").is_symlink() or target.is_symlink() or english.is_symlink():
+        raise UnpreparedResourceError("NLTK sentence data path contains a symlink")
     try:
-        assert_punkt_tab(root)
+        assert_sentence_data(root, "en")
         return target
-    except RuntimeError:
+    except UnpreparedResourceError:
         pass
-    root.mkdir(parents=True, exist_ok=True)
-    if not nltk.download("punkt_tab", download_dir=str(root), quiet=False, raise_on_error=True):
-        raise RuntimeError("NLTK could not install punkt_tab")
-    assert_punkt_tab(root)
+    if english.exists() or english.is_symlink():
+        raise UnpreparedResourceError("NLTK sentence data is incomplete; inspect the selected data directory before retrying")
+    target.mkdir(parents=True, exist_ok=True)
+    from nltk.tokenize.punkt import PunktParameters, save_punkt_params
+
+    # These parameters are authored by Hypit. No NLTK pretrained corpus or model is redistributed.
+    parameters = PunktParameters()
+    parameters.abbrev_types.update({"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e"})
+    with TemporaryDirectory(prefix=".hypit-punkt-", dir=target) as temporary:
+        staged = Path(temporary) / "english"
+        save_punkt_params(parameters, dir=str(staged))
+        staged.rename(english)
+    assert_sentence_data(root, "en")
     return target
 
 

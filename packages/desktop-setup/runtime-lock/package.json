@@ -1,0 +1,17 @@
+{
+  "name": "hypit-desktop-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@puppeteer/browsers": "3.2.2",
+    "ali-oss": "^6.23.0",
+    "koffi": "3.2.1",
+    "puppeteer-core": "25.10.0",
+    "sharp": "0.35.4",
+    "cmu-pronouncing-dictionary": "3.0.0",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "cjs-module-lexer": "2.2.1"
+  }
+}

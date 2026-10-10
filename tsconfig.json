@@ -26,6 +26,8 @@
   "exclude": [
     "dist",
     "node_modules",
-    "packages/*/dist"
+    "packages/*/dist",
+    "packages/desktop-setup/resources",
+    "packages/desktop-setup/release"
   ]
 }

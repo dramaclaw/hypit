@@ -5,6 +5,8 @@ import { dirname, relative, resolve, sep } from "node:path";
 import {
   collectLoadedNodePackageComponents,
   distributionExternalPackageRequirements,
+  locateNodePackage,
+  NodePackageNotFoundError,
   loadNodePackageSelection,
 } from "@hypit/package-loader-node";
 import type { NodePackageSelectionRequest } from "@hypit/package-loader-node";
@@ -48,6 +50,7 @@ import type {
 import {
   hypitHostPackageRoot,
   hypitHostStateRoot,
+  parseRegistryPackageSpec,
   prepareHostPackages,
 } from "@hypit/runtime-host-node";
 import type {
@@ -462,10 +465,29 @@ export async function prepareRuntimeConfigPackages(
     ...document.endpoints.map((item) => item.use),
     ...credentials.credentials.map((item) => item.use),
   ], options.distributionPackageRoot);
-  return await prepareHostPackages(requirements, {
+  const bundled: HostPackageReport[] = [];
+  const missing = requirements.filter(item => {
+    const selected = parseRegistryPackageSpec(item.specifier);
+    const roots: string[] = [];
+    for (const requirer of item.requirers) {
+      try {
+        const located = locateNodePackage(item.name, { from: resolve(requirer, "package.json"),
+          distributionRoots: [options.distributionPackageRoot!], externalRoots: [], allowExternal: false });
+        if (located.manifest.version !== item.version) throw new Error(`Resolved ${item.name} from ${requirer} does not match required ${item.version}`);
+        roots.push(located.root);
+      } catch (error) {
+        if (!(error instanceof NodePackageNotFoundError)) throw error;
+      }
+    }
+    if (roots.length === 0 || roots.length !== item.requirers.length) return true;
+    bundled.push({ ...selected, root: roots[0]!, action: "already-installed" });
+    options.onProgress?.({ ...selected, phase: "ready" });
+    return false;
+  });
+  return [...bundled, ...await prepareHostPackages(missing, {
     root: hypitHostPackageRoot(options.hostStateRoot),
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-  });
+  })];
 }
 
 function capabilityKey(capability: CapabilityRef): string {

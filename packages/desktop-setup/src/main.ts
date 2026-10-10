@@ -1,0 +1,503 @@
+import { isAbsolute, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { mkdir, readFile } from "node:fs/promises";
+import type { BrowserWindowConstructorOptions, WebContents } from "electron";
+import { completeNewApiSetup, newApiDefaultBindings, parseNewApiEndpointConfig } from "@dramaclaw/provider-newapi";
+import { PlatformCredentialStore } from "@hypit/credential-store-platform";
+import type { DiagnosticItem, SetupInput, SetupProgress, SetupResult } from "./contracts.js";
+import { IPC_CHANNELS } from "./ipc.js";
+import type { SetupFailure, SetupReply } from "./ipc.js";
+import { desktopPaths } from "./paths.js";
+import { scanAgentTargets, supportedSkillTargets, targetSummary } from "./agent-targets.js";
+import type { AgentScanResult, AgentSkillTarget, AgentSkillTargetId, DetectedAgentId } from "./agent-targets.js";
+import { canRefreshManagedSkill, exists, isManagedLegacyCodexSkillInstalled, isManagedSkillInstalled, isManagedSkillOwned, skillBackupWarnings, skillRecoveryWarnings } from "./skill-install.js";
+import { isManagedLauncherInstalled } from "./launcher-install.js";
+import type { LauncherOptions } from "./launcher-install.js";
+import { desktopMediaAvailable, prepareDesktopMediaRefresh, prepareDesktopNewApiBindingsRefresh } from "./profile.js";
+import { commitDesktopSetup } from "./setup-core.js";
+import { installDesktopIntegration, removeDesktopIntegration } from "./lifecycle.js";
+import type { DesktopIntegrationOptions } from "./lifecycle.js";
+import { runDiagnostics } from "./diagnostics.js";
+import { transactionRecoveryWarnings } from "./recovery-discovery.js";
+import { clearDesktopConfiguration, createConfirmationSession, desktopCredentialRefs } from "./clear-configuration.js";
+
+export function browserWindowOptions(preloadPath: string): BrowserWindowConstructorOptions {
+  if (!isAbsolute(preloadPath)) throw new Error("Absolute preload path required");
+  return { width: 920, height: 760, minWidth: 720, minHeight: 600, title: "Hypit 设置", backgroundColor: "#f3f6fa", autoHideMenuBar: true,
+    webPreferences: { preload: preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, webSecurity: true, devTools: false } };
+}
+
+export function localPageUrl(path: string): string {
+  if (!isAbsolute(path)) throw new Error("Absolute local page required");
+  return pathToFileURL(path).href;
+}
+
+export function isTrustedSender(event: { sender: unknown; senderFrame: unknown }, contents: { mainFrame?: { url: string } }, pageUrl: string): boolean {
+  return pageUrl.startsWith("file:") && event.sender === contents && event.senderFrame === contents.mainFrame && contents.mainFrame?.url === pageUrl;
+}
+
+export function hardenWebContents(contents: WebContents): void {
+  const refuse = (event: { preventDefault(): void }) => { event.preventDefault(); };
+  contents.on("will-navigate", refuse);
+  contents.on("will-frame-navigate", refuse);
+  contents.on("will-redirect", refuse);
+  contents.on("will-attach-webview", refuse);
+  contents.setWindowOpenHandler(() => ({ action: "deny" }));
+  contents.session.setPermissionRequestHandler((_contents, _permission, callback) => { callback(false); });
+  contents.session.setPermissionCheckHandler(() => false);
+}
+
+function exactKeys(value: unknown, keys: readonly string[]): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key))) throw new Error("Invalid setup arguments");
+}
+
+export function validateIpcArguments(channel: string, args: readonly unknown[]): SetupInput | undefined {
+  if (channel === IPC_CHANNELS.submit) {
+    if (args.length !== 1) throw new Error("Invalid setup arguments");
+    const value = args[0];
+    exactKeys(value, ["baseUrl", "apiKey", "relay"]);
+    exactKeys(value.relay, ["enabled", "endpoint", "bucket", "accessKeyId", "accessKeySecret"]);
+    if (value.relay.enabled !== true) throw new Error("Invalid setup arguments");
+    for (const field of [value.baseUrl, value.apiKey, value.relay.endpoint, value.relay.bucket, value.relay.accessKeyId, value.relay.accessKeySecret]) {
+      if (typeof field !== "string" || !field.trim() || field.length > 8192 || /[\u0000-\u001f\u007f]/u.test(field)) throw new Error("Invalid setup arguments");
+    }
+    // URL credentials/query fragments are never ordinary resumable configuration.
+    const url = new URL(value.baseUrl as string);
+    if (url.username || url.password || url.search || url.hash) throw new Error("Invalid setup arguments");
+    const endpoint = new URL((value.relay.endpoint as string).includes("://") ? value.relay.endpoint as string : `https://${value.relay.endpoint as string}`);
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") throw new Error("Invalid setup arguments");
+    if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/u.test(value.relay.bucket as string)) throw new Error("Invalid setup arguments");
+    const input = value as unknown as SetupInput;
+    completeNewApiSetup(input);
+    return { baseUrl: input.baseUrl, apiKey: input.apiKey, relay: { ...input.relay } };
+  }
+  if (![IPC_CHANNELS.status, IPC_CHANNELS.diagnostics, IPC_CHANNELS.openConfig, IPC_CHANNELS.clear, IPC_CHANNELS.removeIntegration, IPC_CHANNELS.refreshAgents,
+    IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe].some((allowed) => allowed === channel) || args.length !== 0) throw new Error("Invalid setup arguments");
+  return undefined;
+}
+
+const errorMessages: Readonly<Record<string, string>> = {
+  SETUP_VALIDATION_FAILED: "配置校验失败", SETUP_NEWAPI_FAILED: "NewAPI 连接测试失败", SETUP_OSS_FAILED: "OSS 连接测试失败",
+  SETUP_CREDENTIAL_SNAPSHOT_FAILED: "读取平台凭据失败", SETUP_CREDENTIAL_WRITE_FAILED: "保存平台凭据失败", SETUP_PROFILE_WRITE_FAILED: "写入 Runtime Profile 失败",
+  INTEGRATION_INSTALL_FAILED: "桌面集成安装失败", SETUP_UNAVAILABLE: "此操作尚未可用", SETUP_REQUEST_FAILED: "操作失败，请检查配置后重试",
+  SKILL_BACKUP_UNAVAILABLE: "原 Skill 备份缺失或无法读取；请按诊断路径恢复原备份后重试",
+  INTEGRATION_REMOVE_FAILED: "本机集成卸载失败，已保留用户数据；请检查命令入口与 Skill 路径", CLEAR_FAILED: "清除配置失败", CONFIRMATION_REQUIRED: "确认已取消或过期，请重新操作",
+};
+export function serializeFailure(error: unknown): SetupFailure {
+  let rawMessage: unknown;
+  try { if (error instanceof Error) rawMessage = Reflect.get(error, "message"); }
+  catch { /* A thrown Proxy or Error getter is not a public failure detail. */ }
+  const candidate = typeof rawMessage === "string" && rawMessage.length <= 8192 ? /\[([A-Z_]+)\]$/u.exec(rawMessage)?.[1] : undefined;
+  const base = candidate?.replace(/_ROLLBACK_FAILED$/u, "");
+  const known = base && Object.hasOwn(errorMessages, base);
+  const code = known ? candidate! : "SETUP_REQUEST_FAILED";
+  const message = known ? `${errorMessages[base!]}${candidate !== base ? "；回滚未完成，请重新运行诊断" : ""}` : errorMessages.SETUP_REQUEST_FAILED!;
+  let key: unknown;
+  if (code === "SETUP_OSS_FAILED") {
+    try { if (error !== null && (typeof error === "object" || typeof error === "function")) key = Reflect.get(error, "cleanupObjectKey"); }
+    catch { /* Invalid cleanup details are omitted. */ }
+  }
+  return { code, message, ...(typeof key === "string" && key.length <= 128 && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(key) ? { cleanupObjectKey: key } : {}) };
+}
+
+export type SetupServices = {
+  readonly getStatus: () => Promise<SetupResult>;
+  readonly commit: (input: SetupInput) => Promise<SetupResult>;
+  readonly install: () => Promise<unknown>;
+  readonly diagnose: () => Promise<readonly DiagnosticItem[]>;
+  readonly openConfig: () => Promise<void>;
+  readonly clear: () => Promise<SetupResult>;
+  readonly removeIntegration?: () => Promise<SetupResult>;
+  readonly refreshAgents?: () => Promise<unknown>;
+};
+
+const diagnosticLabels = { bundle: "安装资源", launcher: "命令入口", version: "Hypit 版本", ffmpeg: "FFmpeg", profile: "Runtime Profile", credentials: "平台凭据", newapi: "NewAPI", oss: "OSS" } as const;
+const skillLabels = { portable: "通用 Agent Skill", claude: "Claude Code Skill" } as const;
+const detectedAgentIds = ["codex", "claymore-piko", "cursor", "claude-code"] as const;
+const diagnosticStatuses = ["pass", "warning", "fail"] as const;
+const isSkillTargetId = (value: unknown): value is AgentSkillTargetId => typeof value === "string" && Object.hasOwn(skillLabels, value);
+const isNonSkillCode = (value: unknown): value is keyof typeof diagnosticLabels => typeof value === "string" && Object.hasOwn(diagnosticLabels, value);
+const isDiagnosticStatus = (value: unknown): value is DiagnosticItem["status"] => typeof value === "string" && diagnosticStatuses.some(status => status === value);
+const isDetectedAgentId = (value: unknown): value is DetectedAgentId => typeof value === "string" && detectedAgentIds.some(id => id === value);
+function publicArray<T>(value: unknown, limit: number, project: (item: unknown) => T): T[] {
+  if (!Array.isArray(value)) throw new Error("Invalid setup result");
+  const length: unknown = Reflect.get(value, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > limit) throw new Error("Invalid setup result");
+  const output: T[] = [];
+  for (let index = 0; index < length; index++) {
+    if (!Object.hasOwn(value, index)) throw new Error("Invalid setup result");
+    output.push(project(Reflect.get(value, index)));
+  }
+  return output;
+}
+function publicDiagnostic(value: unknown): DiagnosticItem {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid diagnostic result");
+  const code: unknown = Reflect.get(value, "code");
+  const status: unknown = Reflect.get(value, "status");
+  const label: unknown = Reflect.get(value, "label");
+  const target: unknown = Reflect.get(value, "target");
+  const path: unknown = Reflect.get(value, "path");
+  const cleanupObjectKey: unknown = Reflect.get(value, "cleanupObjectKey");
+  const reason: unknown = Reflect.get(value, "reason");
+  if (typeof code !== "string" || !isDiagnosticStatus(status)
+    || typeof label !== "string" || (path !== undefined && typeof path !== "string")
+    || (cleanupObjectKey !== undefined && typeof cleanupObjectKey !== "string")) throw new Error("Invalid diagnostic result");
+  if (code === "skill") {
+    if (!isSkillTargetId(target) || label !== skillLabels[target]) throw new Error("Invalid diagnostic result");
+    return { code: "skill", status, label: skillLabels[target], target,
+      ...((reason === "SKILL_BACKUP_UNAVAILABLE" || reason === "CLEANUP_INCOMPLETE") && status === "warning" ? { reason } : {}),
+      ...(path === undefined ? {} : { path }) };
+  }
+  if (!isNonSkillCode(code) || label !== diagnosticLabels[code] || target !== undefined) throw new Error("Invalid diagnostic result");
+  const key = code === "oss" && typeof cleanupObjectKey === "string" && /^relay\/hypit\/setup-test\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.txt$/u.test(cleanupObjectKey) ? cleanupObjectKey : undefined;
+  return { code, status, label: diagnosticLabels[code], ...(path === undefined ? {} : { path }), ...(key ? { cleanupObjectKey: key } : {}),
+    ...((code === "profile" || code === "launcher") && status === "warning" && reason === "CLEANUP_INCOMPLETE" ? { reason } : {}) };
+}
+const publicDiagnostics = (value: unknown): DiagnosticItem[] => publicArray(value, 64, publicDiagnostic);
+function mergeDiagnostics(...groups: readonly (readonly DiagnosticItem[])[]): DiagnosticItem[] {
+  const seen = new Set<string>();
+  return groups.flat().filter(item => {
+    const key = JSON.stringify([item.code, item.target, item.status, item.reason, item.path, item.cleanupObjectKey]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function integrationDiagnostics(value: unknown): DiagnosticItem[] {
+  if (value === undefined) return [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid integration result");
+  const diagnostics: unknown = Reflect.get(value, "diagnostics");
+  return diagnostics === undefined ? [] : publicDiagnostics(diagnostics);
+}
+function publicResult(value: unknown): SetupResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid setup result");
+  const configured: unknown = Reflect.get(value, "configured");
+  const modelCount: unknown = Reflect.get(value, "modelCount");
+  const relayVerified: unknown = Reflect.get(value, "relayVerified");
+  const profilePath: unknown = Reflect.get(value, "profilePath");
+  const targetValues: unknown = Reflect.get(value, "skillTargets");
+  const launcherPath: unknown = Reflect.get(value, "launcherPath");
+  const diagnosticValues: unknown = Reflect.get(value, "diagnostics");
+  if (typeof profilePath !== "string" || typeof launcherPath !== "string") throw new Error("Invalid setup result");
+  const skillTargets = publicArray(targetValues, 2, targetValue => {
+    if (!targetValue || typeof targetValue !== "object" || Array.isArray(targetValue)) throw new Error("Invalid Skill target result");
+    const id: unknown = Reflect.get(targetValue, "id");
+    const label: unknown = Reflect.get(targetValue, "label");
+    const path: unknown = Reflect.get(targetValue, "path");
+    const agentValues: unknown = Reflect.get(targetValue, "detectedAgents");
+    if (!isSkillTargetId(id) || typeof label !== "string"
+      || label !== skillLabels[id] || typeof path !== "string") throw new Error("Invalid Skill target result");
+    const detectedAgents = publicArray(agentValues, 4, agent => {
+      if (!isDetectedAgentId(agent)) throw new Error("Invalid Skill target result");
+      return agent;
+    });
+    return { id, label: skillLabels[id], path, detectedAgents };
+  });
+  return { configured: configured === true, modelCount: Number.isSafeInteger(modelCount) && (modelCount as number) >= 0 ? modelCount as number : 0,
+    relayVerified: relayVerified === true, profilePath, skillTargets, launcherPath,
+    diagnostics: publicDiagnostics(diagnosticValues) };
+}
+
+/** Only an incomplete startup refresh can carry a readiness-affecting warning. */
+export function reconcileStartupStatus(current: SetupResult, startup: SetupResult | undefined): SetupResult {
+  const isRollbackWarning = (item: DiagnosticItem) => startup?.configured === false && item.code === "profile" && item.path === startup.profilePath;
+  const warnings = startup?.diagnostics.filter(item => item.status === "warning"
+    && (item.reason === "CLEANUP_INCOMPLETE" || isRollbackWarning(item))
+    && (item.reason !== "CLEANUP_INCOMPLETE" || isRollbackWarning(item) || current.diagnostics.some(now => now.code === item.code
+      && now.path === item.path && now.target === item.target && now.reason === "CLEANUP_INCOMPLETE"))) ?? [];
+  const profileRollbackFailed = warnings.some(isRollbackWarning);
+  const matches = (left: DiagnosticItem, right: DiagnosticItem) => left.code === right.code && left.path === right.path && left.target === right.target;
+  return warnings.length ? { ...current, configured: current.configured && !profileRollbackFailed,
+    diagnostics: [...current.diagnostics.map(item => warnings.find(warning => matches(warning, item)) ?? item),
+      ...warnings.filter(warning => !current.diagnostics.some(item => matches(warning, item)))] } : current;
+}
+
+/** Keep startup Profile rollback uncertainty until an operation actually commits a new Profile. */
+export function createDesktopStatusLifecycle(initial: DesktopIntegrationOptions, refreshed: SetupResult) {
+  let integration = initial;
+  let startupStatus: SetupResult | undefined = refreshed;
+  return {
+    get integration() { return integration; },
+    getStatus: async () => reconcileStartupStatus(await readDesktopStatus(integration), startupStatus),
+    profileCommitted: () => { startupStatus = undefined; },
+    refreshAgents: async () => {
+      integration = { ...integration, targets: await rescanIntegrationTargets(integration.paths) };
+      const result = await installDesktopIntegration({ ...integration, preserveExisting: false });
+      // A rescan repairs only integration. Fresh status rediscovers surviving recovery siblings.
+      const guard = startupStatus?.configured === false ? startupStatus.diagnostics.filter(item => item.code === "profile"
+        && item.status === "warning" && item.path === startupStatus?.profilePath) : [];
+      startupStatus = guard.length && startupStatus ? { ...startupStatus, diagnostics: guard } : undefined;
+      return result;
+    },
+  };
+}
+
+export function createSetupController(services: SetupServices) {
+  const listeners = new Set<(progress: SetupProgress) => void>();
+  let tail: Promise<unknown> = Promise.resolve();
+  const emit = (progress: SetupProgress) => { for (const listener of listeners) { try { void Promise.resolve(listener(progress)).catch(() => undefined); } catch { /* Closed renderer must not interrupt a transaction. */ } } };
+  function enqueue<T>(operation: () => Promise<T>): Promise<SetupReply<T>> {
+    const pending = tail.then(async (): Promise<SetupReply<T>> => {
+      try { return { ok: true, value: await operation() }; }
+      catch (error) { return { ok: false, error: serializeFailure(error) }; }
+    });
+    tail = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+  return {
+    /** Snapshot only work already queued; subsequent requests cannot extend this wait. */
+    whenIdle: () => tail.then(() => undefined),
+    subscribe(listener: (progress: SetupProgress) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    getStatus: () => enqueue(async () => publicResult(await services.getStatus())),
+    submit: (input: SetupInput) => enqueue(async () => {
+      emit({ kind: "stage", stage: "validating" });
+      const validated = validateIpcArguments(IPC_CHANNELS.submit, [input])!;
+      emit({ kind: "stage", stage: "testing-newapi" });
+      const result = publicResult(await services.commit(validated));
+      emit({ kind: "model-count", count: result.modelCount });
+      emit({ kind: "stage", stage: "installing-launcher" });
+      const warnings = integrationDiagnostics(await services.install());
+      emit({ kind: "stage", stage: "diagnosing" });
+      const diagnostics = publicDiagnostics(await services.diagnose());
+      for (const item of diagnostics) emit({ kind: "diagnostic", item });
+      emit({ kind: "stage", stage: "complete" });
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, warnings, diagnostics) };
+    }),
+    rerunDiagnostics: () => enqueue(async () => {
+      emit({ kind: "stage", stage: "diagnosing" });
+      const result = publicResult(await services.getStatus());
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, publicDiagnostics(await services.diagnose())) };
+    }),
+    refreshAgentIntegration: () => enqueue(async () => {
+      emit({ kind: "stage", stage: "installing-skill" });
+      if (!services.refreshAgents) throw new Error("Unavailable [SETUP_UNAVAILABLE]");
+      const warnings = integrationDiagnostics(await services.refreshAgents());
+      emit({ kind: "stage", stage: "diagnosing" });
+      const result = publicResult(await services.getStatus());
+      // Rescanning is local maintenance: full diagnostics also resolve credentials and probe services.
+      return { ...result, diagnostics: mergeDiagnostics(result.diagnostics, warnings) };
+    }),
+    openConfigDirectory: () => enqueue(services.openConfig),
+    clearConfiguration: () => enqueue(async () => publicResult(await services.clear())),
+    removeIntegration: () => enqueue(async () => { if (!services.removeIntegration) throw new Error("Unavailable [SETUP_UNAVAILABLE]"); return publicResult(await services.removeIntegration()); }),
+  };
+}
+
+export async function rescanIntegrationTargets(paths: ReturnType<typeof desktopPaths>,
+  scan: (options: { readonly paths: ReturnType<typeof desktopPaths> }) => Promise<AgentScanResult> = scanAgentTargets,
+  managed: (target: AgentSkillTarget) => Promise<boolean> = isManagedSkillOwned): Promise<readonly AgentSkillTarget[]> {
+  const discovered = await scan({ paths });
+  const retained = await Promise.all(supportedSkillTargets(paths)
+    .filter(target => !discovered.targets.some(active => active.id === target.id))
+    .map(async target => ({ target, keep: await managed(target) })));
+  return [...discovered.targets, ...retained.filter(item => item.keep).map(item => item.target)];
+}
+
+export async function readDesktopStatus(options: Pick<LauncherOptions, "paths" | "platform" | "home" | "userPath"> & Partial<DesktopIntegrationOptions>, scan?: AgentScanResult): Promise<SetupResult> {
+  const { paths } = options;
+  const activeTargets = scan?.targets ?? options.targets ?? (await scanAgentTargets({ paths })).targets;
+  const retained = await Promise.all(supportedSkillTargets(paths).filter(target => !activeTargets.some(active => active.id === target.id))
+    .map(async target => ({ target, managed: await isManagedSkillOwned(target) })));
+  const targets = [...activeTargets, ...retained.filter(item => item.managed).map(item => item.target)];
+  const profileValid = async () => {
+    try {
+      const profile = JSON.parse(await readFile(paths.profile, "utf8"));
+      const endpoint = profile?.endpoints?.["newapi.personal"];
+      if (profile?.format !== "hypit.runtime-local@1" || typeof profile.dataRoot !== "string" || !profile.dataRoot.trim()
+        || profile.credentials?.platform?.use !== "@hypit/credential-store-platform"
+        || endpoint?.use !== "@dramaclaw/provider-newapi" || endpoint.pool !== "newapi.personal"
+        || profile.endpoints?.["whisperx.local"]?.use === "@hypit/provider-whisperx-local"
+        || profile.endpoints?.["media.local"]?.use !== "@hypit/provider-media-local"
+        || profile.endpoints?.["hyperframes.local"]?.use !== "@hypit/provider-hyperframes-local"
+        || Object.entries(newApiDefaultBindings).some(([key, value]) => profile.bindings?.[key] !== value)) return false;
+      const config = parseNewApiEndpointConfig(endpoint.config);
+      if (!config.relay) return false;
+      for (const [ref, key] of [[config.apiKey, "newapi.personal.api-key"], [config.relay.accessKeyId, "newapi.personal.oss-ak"], [config.relay.accessKeySecret, "newapi.personal.oss-sk"]] as const) {
+        if (ref.store !== "platform" || ref.key !== key) return false;
+      }
+      // Reuse the same nonblank/address checks as submission, without resolving credentials.
+      validateIpcArguments(IPC_CHANNELS.submit, [{ baseUrl: config.baseUrl, apiKey: "status-validation", relay: {
+        enabled: true, endpoint: config.relay.endpoint, bucket: config.relay.bucket, accessKeyId: "status-validation", accessKeySecret: "status-validation",
+      } }]);
+      return true;
+    } catch { return false; }
+  };
+  const [profile, targetStates, launcher, evidence, media, legacyExists, legacyManaged] = await Promise.all([
+    profileValid(), Promise.all(targets.map(async target => ({ target, installed: await isManagedSkillInstalled(target, options.sourceDirectory && options.installedVersion
+      ? { sourceDirectory: options.sourceDirectory, installedVersion: options.installedVersion } : undefined) }))), isManagedLauncherInstalled(options),
+    Promise.all([paths.profile, ...targets.flatMap(target => [target.skillDirectory, target.backupDirectory]), paths.launcher, paths.managedState, paths.legacyCodexSkill].map(exists)),
+    desktopMediaAvailable(paths.profile), exists(paths.legacyCodexSkill), isManagedLegacyCodexSkillInstalled(paths),
+  ]);
+  const skillsReady = targetStates.every(({ installed }) => installed);
+  const recoveryWarnings = [...await skillRecoveryWarnings(paths), ...await transactionRecoveryWarnings(options)];
+  return { configured: profile && skillsReady && launcher && media !== false, modelCount: 0, relayVerified: false,
+    profilePath: paths.profile, skillTargets: targets.map(targetSummary), launcherPath: paths.launcher, diagnostics: evidence.some(Boolean) || recoveryWarnings.length ? [
+      { code: "profile", label: "Runtime Profile", status: profile ? "pass" : "fail", path: paths.profile },
+      ...targetStates.map(({ target, installed }) => ({ code: "skill" as const, target: target.id, label: target.label, status: installed ? "pass" as const : "fail" as const, path: target.skillDirectory })),
+      ...(await Promise.all(targets.map(skillBackupWarnings))).flat(),
+      ...recoveryWarnings,
+      ...(legacyExists && !legacyManaged ? [{ code: "skill" as const, target: "portable" as const, label: "通用 Agent Skill" as const, status: "warning" as const, path: paths.legacyCodexSkill }] : []),
+      { code: "launcher", label: "命令入口", status: launcher ? "pass" : "fail", path: paths.launcher },
+      ...(profile && media !== undefined ? [{ code: "ffmpeg" as const, label: "FFmpeg" as const, status: media ? "pass" as const : "fail" as const }] : []),
+    ] : [] };
+}
+
+/** Startup-only repair uses the saved profile; it never reads or asks for credentials. */
+export async function refreshDesktopStatus(options: DesktopIntegrationOptions): Promise<SetupResult> {
+  // PR #2 adds the cloud speech binding to newly created Profiles. Preserve
+  // existing credentials and unrelated settings when upgrading an older one.
+  let speech: Awaited<ReturnType<typeof prepareDesktopNewApiBindingsRefresh>>;
+  let speechWarnings: readonly DiagnosticItem[] = [];
+  try {
+    speech = await prepareDesktopNewApiBindingsRefresh({ profile: options.paths.profile, platform: options.platform });
+    if (speech) {
+      await speech.commit();
+      const checked = await readDesktopStatus(options);
+      if (!checked.diagnostics.some(item => item.code === "profile" && item.status === "pass")) throw new Error("Profile upgrade failed");
+      speechWarnings = await speech.dispose(true);
+    }
+  } catch {
+    const rollbackFailed = speech ? await speech.rollback() : false;
+    const warnings = speech ? await speech.dispose(false) : [];
+    const result = await readDesktopStatus(options);
+    return rollbackFailed || warnings.length ? { ...result, configured: false,
+      diagnostics: mergeDiagnostics(result.diagnostics.map(item => item.code === "profile"
+        ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), warnings) } : result;
+  }
+  const before = await readDesktopStatus(options);
+  const withSpeechWarnings = (result: SetupResult): SetupResult => ({ ...result, diagnostics: mergeDiagnostics(result.diagnostics, speechWarnings) });
+  if (before.configured || !before.diagnostics.some(item => item.code === "profile" && item.status === "pass")) return withSpeechWarnings(before);
+  if (!(await Promise.all(options.targets.map(canRefreshManagedSkill))).every(Boolean)) return withSpeechWarnings(before);
+  let media: Awaited<ReturnType<typeof prepareDesktopMediaRefresh>>;
+  let profileRollbackFailed = false;
+  let committed = false;
+  let integrationWarnings: readonly DiagnosticItem[] = [];
+  try {
+    media = await prepareDesktopMediaRefresh(options);
+    await media?.commit();
+    integrationWarnings = (await installDesktopIntegration({ ...options, preserveExisting: true })).diagnostics;
+    committed = true;
+  } catch {
+    if (media) profileRollbackFailed = await media.rollback();
+    // Failed refreshes leave stale integration visible and attempt to restore the original profile.
+  }
+  const warnings = await media?.dispose(committed) ?? [];
+  profileRollbackFailed ||= !committed && warnings.length > 0;
+  const result = await readDesktopStatus(options);
+  return profileRollbackFailed ? { ...result, configured: false,
+    diagnostics: mergeDiagnostics(result.diagnostics.map(item => item.code === "profile" ? { ...item, status: "warning" as const, reason: "CLEANUP_INCOMPLETE" as const } : item), warnings) }
+    : { ...result, diagnostics: mergeDiagnostics(result.diagnostics, integrationWarnings, warnings, speechWarnings) };
+}
+
+/** Entry point is called by the bundled CJS footer, so unit tests never boot Electron. */
+export function integrationConfirmationTargets(options: Pick<LauncherOptions, "paths" | "platform" | "home">): readonly string[] {
+  return [options.paths.launcher, ...supportedSkillTargets(options.paths).map(target => target.skillDirectory),
+    `旧版迁移／手动恢复：${options.paths.legacyCodexSkill}`, options.paths.managedState,
+    options.platform === "darwin" ? join(options.home, ".zprofile") : "HKCU\\Environment\\Path"];
+}
+
+export async function startElectronShell(bundleDirectory: string): Promise<void> {
+  const { app, BrowserWindow, ipcMain, shell, dialog } = await import("electron");
+  if (!app.requestSingleInstanceLock()) { app.quit(); return; }
+  await app.whenReady();
+  if (process.platform !== "darwin" && process.platform !== "win32") { app.quit(); return; }
+  const platform = process.platform;
+  const home = app.getPath("home");
+  const paths = desktopPaths({ platform, home, appData: platform === "win32" ? process.env.LOCALAPPDATA || join(home, "AppData", "Local") : app.getPath("appData"),
+    agentData: app.getPath("appData") });
+  const resources = process.resourcesPath;
+  const credentialStore = new PlatformCredentialStore({ directory: join(paths.hostState, "credentials"), platform });
+  const integration: DesktopIntegrationOptions = { paths, targets: (await scanAgentTargets({ paths })).targets, platform, home, electronExecutable: process.execPath,
+    cliEntry: join(resources, "runtime", "node_modules", "@hypit", "hypit", "bin", "hypit.mjs"), bundledBin: join(resources, "bin"),
+    sourceDirectory: join(resources, "skill", "hypit"), installedVersion: app.getVersion() };
+  // Refresh once per app launch so explicit removal in this session stays removed.
+  const refreshed = await refreshDesktopStatus(integration);
+  const lifecycle = createDesktopStatusLifecycle(integration, refreshed);
+  const getStatus = lifecycle.getStatus;
+  const confirmation = createConfirmationSession();
+  let window: InstanceType<typeof BrowserWindow> | undefined;
+  const confirm = async (action: "clear" | "integration", targets: readonly string[]) => {
+    if (!window || window.isDestroyed()) throw new Error("No active session [CONFIRMATION_REQUIRED]");
+    const issued = confirmation.issue(action, targets);
+    const response = await dialog.showMessageBox(window, { type: "warning", title: action === "clear" ? "清除本机配置和凭据" : "卸载本机集成",
+      message: action === "clear" ? "清除以下本机配置和系统凭据？视频项目会保留。" : "移除以下命令入口、托管 Skill 和对应 PATH 配置？已有 Skill 备份会恢复，配置、凭据和视频项目会保留。旧版安装的本地语音资源和缓存不会自动删除。",
+      detail: targets.join("\n"), buttons: ["取消", "确认"], defaultId: 0, cancelId: 0, noLink: true });
+    if (response.response !== 1) { confirmation.invalidate(); throw new Error("Cancelled [CONFIRMATION_REQUIRED]"); }
+    return issued.token;
+  };
+  const suffix = platform === "win32" ? ".exe" : "";
+  const controller = createSetupController({
+    getStatus,
+    commit: async (input) => {
+      const result = await commitDesktopSetup(input, { paths, targets: lifecycle.integration.targets, platform, credentialStore,
+        media: { ffmpegPath: join(resources, "bin", `ffmpeg${suffix}`), ffprobePath: join(resources, "bin", `ffprobe${suffix}`) } });
+      lifecycle.profileCommitted();
+      return result;
+    },
+    install: () => installDesktopIntegration(lifecycle.integration),
+    refreshAgents: lifecycle.refreshAgents,
+    diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
+    openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
+    clear: async () => {
+      const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]);
+      const cleared = await clearDesktopConfiguration({ paths, platform, credentialStore, session: confirmation, token });
+      lifecycle.profileCommitted();
+      const status = await getStatus();
+      return { ...status, diagnostics: mergeDiagnostics(status.diagnostics, cleared.diagnostics) };
+    },
+    removeIntegration: async () => {
+      const targets = integrationConfirmationTargets({ paths, platform, home });
+      const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);
+      const removed = await removeDesktopIntegration({ paths, platform, home });
+      const status = await getStatus();
+      return { ...status, diagnostics: mergeDiagnostics(status.diagnostics, removed.diagnostics) };
+    },
+  });
+  const pageUrl = localPageUrl(join(bundleDirectory, "index.html"));
+  let unsubscribe: (() => void) | undefined;
+  let windowGeneration = 0;
+  const detach = () => { unsubscribe?.(); unsubscribe = undefined; };
+  const createWindow = async () => {
+    windowGeneration++;
+    window = new BrowserWindow(browserWindowOptions(join(bundleDirectory, "preload.cjs")));
+    hardenWebContents(window.webContents);
+    window.webContents.on("destroyed", detach);
+    window.webContents.on("did-start-loading", detach);
+    window.webContents.on("did-start-loading", () => confirmation.invalidate());
+    window.webContents.on("destroyed", () => confirmation.invalidate());
+    window.on("closed", () => { window = undefined; detach(); });
+    await window.loadURL(pageUrl);
+  };
+  const operations = { [IPC_CHANNELS.status]: controller.getStatus, [IPC_CHANNELS.submit]: controller.submit,
+    [IPC_CHANNELS.diagnostics]: controller.rerunDiagnostics, [IPC_CHANNELS.openConfig]: controller.openConfigDirectory, [IPC_CHANNELS.clear]: controller.clearConfiguration, [IPC_CHANNELS.removeIntegration]: controller.removeIntegration,
+    [IPC_CHANNELS.refreshAgents]: controller.refreshAgentIntegration };
+  for (const channel of Object.keys(operations) as (keyof typeof operations)[]) {
+    ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+      try {
+        if (!window || !isTrustedSender(event, window.webContents, pageUrl)) throw new Error("Untrusted sender");
+        const input = validateIpcArguments(channel, args);
+        return channel === IPC_CHANNELS.submit ? await controller.submit(input!) : await (operations[channel] as () => Promise<unknown>)();
+      } catch (error) { return { ok: false, error: serializeFailure(error) }; }
+    });
+  }
+  for (const channel of [IPC_CHANNELS.subscribe, IPC_CHANNELS.unsubscribe]) {
+    ipcMain.on(channel, (event, ...args: unknown[]) => {
+      if (!window || !isTrustedSender(event, window.webContents, pageUrl)) return;
+      try { validateIpcArguments(channel, args); } catch { return; }
+      detach();
+      if (channel === IPC_CHANNELS.subscribe) {
+        const contents = window.webContents;
+        unsubscribe = controller.subscribe((progress) => { if (!contents.isDestroyed() && contents.mainFrame.url === pageUrl) contents.send(IPC_CHANNELS.progress, progress); });
+      }
+    });
+  }
+  app.on("second-instance", () => { if (!window) void createWindow(); else { window.show(); window.focus(); } });
+  app.on("activate", () => { if (!window) void createWindow(); });
+  app.on("window-all-closed", () => {
+    // Window lifetime owns only progress observation. Let bounded Managed Program commands finish.
+    const generation = windowGeneration;
+    if (platform !== "darwin") void controller.whenIdle().then(() => { if (!window && generation === windowGeneration) app.quit(); });
+  });
+  await createWindow();
+}

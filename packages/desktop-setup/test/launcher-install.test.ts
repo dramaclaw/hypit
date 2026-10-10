@@ -1,0 +1,301 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import fs, { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+import type { TestContext } from "node:test";
+import { desktopPaths } from "../src/paths.js";
+import { createWindowsUserPath, installLauncher, prepareLauncherInstall, removeLauncher, renderLauncher, runWindowsPowerShell } from "../src/launcher-install.js";
+
+for (const resource of ["launcher", "zprofile"] as const) {
+  test(`${resource} retains a newly appeared destination and prepared recovery content`, async (t) => {
+    const f = await fixture(t);
+    const target = resource === "launcher" ? f.paths.launcher : join(f.home, ".zprofile");
+    const link = fs.link;
+    let injected = false;
+    const mock = t.mock.method(fs, "link", async (source: Parameters<typeof fs.link>[0], destination: Parameters<typeof fs.link>[1]) => {
+      if (!injected && destination === target) { injected = true; await writeFile(target, "new user file"); }
+      return link(source, destination);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    await assert.rejects(installLauncher(f), /LAUNCHER_INSTALL_FAILED_ROLLBACK_FAILED/);
+    assert.equal(await readFile(target, "utf8"), "new user file");
+    const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(target.lastIndexOf("/") + 1)}.recovery-`));
+    assert.equal(recoveries.length, 1);
+    assert.ok((await readFile(join(dirname(target), recoveries[0]!, "staged"))).length);
+  });
+}
+
+test("launcher rollback preserves an edit injected inside reverse displacement", async (t) => {
+  const f = await fixture(t);
+  await installLauncher(f);
+  const original = await readFile(f.paths.launcher);
+  const transaction = await prepareLauncherInstall(f);
+  await transaction.commit();
+  const rename = fs.rename;
+  let injected = false;
+  const mock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+    if (!injected && source === f.paths.launcher) { injected = true; await writeFile(f.paths.launcher, "rollback user edit"); }
+    return rename(source, destination);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  assert.equal(await transaction.rollback(), true);
+  assert.equal(await readFile(f.paths.launcher, "utf8"), "rollback user edit");
+  const warnings = await transaction.dispose(false);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(await readFile(join(warnings[0]!.path!, "displaced")), original);
+});
+
+test("Windows PATH adapter returns mismatches and rejects ambiguous editor output", async () => {
+  assert.equal(await createWindowsUserPath(async () => "mismatch").compareAndSet("old", "new"), false);
+  await assert.rejects(createWindowsUserPath(async () => "untrusted output").compareAndSet("old", "new"), /Invalid PATH update result/);
+});
+
+for (const resource of ["launcher", "zprofile"] as const) {
+  for (const window of ["displace", "publish"] as const) {
+    test(`${resource} preserves content changed at the ${window} mutation boundary`, async (t) => {
+      const f = await fixture(t);
+      const target = resource === "launcher" ? f.paths.launcher : join(f.home, ".zprofile");
+      if (resource === "launcher") await installLauncher(f);
+      else await writeFile(target, "original shell content\n");
+      const original = await readFile(target);
+      const edited = "concurrent user content\n";
+      const rename = fs.rename;
+      const link = fs.link;
+      let injected = false;
+      const inject = async () => { injected = true; await writeFile(target, edited); };
+      const renameMock = t.mock.method(fs, "rename", async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
+        if (!injected && (window === "displace" ? source === target || destination === target : destination === target)) await inject();
+        return rename(source, destination);
+      });
+      const linkMock = t.mock.method(fs, "link", async (source: Parameters<typeof fs.link>[0], destination: Parameters<typeof fs.link>[1]) => {
+        if (!injected && window === "publish" && destination === target) await inject();
+        return link(source, destination);
+      });
+      syncBuiltinESMExports();
+      t.after(() => { renameMock.mock.restore(); linkMock.mock.restore(); syncBuiltinESMExports(); });
+      await assert.rejects(installLauncher(f), /LAUNCHER_INSTALL_FAILED/);
+      assert.equal(injected, true);
+      assert.equal(await readFile(target, "utf8"), edited);
+      if (window === "publish") {
+        const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(target.lastIndexOf("/") + 1)}.recovery-`));
+        assert.equal(recoveries.length, 1);
+        assert.deepEqual(await readFile(join(dirname(target), recoveries[0]!, "displaced")), original);
+      }
+    });
+  }
+}
+
+test("Windows PATH change inside the conditional editor is preserved", async (t) => {
+  const f = await fixture(t);
+  const electronExecutable = join(f.home, "Hypit Setup.exe");
+  await writeFile(electronExecutable, "fake");
+  let value = "original PATH";
+  let injected = false;
+  const userPath = {
+    read: async () => value,
+    // The old split contract loses a change inside the editor; the conditional contract refuses it.
+    write: async (next: string) => { value = "concurrent PATH"; injected = true; value = next; },
+    compareAndSet: async (expected: string, next: string) => {
+      value = "concurrent PATH"; injected = true;
+      if (value !== expected) return false;
+      value = next; return true;
+    },
+  };
+  await assert.rejects(installLauncher({ ...f, electronExecutable, platform: "win32", userPath }), /LAUNCHER_INSTALL_FAILED/);
+  assert.equal(injected, true);
+  assert.equal(value, "concurrent PATH");
+});
+
+test("Windows PATH subprocess uses system PowerShell, a 30-second bound and a secret-free environment", async () => {
+  let observed: any;
+  const stdout = await runWindowsPowerShell("registry script", "encoded", async (file, args, options) => { observed = { file, args, options }; return { stdout: "C:\\keep" }; });
+  assert.equal(stdout, "C:\\keep"); assert.match(observed.file, /^[A-Za-z]:\\.*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/);
+  assert.equal(observed.options.timeout, 30000); assert.equal(observed.options.shell, false); assert.equal(observed.options.env.HYPIT_USER_PATH_VALUE, "encoded");
+  assert.ok(Object.keys(observed.options.env).every(key => ["SystemRoot", "WINDIR", "USERPROFILE", "TEMP", "TMP", "HYPIT_USER_PATH_VALUE"].includes(key)));
+});
+
+async function fixture(t: TestContext) {
+  const home = await mkdtemp(join(tmpdir(), "hypit 中文 space-$-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "Application Support") });
+  const electronExecutable = join(home, 'Fake Electron "app"');
+  const cliEntry = join(home, "resources", "hypit.mjs");
+  await mkdir(dirname(cliEntry));
+  await writeFile(cliEntry, "");
+  await writeFile(electronExecutable, '#!/bin/sh\nprintf "%s\\n" "$ELECTRON_RUN_AS_NODE" "$@"\nexit 7\n', { mode: 0o755 });
+  return { platform: "darwin" as const, home, paths, electronExecutable, cliEntry };
+}
+
+test("Windows command uses quoted Windows-relative paths and preserves forwarded arguments", () => {
+  const paths = desktopPaths({ platform: "win32", home: "C:\\Users\\王 明", appData: "C:\\Users\\王 明\\AppData\\Local" });
+  const content = renderLauncher({ platform: "win32", home: "C:\\Users\\王 明", paths,
+    electronExecutable: "C:\\Users\\王 明\\AppData\\Local\\Programs\\Hypit Setup\\Hypit Setup.exe",
+    cliEntry: "C:\\Users\\王 明\\AppData\\Local\\Programs\\Hypit Setup\\resources\\runtime\\node_modules\\@hypit\\hypit\\bin\\hypit.mjs" });
+  assert.ok(content.includes('"%~dp0..\\..\\Programs\\Hypit Setup\\Hypit Setup.exe"'));
+  assert.ok(content.includes('"%~dp0..\\..\\Programs\\Hypit Setup\\resources\\runtime\\node_modules\\@hypit\\hypit\\bin\\hypit.mjs" %*'));
+});
+
+test("launcher puts bundled ffmpeg and ffprobe first even with an empty host PATH", async (t) => {
+  const f = await fixture(t); const bundledBin = join(f.home, "bundle bin");
+  await mkdir(bundledBin);
+  for (const tool of ["ffmpeg", "ffprobe"]) await writeFile(join(bundledBin, tool), `#!/bin/sh\nprintf '${tool} bundled\\n'\n`, { mode: 0o755 });
+  await writeFile(f.electronExecutable, '#!/bin/sh\nffmpeg -version\nffprobe -version\n', { mode: 0o755 });
+  await installLauncher({ ...f, bundledBin });
+  const { stdout } = await promisify(execFile)(f.paths.launcher, [], { env: { PATH: "" } });
+  assert.equal(stdout, "ffmpeg bundled\nffprobe bundled\n");
+  const win = renderLauncher({ ...f, platform: "win32", electronExecutable: join(f.home, "Electron.exe"), bundledBin });
+  assert.match(win, /set "PATH=.*bundle bin;%PATH%"/);
+});
+
+test("Windows PATH adapter preserves raw registry values and encodes writes as data", async () => {
+  const calls: { script: string; value?: string }[] = [];
+  const adapter = createWindowsUserPath(async (script, value) => {
+    calls.push({ script, ...(value === undefined ? {} : { value }) });
+    return value === undefined ? "C:\\中文;%USERPROFILE%\\bin" : "updated";
+  });
+  assert.equal(await adapter.read(), "C:\\中文;%USERPROFILE%\\bin");
+  assert.equal(await adapter.compareAndSet("C:\\中文;%USERPROFILE%\\bin", "C:\\中文;%USERPROFILE%\\bin;$doNotExecute"), true);
+  assert.match(calls[0]!.script, /DoNotExpandEnvironmentNames/);
+  assert.match(calls[0]!.script, /OutputEncoding/);
+  assert.match(calls[1]!.script, /GetValueKind/);
+  assert.match(calls[1]!.script, /CurrentUser/);
+  assert.equal(calls[1]!.script.includes("$doNotExecute"), false);
+  assert.deepEqual(JSON.parse(Buffer.from(calls[1]!.value!, "base64").toString("utf8")), { expected: "C:\\中文;%USERPROFILE%\\bin", value: "C:\\中文;%USERPROFILE%\\bin;$doNotExecute" });
+  assert.match(calls[1]!.script, /Threading.Mutex/);
+  assert.match(calls[1]!.script, /WaitOne\(10000\)/);
+  assert.match(calls[1]!.script, /StringComparison\]::Ordinal/);
+  assert.ok(calls[1]!.script.indexOf("$change.expected") < calls[1]!.script.indexOf("$key.SetValue"));
+});
+
+test("macOS launcher quotes absolute paths, preserves arguments and exit status", async (t) => {
+  const f = await fixture(t);
+  await installLauncher(f);
+  const launcher = await readFile(f.paths.launcher, "utf8");
+  assert.match(launcher, /export ELECTRON_RUN_AS_NODE=1/);
+  assert.match(launcher, /"\$@"/);
+  await assert.rejects(promisify(execFile)(f.paths.launcher, ["hello 中文", "$(touch forbidden)"]), (error: any) => {
+    assert.equal(error.code, 7);
+    assert.equal(error.stdout, `1\n${f.cliEntry}\nhello 中文\n$(touch forbidden)\n`);
+    return true;
+  });
+  assert.equal((await stat(dirname(f.paths.launcher))).mode & 0o777, 0o700);
+  assert.equal((await stat(f.paths.launcher)).mode & 0o777, 0o755);
+});
+
+test("uninstall rejects an unrelated PATH block in edited ownership state", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  await writeFile(profile, "# keep user content\n");
+  await installLauncher(f);
+  const state = JSON.parse(await readFile(f.paths.managedState, "utf8"));
+  await writeFile(f.paths.managedState, JSON.stringify({ ...state, zprofileBlock: "# keep user content\n" }));
+  const before = await readFile(profile);
+  await assert.rejects(removeLauncher(f), /LAUNCHER_REMOVE_FAILED/);
+  assert.deepEqual(await readFile(profile), before);
+});
+
+test("macOS PATH block is idempotent and uninstall preserves unrelated shell bytes", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  const original = "# 用户配置\nexport SOMETHING='keep'";
+  await writeFile(profile, original);
+  const result = await installLauncher(f);
+  assert.equal(result.restartMessage, "请重启正在使用的 Agent 和 Terminal，再测试 hypit 命令是否可用。");
+  const installed = await readFile(profile, "utf8");
+  await installLauncher(f);
+  assert.equal(await readFile(profile, "utf8"), installed);
+  await writeFile(profile, installed + "\n# user addition\n");
+  await removeLauncher(f);
+  assert.equal(await readFile(profile, "utf8"), original + "\n# user addition\n");
+  assert.equal(await removeLauncher(f), false);
+});
+
+test("macOS installation and upgrade preserve non-UTF8 profile bytes exactly", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  const original = Buffer.from([35, 32, 0xff]);
+  await writeFile(profile, original);
+  await installLauncher(f);
+  const installed = await readFile(profile);
+  assert.deepEqual(installed.subarray(0, original.length), original);
+  await installLauncher(f);
+  assert.deepEqual(await readFile(profile), installed);
+  await removeLauncher(f);
+  assert.deepEqual(await readFile(profile), original);
+});
+
+test("macOS uninstall preserves non-UTF8 bytes appended after installation", async (t) => {
+  const f = await fixture(t);
+  const profile = join(f.home, ".zprofile");
+  const original = Buffer.from("# original\n");
+  await writeFile(profile, original);
+  await installLauncher(f);
+  const addition = Buffer.from([35, 32, 0xff, 10]);
+  await writeFile(profile, Buffer.concat([await readFile(profile), addition]));
+  await removeLauncher(f);
+  assert.deepEqual(await readFile(profile), Buffer.concat([original, addition]));
+});
+
+test("unmanaged launchers are preserved and modified managed launchers are not removed", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.paths.launcher), { recursive: true });
+  await writeFile(f.paths.launcher, "external");
+  await assert.rejects(installLauncher(f), /LAUNCHER_INSTALL_FAILED/);
+  assert.equal(await removeLauncher(f), false);
+  assert.equal(await readFile(f.paths.launcher, "utf8"), "external");
+});
+
+for (const present of [true, false]) {
+  test(`Windows launcher statically quotes dp0 paths and owns only an added user PATH segment (${present})`, async (t) => {
+    const f = await fixture(t);
+    const paths = { ...f.paths, launcher: join(f.home, "bin 中文", "hypit.cmd") };
+    const electronExecutable = join(f.home, "Hypit Setup.exe");
+    await writeFile(electronExecutable, "fake");
+    const entry = dirname(paths.launcher);
+    const original = present ? `C:\\Other;${entry};%USERPROFILE%\\tools` : "C:\\Other;%USERPROFILE%\\tools";
+    let value = original;
+    const options = { ...f, paths, electronExecutable, platform: "win32" as const, userPath: {
+      async read() { return value; }, async compareAndSet(expected: string, next: string) { if (value !== expected) return false; value = next; return true; },
+    } };
+    await installLauncher(options);
+    const command = await readFile(paths.launcher, "utf8");
+    assert.match(command, /setlocal DisableDelayedExpansion/);
+    assert.match(command, /"%~dp0[^\r\n]+"/);
+    assert.match(command, / %\*/);
+    assert.match(command, /exit \/b %errorlevel%/i);
+    await installLauncher(options);
+    assert.equal(value, present ? original : `${original};${entry}`);
+    value += ";C:\\Later";
+    await removeLauncher(options);
+    assert.equal(value, original + ";C:\\Later");
+  });
+}
+
+test("edited managed launcher is retained on uninstall", async (t) => {
+  const f = await fixture(t);
+  await installLauncher(f);
+  await writeFile(f.paths.launcher, "user replacement");
+  await assert.rejects(removeLauncher(f), /LAUNCHER_REMOVE_FAILED/);
+  assert.equal(await readFile(f.paths.launcher, "utf8"), "user replacement");
+});
+
+test("failed user PATH write rolls back even when the write mutated before rejecting", async (t) => {
+  const f = await fixture(t);
+  const electronExecutable = join(f.home, "Hypit Setup.exe");
+  await writeFile(electronExecutable, "fake");
+  let value = "C:\\Original";
+  let writes = 0;
+  await assert.rejects(installLauncher({ ...f, electronExecutable, platform: "win32", userPath: {
+    async read() { return value; },
+    async compareAndSet(expected, next) { if (value !== expected) return false; value = next; if (++writes === 1) throw new Error("secret"); return true; },
+  } }), /LAUNCHER_INSTALL_FAILED/);
+  assert.equal(value, "C:\\Original");
+  await assert.rejects(readFile(f.paths.launcher), { code: "ENOENT" });
+  await assert.rejects(readFile(f.paths.managedState), { code: "ENOENT" });
+});

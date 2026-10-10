@@ -40,6 +40,63 @@ hypit --help
 `paths` identifies the project, selected Profile, Distribution and host locations. A missing Profile
 is a configuration question, not evidence that Hypit needs reinstalling.
 
+### Desktop installation
+
+Hypit Setup supplies the Distribution, its runtime, and a managed portable Skill at
+`~/.agents/skills/hypit`. Codex, Claymore Piko and Cursor use that portable copy. When Claude Code
+is detected, Hypit Setup installs a managed compatibility copy at `~/.claude/skills/hypit`.
+
+Use its installed launcher: `~/.local/bin/hypit` on macOS or
+`%LOCALAPPDATA%\Hypit\bin\hypit.cmd` on Windows. After installation, restart the Agent and Terminal
+so they inherit the updated PATH. If `hypit` is absent from a GUI Agent's PATH, expand the home or
+environment variable and invoke the installed launcher by its quoted absolute path.
+
+After installing another Agent, use “重新扫描 Agent” in Hypit Setup. This refreshes the detected
+Agent integrations and does not request or rewrite model credentials. Removing an Agent does not
+automatically delete its managed Skill copy during scanning.
+
+Run the installed launcher's `hypit paths --json` to locate `hostState`. For a new project, check for
+the desktop profile at `<hostState>/profiles/desktop-newapi.json`, then select it explicitly:
+
+```bash
+hypit runtime use "<hostState>/profiles/desktop-newapi.json" --workspace "<project>"
+```
+
+Reuse an existing project's explicit Profile selection. The desktop profile references platform
+credentials. When configuration status reports NewAPI and OSS as configured, reuse those credentials
+without asking the user to enter secrets again or copying secrets into project files. A missing
+project selection does not imply missing credentials; use the host profile and configuration status
+to distinguish them. If setup reports missing credentials, open Hypit Setup to configure them.
+
+Rerunning Hypit Setup owns updates to its bundled Distribution and managed Skill copies. Each target
+has its own backup; Setup backs up an externally installed Skill before replacing it and restores
+that backup when desktop integration is removed. A valid managed legacy copy at
+`~/.codex/skills/hypit` is migrated; unowned or invalid legacy content is left untouched. Treat that
+Codex-specific path only as a legacy/manual-recovery location. Integration uninstall retains Runtime
+Profiles, platform credentials, and video projects.
+
+The current desktop installer binds `@hypit/whisperx@1#whisperx-alignment` to
+`newapi.personal` by default. This is the capability contract name, not a local
+WhisperX installation. Transcription uses NewAPI's `audio-transcribe` interface
+and must return measured word/character timestamps. NewAPI usage may incur model
+charges. Hypit Setup does not include uv, a Python speech service or model
+weights, and it has no local speech installation card or action. Do not tell a
+desktop user to install uv or download a local model for this Profile.
+
+When upgrading an older desktop Profile, Hypit Setup fills missing NewAPI bindings
+and migrates only an exactly matching, installer-managed `whisperx.local`
+endpoint. It preserves custom bindings. If a custom local endpoint remains,
+the new desktop package does not provide its local Provider; inspect the Profile
+and use an independently installed compatible Provider or select NewAPI. Do
+not claim that an unverified custom endpoint works.
+
+Older installations may have a Program Home at
+`<hostState>/programs/whisperx-whisperx.local-127.0.0.1%3A8765`. Upgrading,
+removing desktop integration or clearing the desktop Profile does not delete
+that home, downloaded models or shared caches. Confirm an old service is stopped
+and inspect exact ownership before manual cleanup; never clear all of hostState
+or shared Hugging Face/torch/uv caches.
+
 If the shell cannot find the executable, inspect existing package records:
 
 ```bash

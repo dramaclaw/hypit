@@ -1,0 +1,33 @@
+{
+  "name": "@hypit/desktop-setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.cjs",
+  "description": "Hypit 中文安装与配置向导",
+  "exports": {
+    "./contracts": "./src/contracts.ts",
+    "./paths": "./src/paths.ts"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dist:mac": "node scripts/package.mjs darwin arm64",
+    "dist:win": "node scripts/package.mjs win32 x64",
+    "dist": "npm run dist:mac && npm run dist:win"
+  },
+  "dependencies": {
+    "@dramaclaw/provider-newapi": "workspace:*",
+    "@hypit/credential-store-platform": "workspace:*",
+    "@hypit/runtime": "workspace:*",
+    "@hypit/video-cli": "workspace:*",
+    "ali-oss": "6.23.0",
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "fflate": "0.8.2",
+    "tar": "7.5.22"
+  }
+}

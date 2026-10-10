@@ -43,6 +43,11 @@ NewAPI 地址保存到 Profile 的 `baseUrl`，密钥写入选定的 CredentialS
 `hypit runtime use <profile>` 选择已有配置；`--runtime <profile>` 只覆盖当前命令。
 命令只读取当前项目的选择，不继承其他项目的 Runtime。命令行相对路径以当前目录为基准。
 
+使用[桌面安装包](./desktop-installer.md)的团队成员可在中文向导中配置 NewAPI 和 OSS。
+向导建立主机上的 `profiles/desktop-newapi.json`，并将密钥存入系统凭据库；新项目仍需通过
+`hypit runtime use <桌面 Profile 绝对路径> --workspace <项目目录>` 选择该 Profile。
+它不会改变现有项目已经选择的 Runtime。
+
 ## Runtime Profile
 
 一个只配置本地媒体处理的例子：
