@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { promisify } from "node:util";
-import { newApiDefaultBindings, parseNewApiEndpointConfig, testNewApiSetupConnection } from "@dramaclaw/provider-newapi";
+import { newApiDefaultBindings, parseNewApiEndpointConfig, testNewApiSetupConnection, readNewApiCleanupObjectKey } from "@dramaclaw/provider-newapi";
 import type { CredentialStore } from "@hypit/runtime";
 import type { DesktopPaths } from "./paths.js";
 import type { DiagnosticItem, SetupInput } from "./contracts.js";
@@ -110,7 +110,9 @@ export async function runDiagnostics(options: DiagnosticsOptions): Promise<reado
         : { code: "oss", label: "OSS", status: "pass" });
     } catch (error) {
       const oss = error instanceof Error && error.message.startsWith("OSS ");
-      results.push({ code: "newapi", label: "NewAPI", status: oss ? "pass" : "fail" }, { code: "oss", label: "OSS", status: oss ? "fail" : "warning" });
+      const cleanupObjectKey = oss ? readNewApiCleanupObjectKey(error) : undefined;
+      results.push({ code: "newapi", label: "NewAPI", status: oss ? "pass" : "fail" },
+        { code: "oss", label: "OSS", status: oss ? "fail" : "warning", ...(cleanupObjectKey ? { cleanupObjectKey } : {}) });
     }
   } else results.push({ code: "newapi", label: "NewAPI", status: "warning" }, { code: "oss", label: "OSS", status: "warning" });
   return results;

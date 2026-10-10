@@ -66,3 +66,34 @@ test("partial credential deletion failure restores credentials and profile witho
   assert.equal(await readFile(paths.profile, "utf8"), "original");
   for (const [key, value] of original) assert.deepEqual(values.get(key), value);
 });
+
+for (const failure of [false, true]) {
+  test(`clear preserves a concurrent Profile edit when credential deletion ${failure ? "fails" : "succeeds"}`, async (t) => {
+    const home = await mkdtemp(join(tmpdir(), "hypit-clear-concurrent-")); t.after(() => rm(home, { recursive: true, force: true }));
+    const paths = desktopPaths({ platform: "darwin", home, appData: home });
+    await mkdir(dirname(paths.profile), { recursive: true }); await writeFile(paths.profile, "original");
+    const original = desktopCredentialRefs.map(ref => [ref.key, { secret: `private-${ref.key}` }] as const);
+    const values = new Map(original); let deletes = 0;
+    const credentialStore = { owns: () => true, resolve: async (ref: any) => values.get(ref.key),
+      put: async (ref: any, value: any) => { values.set(ref.key, value); }, delete: async (ref: any) => {
+        const removed = values.delete(ref.key);
+        if (++deletes === 2) { await writeFile(paths.profile, "concurrent user edit"); if (failure) throw new Error("private-secret"); }
+        return removed;
+      } };
+    const session = createConfirmationSession(); const token = session.issue("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]).token;
+    await assert.rejects(clearDesktopConfiguration({ paths, credentialStore, session, token }), /CLEAR_FAILED/);
+    assert.equal(await readFile(paths.profile, "utf8"), "concurrent user edit");
+    for (const [key, value] of original) assert.deepEqual(values.get(key), value);
+  });
+}
+
+test("clear preserves a Profile created after an absent snapshot", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "hypit-clear-created-")); t.after(() => rm(home, { recursive: true, force: true }));
+  const paths = desktopPaths({ platform: "darwin", home, appData: home });
+  await mkdir(dirname(paths.profile), { recursive: true });
+  const credentialStore = { owns: () => true, resolve: async () => undefined, put: async () => {},
+    delete: async () => { await writeFile(paths.profile, "new user profile"); return false; } };
+  const session = createConfirmationSession(); const token = session.issue("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]).token;
+  await assert.rejects(clearDesktopConfiguration({ paths, credentialStore, session, token }), /CLEAR_FAILED/);
+  assert.equal(await readFile(paths.profile, "utf8"), "new user profile");
+});

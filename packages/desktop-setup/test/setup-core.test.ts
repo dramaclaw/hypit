@@ -12,6 +12,7 @@ import { desktopPaths } from "../src/paths.js";
 import { supportedSkillTargets, targetSummary } from "../src/agent-targets.js";
 import { commitDesktopSetup } from "../src/setup-core.js";
 import type { DesktopSetupDependencies } from "../src/setup-core.js";
+import { serializeFailure } from "../src/main.js";
 
 const input: SetupInput = {
   baseUrl: "https://newapi.example/v1",
@@ -128,6 +129,23 @@ test("OSS connection errors are replaced with a stable Chinese stage", async () 
   const connectionTest = { ...f.dependencies.connectionTest!, createOssClient() { throw new Error(input.relay.accessKeySecret); } };
   await assert.rejects(commitDesktopSetup(input, { ...f.dependencies, connectionTest }), safeFailure("OSS 连接测试失败 [SETUP_OSS_FAILED]"));
   assert.deepEqual(f.events, ["test-newapi"]);
+});
+
+test("failed OSS verification retains its cleanup key through setup and IPC", async () => {
+  const f = fixture();
+  const key = "relay/hypit/setup-test/00000000-0000-4000-8000-000000000001.txt";
+  const connectionTest = { ...f.dependencies.connectionTest!, createOssClient: () => ({
+    put: async () => {}, signatureUrl: () => { throw new Error("secret-signature"); },
+    delete: async () => { throw new Error("submitted-oss-sk"); },
+  }) };
+  await assert.rejects(commitDesktopSetup(input, { ...f.dependencies, connectionTest }), error => {
+    safeFailure("OSS 连接测试失败 [SETUP_OSS_FAILED]")(error);
+    assert.equal((error as Error & { cleanupObjectKey?: string }).cleanupObjectKey, key);
+    assert.deepEqual(serializeFailure(error), { code: "SETUP_OSS_FAILED", message: "OSS 连接测试失败", cleanupObjectKey: key });
+    return true;
+  });
+  assert.equal(f.documents.length, 0);
+  assert.equal(f.values.size, 0);
 });
 
 test("OSS cleanup failure completes setup and exposes only the validated probe key as a warning", async () => {

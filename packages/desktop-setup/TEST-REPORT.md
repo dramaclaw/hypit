@@ -1,5 +1,18 @@
 # Hypit 桌面安装包验收记录
 
+## 2026-10-10：PR #3 Review 修复验收（当前安装包）
+
+本轮修复清除配置的并发编辑保护、连接探测时限及失败路径的 OSS 清理提示。Profile 删除使用现有文件事务，仅回滚本次拥有的变更；并发修改或新建的 Profile 被保留。连接探测共用 30 秒时限，覆盖 HTTP 请求头、响应体和 OSS 上传；清理另设最多 5 秒时限。HTTP 请求退出时取消读取，超时后向导队列能够继续诊断、清除和卸载。签名、下载或内容验证失败且清理失败时，原始错误类别和经过校验的测试对象键传递到设置流程、诊断及界面。
+
+`pnpm check` 和 `git diff --check` 通过。完整测试共 1801 项，1776 通过、25 条件跳过、0 失败。新增回归曾复现并发 Profile 编辑丢失、停滞探测未退出及失败清理提示丢失，修复后通过。独立代码复核未发现剩余实质问题。
+
+| 文件 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `release/Hypit-Setup-0.1.0-arm64.dmg` | 228704353 | `c249b0bbef0263d3f7bb4c92b170a8514a8d5c27a2b99945a0dabe6ef50680d5` |
+| `release/Hypit-Setup-0.1.0-x64.exe` | 204486180 | `4045a4679ca7a900ba96cba19a6886cfe27c19c0d1a5a35394ccbff2e753c25a` |
+
+DMG 实际挂载、EXE 双层解包、安装资源与架构检查均通过，两项相邻 `.sha256` 校验均为 `OK`。Windows 包由 macOS 交叉构建，尚未执行 Windows 真机安装和启动验收；本轮没有使用真实 OSS 或付费模型凭据。以下章节保留此前构建记录，其哈希不代表本轮安装包。
+
 ## 2026-10-10：NewAPI 语音与可编辑团队默认值
 
 本轮在 macOS Apple Silicon 构建未签名的团队内部测试包。安装向导默认填入团队 NewAPI 地址、OSS Endpoint 与 Bucket，用户可编辑；API Key、OSS AccessKey ID 和 OSS AccessKey Secret 始终为空且不写入草稿。合法旧草稿继续保留，远程 HTTP NewAPI、带路径的 OSS Endpoint、过短或格式错误的 Bucket 会回退到团队默认值。

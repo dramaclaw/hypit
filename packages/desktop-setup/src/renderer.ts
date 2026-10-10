@@ -157,7 +157,7 @@ export function renderWizard(root: HTMLElement, state: WizardState, dispatch: (a
         ? "恢复文件未自动清理；请检查此路径，确认无需恢复后再手动删除。"
         : item.code === "skill" ? "恢复文件检查或清理未完成；请检查 Skill 目录的访问权限，再重新运行诊断。"
           : "恢复文件检查未完成；请检查命令入口或 Runtime Profile 目录的访问权限，再重新运行诊断。"));
-      if (item.code === "oss" && item.status === "warning" && item.cleanupObjectKey) line.append(node("p", "OSS 已验证；测试对象未自动删除"), node("p", "请在 OSS 中手动删除测试对象："), node("code", item.cleanupObjectKey));
+      if (item.code === "oss" && item.cleanupObjectKey) line.append(node("p", item.status === "fail" ? "OSS 测试失败；测试对象未自动删除" : "OSS 已验证；测试对象未自动删除"), node("p", "请在 OSS 中手动删除测试对象："), node("code", item.cleanupObjectKey));
       diagnostics.append(line);
     }
     panel.append(diagnostics);

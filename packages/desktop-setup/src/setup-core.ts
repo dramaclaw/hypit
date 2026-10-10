@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { completeNewApiSetup, testNewApiSetupConnection } from "@dramaclaw/provider-newapi";
+import { completeNewApiSetup, testNewApiSetupConnection, readNewApiCleanupObjectKey } from "@dramaclaw/provider-newapi";
 import type { NewApiConnectionTestDependencies } from "@dramaclaw/provider-newapi";
 import type { CanonicalValue } from "@hypit/protocol";
 import type { CredentialRef, CredentialValue, WritableCredentialStore } from "@hypit/runtime";
@@ -35,9 +35,9 @@ const failures = {
   PROFILE_WRITE: "写入 Runtime Profile 失败",
 } as const;
 
-function failure(stage: keyof typeof failures, rollbackFailed = false): Error {
+function failure(stage: keyof typeof failures, rollbackFailed = false, cleanupObjectKey?: string): Error {
   // Never attach the original error or cause: SDK and OS errors may contain secrets.
-  return new Error(`${failures[stage]}${rollbackFailed ? "；平台凭据回滚未完成" : ""} [SETUP_${stage}_FAILED${rollbackFailed ? "_ROLLBACK_FAILED" : ""}]`);
+  return Object.assign(new Error(`${failures[stage]}${rollbackFailed ? "；平台凭据回滚未完成" : ""} [SETUP_${stage}_FAILED${rollbackFailed ? "_ROLLBACK_FAILED" : ""}]`), cleanupObjectKey ? { cleanupObjectKey } : {});
 }
 
 async function writeProfileAtomically(path: string, document: CanonicalValue, options: { readonly mode?: number }): Promise<void> {
@@ -94,7 +94,7 @@ export async function commitDesktopSetup(input: SetupInput, dependencies: Deskto
   } catch (error) {
     // The provider owns the OSS stage; only classify it, never forward its message.
     const stage = error instanceof Error && error.message.startsWith("OSS ") ? "OSS" : "NEWAPI";
-    throw failure(stage);
+    throw failure(stage, false, stage === "OSS" ? readNewApiCleanupObjectKey(error) : undefined);
   }
 
   const store = dependencies.credentialStore;

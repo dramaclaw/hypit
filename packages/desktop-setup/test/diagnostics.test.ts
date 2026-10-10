@@ -96,6 +96,14 @@ test("diagnostics run only bounded version/tool probes and setup network tests, 
     testConnection: async () => ({ modelCount: 1, relayVerified: true, cleanupObjectKey: key }) });
   assert.deepEqual(cleanup.find(item => item.code === "oss"), { code: "oss", label: "OSS", status: "warning", cleanupObjectKey: key });
   assert.equal(cleanup.find(item => item.code === "newapi")?.status, "pass");
+  for (const detail of [key, "secret-ak", "relay/hypit/setup-test/../secret.txt"]) {
+    const failed = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,
+      credentialStore: { owns: () => true, resolve: async () => ({ secret: "private" }) }, execute: async () => undefined,
+      testConnection: async () => { throw Object.assign(new Error("OSS probe download failed"), { cleanupObjectKey: detail, cause: "private" }); } });
+    assert.deepEqual(failed.find(item => item.code === "oss"), { code: "oss", label: "OSS", status: "fail", ...(detail === key ? { cleanupObjectKey: key } : {}) });
+    assert.equal(failed.find(item => item.code === "newapi")?.status, "pass");
+    assert.equal(JSON.stringify(failed).includes("private"), false);
+  }
   const malformed = createDesktopProfile(setup.config) as any; delete malformed.bindings;
   await writeFile(paths.profile, JSON.stringify(malformed));
   const invalid = await runDiagnostics({ paths, resources, platform: "darwin", arch: "arm64", home, electronExecutable: process.execPath,

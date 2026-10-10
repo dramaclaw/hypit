@@ -48,6 +48,7 @@ test("verifies models, uploads, downloads and removes one OSS probe", async () =
         accessKeyId: "oss-id-secret",
         accessKeySecret: "oss-key-secret",
         secure: true,
+        timeout: 30_000,
       });
       return {
         put: async (name, bytes, putOptions) => {
@@ -201,7 +202,46 @@ test("mandatory verification error remains primary when cleanup also fails", asy
         delete: async () => { deleteAttempts++; throw new Error("oss-key-secret nested-secret"); },
       }),
       randomUUID: () => "00000000-0000-4000-8000-000000000000",
-    }), (error) => assertSafeError(error, item.expected), item.name);
+    }), (error) => {
+      assertSafeError(error, item.expected);
+      assert.equal((error as Error & { cleanupObjectKey?: string }).cleanupObjectKey, objectKey);
+      return true;
+    }, item.name);
     assert.equal(deleteAttempts, 1, item.name);
   }
 });
+
+for (const stalled of ["model-headers", "model-body", "oss-body", "upload", "cleanup"] as const) {
+  test(`connection probe bounds ${stalled} and aborts HTTP reads`, async () => {
+    let signal: AbortSignal | undefined;
+    let deletes = 0;
+    const pending = new Promise<never>(() => {});
+    const response = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("partial")); } }));
+    const operation = testNewApiSetupConnection(validInput, {
+      timeoutMs: 20, cleanupTimeoutMs: 20,
+      fetch: async (url, init) => {
+        signal = init?.signal as AbortSignal;
+        if (String(url).endsWith("/models")) return stalled === "model-headers" ? pending : stalled === "model-body" ? response() : Response.json({ data: [{ id: "model" }] });
+        return stalled === "oss-body" ? response() : new Response("HY");
+      },
+      randomUUID: () => "00000000-0000-4000-8000-000000000000",
+      createOssClient: () => ({
+        put: async () => stalled === "upload" ? pending : undefined,
+        signatureUrl: () => signedUrl,
+        delete: async () => { deletes++; return stalled === "cleanup" ? pending : undefined; },
+      }),
+    }).then(value => ({ value }), error => ({ error }));
+    let timer: ReturnType<typeof setTimeout>;
+    const outcome = await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("probe did not release its caller")), 200);
+    })]).finally(() => clearTimeout(timer));
+    if (stalled === "cleanup") {
+      assert.deepEqual(outcome, { value: { modelCount: 1, relayVerified: true, cleanupObjectKey: objectKey } });
+    } else {
+      assert.ok("error" in outcome);
+      assertSafeError(outcome.error, stalled.startsWith("model") ? /NewAPI models/u : /OSS probe/u);
+      assert.equal(signal?.aborted, true);
+    }
+    assert.equal(deletes, stalled.startsWith("model") ? 0 : 1);
+  });
+}

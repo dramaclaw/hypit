@@ -37,6 +37,8 @@ Windows：运行 EXE，安装在当前用户下，不需要管理员权限。若
 
 点击“测试连接并安装”后，向导会读取 NewAPI 的可用模型列表，并在 OSS 上传一个 2 字节测试文件、通过短时签名 URL 下载核对，然后删除测试文件。此操作不会生成图片或视频，也不会提交付费生成请求。如果清理失败，界面会给出测试对象键，需到 OSS 手动删除。地址、Endpoint 和 Bucket 可作为非密钥草稿保留；三个密钥不会保存在草稿中，关闭向导后重新填写。
 
+连接探测总时限为 30 秒，测试对象清理另有最多 5 秒时限。超时会结束本次操作，后续诊断和本机维护可继续执行；签名或下载失败且清理失败时，失败信息和诊断项也会显示残留对象键。
+
 配置成功后，密钥放在 macOS 钥匙串或 Windows 凭据管理器；Runtime Profile 只保存凭据引用。桌面 Profile 位于 macOS 的 `~/Library/Application Support/Hypit/profiles/desktop-newapi.json`，Windows 的 `%LOCALAPPDATA%\Hypit\profiles\desktop-newapi.json`。命令入口分别为 `~/.local/bin/hypit` 与 `%LOCALAPPDATA%\Hypit\bin\hypit.cmd`。
 
 通用 Agent Skill 始终安装到 `~/.agents/skills/hypit`（Windows 为 `%USERPROFILE%\.agents\skills\hypit`），供 Codex、Claymore Piko 和 Cursor 发现。检测到 Claude Code 时，还会安装到 `~/.claude/skills/hypit`（Windows 为 `%USERPROFILE%\.claude\skills\hypit`）。每个目标独立备份已有的非托管 Hypit Skill，卸载本机集成时分别恢复。
@@ -67,6 +69,8 @@ hypit doctor --workspace "<视频项目目录>"
 普通卸载默认保留桌面 Profile、系统凭据与视频项目。macOS 先在应用中点击“卸载本机集成”，确认移除命令入口、托管 Skill 与对应 PATH 配置，再把应用移到废纸篓。Windows 从系统“已安装的应用”卸载；卸载程序会尝试清理本机集成，失败时列出需要检查的位置，Profile、凭据与项目仍保留。卸载本机集成时，安装前备份的外部 Skill 会恢复。
 
 若还要清除这台电脑上的桌面 NewAPI/OSS 配置，请先在向导中点击“清除本机配置和凭据”，确认删除桌面 Profile 及三项固定的系统凭据，然后再卸载应用。此操作不会删除视频项目，也不会清理其他项目自行建立的 Profile 或凭据。已经选用该桌面 Profile 的项目需要重新选择可用 Profile。
+
+清除操作会检查 Profile 是否在确认后被其他程序修改或新建；发现并发修改时会停止清除、恢复本次已删除的凭据，并保留新的 Profile 内容。
 
 ### 旧版本地语音资源
 

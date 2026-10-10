@@ -439,7 +439,13 @@ export async function startElectronShell(bundleDirectory: string): Promise<void>
     refreshAgents: lifecycle.refreshAgents,
     diagnose: () => runDiagnostics({ paths, resources, platform, arch: process.arch, home, electronExecutable: process.execPath, credentialStore }),
     openConfig: async () => { await mkdir(dirname(paths.profile), { recursive: true }); if (await shell.openPath(dirname(paths.profile))) throw new Error("Open failed"); },
-    clear: async () => { const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]); await clearDesktopConfiguration({ paths, credentialStore, session: confirmation, token }); lifecycle.profileCommitted(); return getStatus(); },
+    clear: async () => {
+      const token = await confirm("clear", [paths.profile, ...desktopCredentialRefs.map(ref => ref.key)]);
+      const cleared = await clearDesktopConfiguration({ paths, platform, credentialStore, session: confirmation, token });
+      lifecycle.profileCommitted();
+      const status = await getStatus();
+      return { ...status, diagnostics: mergeDiagnostics(status.diagnostics, cleared.diagnostics) };
+    },
     removeIntegration: async () => {
       const targets = integrationConfirmationTargets({ paths, platform, home });
       const token = await confirm("integration", targets); confirmation.consume(token, "integration", targets);

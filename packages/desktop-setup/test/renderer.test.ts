@@ -236,6 +236,16 @@ test("cleanup-only warning appears on the completed page with the exact object k
   assert.doesNotMatch(root.textContent!, /OSS 连接测试失败/);
 });
 
+test("failed OSS diagnostics show the retained probe key for manual cleanup", () => {
+  const { document } = parseHTML("<main id='app'></main>");
+  const root = document.getElementById("app")! as unknown as HTMLElement;
+  const key = "relay/hypit/setup-test/00000000-0000-4000-8000-000000000001.txt";
+  const failed = { ...result, diagnostics: [{ code: "oss" as const, status: "fail" as const, label: "OSS" as const, cleanupObjectKey: key }] };
+  renderWizard(root, wizardReducer(filled(), { type: "success", result: failed }), () => {});
+  assert.match(root.textContent!, /OSS 测试失败；测试对象未自动删除/);
+  assert.ok(Array.from(root.querySelectorAll("li code")).some(code => code.textContent === key));
+});
+
 test("wizard DOM uses password inputs and disables actions while working", () => {
   const { document } = parseHTML("<main id='app'></main>");
   const root = document.getElementById("app")! as unknown as HTMLElement;

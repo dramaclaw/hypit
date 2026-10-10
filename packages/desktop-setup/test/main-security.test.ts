@@ -9,6 +9,8 @@ import { browserWindowOptions, createSetupController, isTrustedSender, localPage
 import { IPC_CHANNELS } from "../src/ipc.js";
 import { desktopPaths } from "../src/paths.js";
 import type { SetupInput, SetupResult } from "../src/contracts.js";
+import { commitDesktopSetup } from "../src/setup-core.js";
+import { supportedSkillTargets } from "../src/agent-targets.js";
 
 
 const input: SetupInput = { baseUrl: "https://api.example/v1", apiKey: "SECRET_API", relay: { enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY" } };
@@ -237,6 +239,36 @@ test("failed operations release the queue and preserve cleanup warnings", async 
   const controller = createSetupController({ getStatus: async () => result, commit: async () => { throw Object.assign(new Error("OSS 连接测试失败 [SETUP_OSS_FAILED]"), { cleanupObjectKey: key }); }, install: async () => {}, diagnose: async () => [], openConfig: async () => {}, clear: async () => result });
   assert.deepEqual(await controller.submit(input), { ok: false, error: { code: "SETUP_OSS_FAILED", message: "OSS 连接测试失败", cleanupObjectKey: key } });
   assert.equal((await controller.rerunDiagnostics()).ok, true);
+});
+
+test("a stalled connection body times out and releases queued diagnostics, clear and removal", async () => {
+  const paths = desktopPaths({ platform: "darwin", home: "/fixture", appData: "/fixture" });
+  let signal: AbortSignal | undefined;
+  let writes = 0;
+  const calls: string[] = [];
+  const controller = createSetupController({
+    getStatus: async () => result,
+    commit: submitted => commitDesktopSetup(submitted, { paths, targets: supportedSkillTargets(paths),
+      credentialStore: { owns: () => true, resolve: async () => undefined, put: async () => { writes++; }, delete: async () => false },
+      connectionTest: { timeoutMs: 20, fetch: async (_url, init) => {
+        signal = init?.signal as AbortSignal;
+        return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"data":')); } }));
+      }, randomUUID: () => "unused", createOssClient: () => { throw new Error("OSS should not start"); } } }),
+    install: async () => { writes++; },
+    diagnose: async () => { calls.push("diagnostics"); return []; },
+    openConfig: async () => {}, clear: async () => { calls.push("clear"); return result; },
+    removeIntegration: async () => { calls.push("remove"); return result; },
+  });
+  let timer: ReturnType<typeof setTimeout>;
+  const replies = await Promise.race([
+    Promise.all([controller.submit(input), controller.rerunDiagnostics(), controller.clearConfiguration(), controller.removeIntegration()]),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("controller queue stayed blocked")), 300); }),
+  ]).finally(() => clearTimeout(timer));
+  assert.deepEqual(replies[0], { ok: false, error: { code: "SETUP_NEWAPI_FAILED", message: "NewAPI 连接测试失败" } });
+  assert.deepEqual(replies.slice(1).map(reply => reply.ok), [true, true, true]);
+  assert.deepEqual(calls, ["diagnostics", "clear", "remove"]);
+  assert.equal(signal?.aborted, true);
+  assert.equal(writes, 0);
 });
 
 test("outbound results and diagnostics project only public contract fields", async () => {
