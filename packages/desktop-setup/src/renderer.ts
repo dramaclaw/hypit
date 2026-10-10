@@ -37,7 +37,7 @@ const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId
 
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 function resumableBaseUrl(value: unknown): string {
-  if (typeof value !== "string" || value.length > 8192) return "";
+  if (typeof value !== "string" || !value.trim() || value.length > 8192 || /[\u0000-\u001f\u007f]/u.test(value)) return "";
   try {
     const parsed = new URL(value);
     if (parsed.username || parsed.password || parsed.href.includes("?") || parsed.href.includes("#")
@@ -46,7 +46,7 @@ function resumableBaseUrl(value: unknown): string {
   } catch { return ""; }
 }
 function resumableEndpoint(value: unknown): string {
-  if (typeof value !== "string" || value.length > 8192) return "";
+  if (typeof value !== "string" || !value.trim() || value.length > 8192 || /[\u0000-\u001f\u007f]/u.test(value)) return "";
   try {
     const parsed = new URL(value.includes("://") ? value : `https://${value}`);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") return "";

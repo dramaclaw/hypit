@@ -8,8 +8,8 @@
 
 | 文件 | 字节 | SHA-256 |
 | --- | ---: | --- |
-| `release/Hypit-Setup-0.1.0-arm64.dmg` | 228708086 | `7075ba42d1d4cc9d182ecf79000aa641fa72b3d35f91234edc829a4030827e46` |
-| `release/Hypit-Setup-0.1.0-x64.exe` | 204484519 | `cedcbe987414036078417495185d7d352fd96a19419b8ec6bb90746069dce0eb` |
+| `release/Hypit-Setup-0.1.0-arm64.dmg` | 228708238 | `c1ed967e990dccd4428daac62be642a2aa64711d3080f5ece5b10c563abfa6cd` |
+| `release/Hypit-Setup-0.1.0-x64.exe` | 204484496 | `615cf429b636a347ace08afce5620dcc12b3754337b6e95b4b2b7f4e172e21d3` |
 
 两项相邻 `.sha256` 校验均为 `OK`。打包流程实际挂载 DMG、双层解包 NSIS EXE，并验证应用架构、ASAR、Runtime、NewAPI 语音资源、FFmpeg/FFprobe、许可证、Skill、资源清单及文件摘要。解包后的 Windows ASAR 可检出三项预填值。`pnpm check` 通过；`pnpm test` 共 1790 项，1765 通过、25 条件跳过、0 失败；`git diff --check` 通过。
 

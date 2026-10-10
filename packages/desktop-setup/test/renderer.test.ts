@@ -35,8 +35,14 @@ test("draft restoration rejects values that setup submission would reject", () =
   for (const baseUrl of ["http://api.example/v1", "https://user@api.example/v1", "https://api.example/v1?token=x", "https://api.example/v1#x"]) {
     assert.equal(initialWizardState({ baseUrl }).fields.baseUrl, defaults.baseUrl);
   }
+  for (const baseUrl of ["\thttps://api.example/v1", "https://api.example/v1\n", "https://api.example/\u007f"]) {
+    assert.equal(initialWizardState({ baseUrl }).fields.baseUrl, defaults.baseUrl);
+  }
   assert.equal(initialWizardState({ baseUrl: "http://127.0.0.1:8780/v1" }).fields.baseUrl, "http://127.0.0.1:8780/v1");
   for (const endpoint of ["http://oss.example", "https://oss.example/path", "https://user@oss.example", "https://oss.example?token=x"]) {
+    assert.equal(initialWizardState({ endpoint }).fields.endpoint, defaults.endpoint);
+  }
+  for (const endpoint of ["\noss.example", "oss.example\t", "oss.example\u007f"]) {
     assert.equal(initialWizardState({ endpoint }).fields.endpoint, defaults.endpoint);
   }
   assert.equal(initialWizardState({ endpoint: "oss.example" }).fields.endpoint, "oss.example");
