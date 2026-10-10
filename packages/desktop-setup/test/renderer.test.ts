@@ -31,6 +31,21 @@ test("valid custom draft wins while missing, empty, or invalid fields use defaul
   assert.deepEqual({ baseUrl: recovered.fields.baseUrl, endpoint: recovered.fields.endpoint, bucket: recovered.fields.bucket }, defaults);
 });
 
+test("draft restoration rejects values that setup submission would reject", () => {
+  for (const baseUrl of ["http://api.example/v1", "https://user@api.example/v1", "https://api.example/v1?token=x", "https://api.example/v1#x"]) {
+    assert.equal(initialWizardState({ baseUrl }).fields.baseUrl, defaults.baseUrl);
+  }
+  assert.equal(initialWizardState({ baseUrl: "http://127.0.0.1:8780/v1" }).fields.baseUrl, "http://127.0.0.1:8780/v1");
+  for (const endpoint of ["http://oss.example", "https://oss.example/path", "https://user@oss.example", "https://oss.example?token=x"]) {
+    assert.equal(initialWizardState({ endpoint }).fields.endpoint, defaults.endpoint);
+  }
+  assert.equal(initialWizardState({ endpoint: "oss.example" }).fields.endpoint, "oss.example");
+  for (const bucket of ["a", "ab", "-bucket", "bucket-", "UPPERCASE"]) {
+    assert.equal(initialWizardState({ bucket }).fields.bucket, defaults.bucket);
+  }
+  assert.equal(initialWizardState({ bucket: "abc" }).fields.bucket, "abc");
+});
+
 test("settings inputs display real default values and allow editing", () => {
   const { document } = parseHTML("<main id='app'></main>");
   const root = document.getElementById("app")! as unknown as HTMLElement;

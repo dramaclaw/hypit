@@ -1,6 +1,23 @@
 # Hypit 桌面安装包验收记录
 
-日期：2026-09-30。构建机：macOS Apple Silicon。交付物为未签名的团队内部测试包，未发布到外部平台。本次 WhisperX 构建见下一节；其余章节为保留的历史记录。
+## 2026-10-10：NewAPI 语音与可编辑团队默认值
+
+本轮在 macOS Apple Silicon 构建未签名的团队内部测试包。安装向导默认填入团队 NewAPI 地址、OSS Endpoint 与 Bucket，用户可编辑；API Key、OSS AccessKey ID 和 OSS AccessKey Secret 始终为空且不写入草稿。合法旧草稿继续保留，远程 HTTP NewAPI、带路径的 OSS Endpoint、过短或格式错误的 Bucket 会回退到团队默认值。
+
+语音识别和逐词对齐使用 NewAPI。打包清单明确排除本地 WhisperX Provider、服务目录及 uv/Python 资源；安装器不会引导安装本地 WhisperX，也不会下载本地语音模型。
+
+| 文件 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `release/Hypit-Setup-0.1.0-arm64.dmg` | 228708086 | `7075ba42d1d4cc9d182ecf79000aa641fa72b3d35f91234edc829a4030827e46` |
+| `release/Hypit-Setup-0.1.0-x64.exe` | 204484519 | `cedcbe987414036078417495185d7d352fd96a19419b8ec6bb90746069dce0eb` |
+
+两项相邻 `.sha256` 校验均为 `OK`。打包流程实际挂载 DMG、双层解包 NSIS EXE，并验证应用架构、ASAR、Runtime、NewAPI 语音资源、FFmpeg/FFprobe、许可证、Skill、资源清单及文件摘要。解包后的 Windows ASAR 可检出三项预填值。`pnpm check` 通过；`pnpm test` 共 1790 项，1765 通过、25 条件跳过、0 失败；`git diff --check` 通过。
+
+Windows 包由 macOS 交叉构建，尚未完成 Windows 真机安装与启动验证。两个安装包均未签名、未公证。常见私钥/API Key 模式扫描没有发现凭据；本机未安装专业 secret scanner，不能把补充扫描视为专业扫描的替代。
+
+## 2026-09-30 历史记录
+
+以下为旧版 Guided WhisperX 构建记录，仅用于追溯，不代表当前 NewAPI 语音安装包。构建机为 macOS Apple Silicon，交付物为未签名的团队内部测试包，未发布到外部平台。
 
 ## 本次 Distribution 真实依赖调用者复审修复
 

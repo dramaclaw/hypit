@@ -64,7 +64,7 @@ npx skills add hypit-ai/hypit -g
 
 这条命令安装 Skill。首次使用时，Agent 会检查 Hypit 可执行程序，并按需协助安装。
 
-团队内部也提供[中文桌面安装包](./docs/zh/guide/desktop-installer.md)（macOS arm64 / Windows x64，未签名）。配置 NewAPI/OSS 后，可在“本地语音识别与字幕对齐（可选）”卡片主动安装 WhisperX，默认 `small / cpu / int8` 与中文、英文；跳过不会下载模型。普通卸载保留本地环境、模型缓存与 Profile 绑定。存储位置、重试、停止服务和人工检查清理见安装指南；Windows 当前仅完成交叉打包与静态验收。
+团队内部也提供[中文桌面安装包](./docs/zh/guide/desktop-installer.md)（macOS arm64 / Windows x64，未签名）。向导会预填团队 NewAPI 地址、OSS Endpoint 和 Bucket，均可修改；API Key 与 OSS AccessKey 仍须由使用者填写，并保存在系统凭据库。语音识别与字幕对齐通过 NewAPI 完成，安装包不会安装本地 WhisperX 或下载本地语音模型。Windows 当前仅完成 macOS 交叉打包、解包和静态验收，尚未完成 Windows 实机验证。
 视频项目可以放在任意位置。
 
 Hypit 本身免费使用；Coding Agent 和模型服务各有自己的账号与费用。
@@ -73,8 +73,6 @@ HypiHub 是我们推荐的托管模型服务，也可以使用你自己的 API �
 
 [Agent 工作环境与入口合作方](./docs/zh/guide/agents.md) ·
 [模型与部署服务](./docs/zh/guide/service-partners.md)
-
-团队内部测试还可使用 [中文桌面安装包](./docs/zh/guide/desktop-installer.md)：macOS Apple Silicon DMG 或 Windows x64 EXE。安装后在向导中填写自己的 NewAPI 与 OSS 配置；Windows 包目前在 macOS 交叉构建，尚未完成 Windows 实机验证。
 
 ## 示例
 

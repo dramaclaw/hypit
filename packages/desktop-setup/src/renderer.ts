@@ -35,28 +35,39 @@ const defaultAddresses = {
 } as const;
 const hidden = (): Record<SecretField, boolean> => ({ apiKey: false, accessKeyId: false, accessKeySecret: false });
 
-function resumableAddress(value: unknown, bare = false): string {
+const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+function resumableBaseUrl(value: unknown): string {
   if (typeof value !== "string" || value.length > 8192) return "";
   try {
-    const parsed = new URL(bare && !value.includes("://") ? `https://${value}` : value);
-    if (parsed.username || parsed.password || parsed.search || parsed.hash || !["https:", "http:"].includes(parsed.protocol)) return "";
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.href.includes("?") || parsed.href.includes("#")
+      || parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopbackHosts.has(parsed.hostname))) return "";
     return value;
   } catch { return ""; }
 }
+function resumableEndpoint(value: unknown): string {
+  if (typeof value !== "string" || value.length > 8192) return "";
+  try {
+    const parsed = new URL(value.includes("://") ? value : `https://${value}`);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") return "";
+    return value;
+  } catch { return ""; }
+}
+const resumableBucket = (value: unknown): string => typeof value === "string" && /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/u.test(value) ? value : "";
 
 export function initialWizardState(draft: unknown = {}): WizardState {
   const item = draft && typeof draft === "object" ? draft as Record<string, unknown> : {};
   return { screen: item.screen === "settings" ? "settings" : "welcome", fields: {
-    baseUrl: resumableAddress(item.baseUrl) || defaultAddresses.baseUrl, apiKey: "",
-    endpoint: resumableAddress(item.endpoint, true) || defaultAddresses.endpoint,
-    bucket: typeof item.bucket === "string" && /^[a-z0-9-]{1,63}$/u.test(item.bucket) ? item.bucket : defaultAddresses.bucket,
+    baseUrl: resumableBaseUrl(item.baseUrl) || defaultAddresses.baseUrl, apiKey: "",
+    endpoint: resumableEndpoint(item.endpoint) || defaultAddresses.endpoint,
+    bucket: resumableBucket(item.bucket) || defaultAddresses.bucket,
     accessKeyId: "", accessKeySecret: "",
   }, visible: hidden(), stage: "validating", confirmClear: false, returnScreen: "settings" };
 }
 
 export function persistedWizardState(state: WizardState) {
-  return { screen: state.screen === "welcome" ? "welcome" : "settings", baseUrl: resumableAddress(state.fields.baseUrl),
-    endpoint: resumableAddress(state.fields.endpoint, true), bucket: /^[a-z0-9-]{1,63}$/u.test(state.fields.bucket) ? state.fields.bucket : "" };
+  return { screen: state.screen === "welcome" ? "welcome" : "settings", baseUrl: resumableBaseUrl(state.fields.baseUrl),
+    endpoint: resumableEndpoint(state.fields.endpoint), bucket: resumableBucket(state.fields.bucket) };
 }
 
 export function canSubmit(state: WizardState): boolean {
