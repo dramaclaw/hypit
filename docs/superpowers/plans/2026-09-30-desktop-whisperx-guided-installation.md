@@ -444,4 +444,3 @@ If `pre-commit` or `gitleaks` is unavailable, record the exact command-not-found
 - [ ] Ordinary uninstall retains local resources; explicit deletion is separately confirmed and ownership-safe.
 - [ ] A future NewAPI implementation can take the same capability binding without project changes.
 - [ ] Full tests, desktop tests, build, DMG mount, EXE extraction, resource inspection, and checksums have fresh evidence.
-

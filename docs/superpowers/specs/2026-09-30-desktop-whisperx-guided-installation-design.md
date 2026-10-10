@@ -180,4 +180,3 @@ Windows x64 continues to receive cross-build, extraction, architecture, and stat
 ### Release limitations
 
 The installers remain internal unsigned builds until signing and notarization are supplied. Real network routes and first-time model downloads vary by environment. Acceptance records must distinguish cached preparation from a fresh download and must not use paid generation credentials.
-
