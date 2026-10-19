@@ -51,7 +51,7 @@ console.log(control.invalid ? 'SECRET invalid JSON' : JSON.stringify({ format: '
 if (control.nonzero === action) process.exitCode = 1;
 `;
 
-async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = "darwin") {
+async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = (process.platform === "win32" ? "win32" : "darwin")) {
   const root = await mkdtemp(join(tmpdir(), "hypit-whisperx-program-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home: root, appData: root });

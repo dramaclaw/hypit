@@ -498,7 +498,17 @@ for (const failure of ["profile", "skill"] as const) {
     });
     syncBuiltinESMExports();
     t.after(() => { renameMock.mock.restore(); syncBuiltinESMExports(); });
-    await assert.rejects(removeDesktopIntegration(f), (error: unknown) => {
+    const options = failure === "profile" && f.platform === "win32" ? {
+      ...f,
+      userPath: {
+        read: f.userPath.read,
+        compareAndSet: async (expected: string, value: string) => {
+          if (!injected) { injected = true; throw new Error("submitted-secret"); }
+          return f.userPath.compareAndSet(expected, value);
+        },
+      },
+    } : f;
+    await assert.rejects(removeDesktopIntegration(options), (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal(error.message, "桌面集成卸载失败 [INTEGRATION_REMOVE_FAILED]");
       assert.equal(`${error.stack}${JSON.stringify(error)}`.includes("submitted-secret"), false);
@@ -507,7 +517,7 @@ for (const failure of ["profile", "skill"] as const) {
     assert.equal(injected, true);
     assert.deepEqual(await Promise.all(files.map((path) => readFile(path))), before);
     assert.deepEqual(await readdir(dirname(f.paths.portableSkill)), ["hypit"]);
-    await removeDesktopIntegration(f);
+    await removeDesktopIntegration(options);
     assert.equal(await readFile(join(f.paths.portableSkill, "SKILL.md"), "utf8"), "external original");
   });
 }
