@@ -59,8 +59,11 @@ Hypit 为 AI Agent（Claude Code、Codex 等）提供了一套制作视频的语
 ## 只安装一次
 
 ```bash
-npx skills add hypit-ai/hypit -g
+npx skills add dramaclaw/hypit -g
 ```
+
+Piko 插件使用同一个 fork，并从对应的 GitHub Release 安装锁定的 Runtime。它不会解析官方
+`hypit-ai/hypit` 包；Runtime 使用 fork 中的 `@dramaclaw/provider-newapi`。
 
 这条命令安装 Skill。首次使用时，Agent 会检查 Hypit 可执行程序，并按需协助安装。
 

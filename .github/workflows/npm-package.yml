@@ -53,6 +53,9 @@ jobs:
         run: node --input-type=module -e 'import { readFileSync, appendFileSync } from "node:fs"; const { version } = JSON.parse(readFileSync("package.json", "utf8")); appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);'
       - name: Build the npm package and README
         run: npm run pack:distribution
+      - name: Build the immutable Piko Runtime manifest
+        if: runner.os == 'Linux'
+        run: npm run pack:piko-runtime -- dist/release
       - name: Install, render and export outside the checkout
         run: npm run check:distribution -- "dist/release/hypit-hypit-${{ steps.version.outputs.version }}.tgz"
       - uses: actions/upload-artifact@v4
@@ -61,5 +64,6 @@ jobs:
           name: npm-package
           path: |
             dist/release/*.tgz
+            dist/release/hypit-runtime-*.json
             dist/release/README.md
           if-no-files-found: error

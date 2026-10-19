@@ -138,4 +138,17 @@ jobs:
             echo "Release already contains $filename; leaving it unchanged."
           else
             gh release upload "$RELEASE_TAG" "release/$filename"
+      - name: Attach the Piko Runtime manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          filename="hypit-runtime-$VERSION.json"
+          assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          if printf '%s\n' "$assets" | grep -Fxq "$filename"; then
+            echo "Release already contains $filename; leaving it unchanged."
+          else
+            gh release upload "$RELEASE_TAG" "release/$filename"
           fi
