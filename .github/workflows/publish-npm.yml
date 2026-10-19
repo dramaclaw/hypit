@@ -135,9 +135,17 @@ jobs:
           filename="hypit-hypit-$VERSION.tgz"
           assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           if printf '%s\n' "$assets" | grep -Fxq "$filename"; then
-            echo "Release already contains $filename; leaving it unchanged."
+            existing="$(mktemp -d)"
+            trap 'rm -rf "$existing"' EXIT
+            gh release download "$RELEASE_TAG" --pattern "$filename" --dir "$existing"
+            cmp -- "release/$filename" "$existing/$filename" || {
+              echo "Release asset $filename exists with different bytes; refusing to publish a mismatched Runtime."
+              exit 1
+            }
+            echo "Release already contains the matching $filename; leaving it unchanged."
           else
             gh release upload "$RELEASE_TAG" "release/$filename"
+          fi
       - name: Attach the Piko Runtime manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,7 +156,14 @@ jobs:
           filename="hypit-runtime-$VERSION.json"
           assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           if printf '%s\n' "$assets" | grep -Fxq "$filename"; then
-            echo "Release already contains $filename; leaving it unchanged."
+            existing="$(mktemp -d)"
+            trap 'rm -rf "$existing"' EXIT
+            gh release download "$RELEASE_TAG" --pattern "$filename" --dir "$existing"
+            cmp -- "release/$filename" "$existing/$filename" || {
+              echo "Release asset $filename exists with different bytes; refusing to publish a mismatched Runtime."
+              exit 1
+            }
+            echo "Release already contains the matching $filename; leaving it unchanged."
           else
             gh release upload "$RELEASE_TAG" "release/$filename"
           fi
