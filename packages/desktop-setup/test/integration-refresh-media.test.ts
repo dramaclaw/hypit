@@ -48,7 +48,8 @@ async function fixture(t: TestContext, platform: "darwin" | "win32") {
 }
 
 for (const platform of ["darwin", "win32"] as const) {
-  test(`${platform} startup upgrades a legacy desktop Profile without asking for credentials`, async t => {
+  const skipDarwinOnWindows = platform === "darwin" && process.platform === "win32";
+  test(`${platform} startup upgrades a legacy desktop Profile without asking for credentials`, { skip: skipDarwinOnWindows }, async t => {
     const f = await fixture(t, platform);
     const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
     for (const key of Object.keys(legacy.bindings)) if (key.startsWith("@hypit/whisperx@") || key.startsWith("@hypit/cosyvoice@")) delete legacy.bindings[key];
@@ -62,7 +63,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(Object.keys(updated.bindings).length, 13);
     assert.equal(updated.customSetting, "preserved");
   });
-  test(`${platform} startup removes only an exactly managed legacy speech endpoint`, async t => {
+  test(`${platform} startup removes only an exactly managed legacy speech endpoint`, { skip: skipDarwinOnWindows }, async t => {
     const f = await fixture(t, platform);
     const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
     legacy.bindings["@hypit/whisperx@1#whisperx-alignment"] = "whisperx.local";
@@ -75,7 +76,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(updated.bindings["@hypit/whisperx@1#whisperx-alignment"], "newapi.personal");
     assert.equal(updated.endpoints["whisperx.local"], undefined);
   });
-  test(`${platform} modified local speech configuration is preserved and reported incomplete`, async t => {
+  test(`${platform} modified local speech configuration is preserved and reported incomplete`, { skip: skipDarwinOnWindows }, async t => {
     const f = await fixture(t, platform);
     const legacy = JSON.parse(await readFile(f.paths.profile, "utf8"));
     legacy.bindings["@hypit/whisperx@1#whisperx-alignment"] = "whisperx.local";
@@ -89,7 +90,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(result.diagnostics.find(item => item.code === "profile")?.status, "fail");
     assert.equal(await readFile(f.paths.profile, "utf8"), bytes);
   });
-  test(`${platform} Profile recovery cleanup warning keeps a committed refresh configured`, async (t) => {
+  test(`${platform} Profile recovery cleanup warning keeps a committed refresh configured`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const unlink = fs.unlink;
     const mock = t.mock.method(fs, "unlink", async (path: Parameters<typeof fs.unlink>[0]) => {
@@ -127,7 +128,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.ok(!reconcileStartupStatus(cleared, result).diagnostics.some(item => item.reason === "CLEANUP_INCOMPLETE" && item.path === warning.path));
   });
 
-  test(`${platform} prepared media refresh refuses an edit before its commit`, async (t) => {
+  test(`${platform} prepared media refresh refuses an edit before its commit`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const refresh = await prepareDesktopMediaRefresh(f.current);
     assert.ok(refresh);
@@ -139,7 +140,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(await readFile(f.paths.profile, "utf8"), edited);
   });
 
-  test(`${platform} Profile publication retains a new destination and the displaced Profile`, async (t) => {
+  test(`${platform} Profile publication retains a new destination and the displaced Profile`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const original = await readFile(f.paths.profile);
     const edited = JSON.stringify({ ...JSON.parse(original.toString()), userSetting: "concurrent edit" });
@@ -159,7 +160,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.deepEqual(await readFile(join(recovery!.path!, "displaced")), original);
   });
 
-  test(`${platform} media refresh preserves an edit at forward publication`, async (t) => {
+  test(`${platform} media refresh preserves an edit at forward publication`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const saved = JSON.parse(await readFile(f.paths.profile, "utf8"));
     const edited = JSON.stringify({ ...saved, userSetting: "concurrent edit" });
@@ -181,7 +182,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
   });
 
-  test(`${platform} media rollback retains a user edit made after publication`, async (t) => {
+  test(`${platform} media rollback retains a user edit made after publication`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let edited = "";
     const result = await refreshDesktopStatus({ ...f.current, copyDirectory: async () => {
@@ -196,7 +197,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
   });
 
-  test(`${platform} Agent rescan preserves the startup Profile rollback guard until Profile setup succeeds`, async (t) => {
+  test(`${platform} Agent rescan preserves the startup Profile rollback guard until Profile setup succeeds`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let edited = "";
     const startup = await refreshDesktopStatus({ ...f.current, copyDirectory: async () => {
@@ -257,7 +258,7 @@ for (const platform of ["darwin", "win32"] as const) {
     }
   });
 
-  test(`${platform} moved app refresh replaces proven managed media paths after the old app is gone`, async (t) => {
+  test(`${platform} moved app refresh replaces proven managed media paths after the old app is gone`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const before = JSON.parse(await readFile(f.paths.profile, "utf8"));
     await rm(f.old.appDirectory, { recursive: true });
@@ -273,7 +274,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(result.diagnostics.find(item => item.code === "ffmpeg")?.status, "pass");
   });
 
-  test(`${platform} moved app preserves custom media paths while updating only proven managed fields`, async (t) => {
+  test(`${platform} moved app preserves custom media paths while updating only proven managed fields`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const custom = join(f.current.home, "custom-ffmpeg");
     await writeFile(custom, "custom user binary");
@@ -290,7 +291,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(result.configured, true);
   });
 
-  test(`${platform} media migration rolls back profile and integration together when Skill copy fails`, async (t) => {
+  test(`${platform} media migration rolls back profile and integration together when Skill copy fails`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const files = [f.paths.profile, f.paths.launcher, f.paths.managedState, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER),
       ...(platform === "darwin" ? [join(f.current.home, ".zprofile")] : [])];
@@ -307,7 +308,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(f.readPath(), beforePath);
   });
 
-  test(`${platform} a failed profile rollback is explicitly reported without exposing the OS error`, async (t) => {
+  test(`${platform} a failed profile rollback is explicitly reported without exposing the OS error`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     const link = fs.link;
     let profileWrites = 0;
@@ -326,7 +327,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
   });
 
-  test(`${platform} missing media without matching managed launcher remains incomplete and preserves profile`, async (t) => {
+  test(`${platform} missing media without matching managed launcher remains incomplete and preserves profile`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     // A user replaced the launcher's ownership record. The old app paths cannot be claimed.
     await rm(f.paths.managedState);
@@ -338,7 +339,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.deepEqual(await readFile(f.paths.profile), saved);
   });
 
-  test(`${platform} status cannot report ready while an explicitly configured custom media binary is missing`, async (t) => {
+  test(`${platform} status cannot report ready while an explicitly configured custom media binary is missing`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     await installDesktopIntegration(f.current);
     const saved = createDesktopProfile(f.config, { ...f.current.media, ffmpegPath: join(f.current.home, "missing-custom-ffmpeg") });

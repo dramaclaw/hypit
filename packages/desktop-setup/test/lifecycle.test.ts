@@ -19,7 +19,10 @@ import { runDiagnostics } from "../src/diagnostics.js";
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), "hypit lifecycle-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
+  const platform = process.platform === "win32" ? "win32" as const : "darwin" as const;
+  const paths = desktopPaths({ platform, home, appData: join(home, "appdata") });
+  let userPath = "original PATH";
+  const userPathAdapter = { read: async () => userPath, compareAndSet: async (expected: string, value: string) => { if (userPath !== expected) return false; userPath = value; return true; } };
   const sourceDirectory = join(home, "source");
   await mkdir(join(sourceDirectory, "references"), { recursive: true });
   await writeFile(join(sourceDirectory, "SKILL.md"), "# Skill");
@@ -32,7 +35,7 @@ async function fixture(t: TestContext) {
     backupDirectory: paths.portableSkillBackup, required: true, detectedAgents: [] };
   const claude: AgentSkillTarget = { id: "claude", label: "Claude Code Skill", skillDirectory: paths.claudeSkill,
     backupDirectory: paths.claudeSkillBackup, required: false, detectedAgents: [] };
-  return { paths, portable, claude, targets: [portable], home, platform: "darwin" as const, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
+  return { paths, portable, claude, targets: [portable], home, platform, userPath: userPathAdapter, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
 }
 
 async function seedLegacyManagedSkill(f: Awaited<ReturnType<typeof fixture>>, backup?: string) {
@@ -291,7 +294,7 @@ for (const failure of ["portable", "legacy", "legacy-restore"] as const) {
     await seedLegacyManagedSkill(f, "user Codex Skill");
     await installDesktopIntegration({ ...f, targets: [f.portable, f.claude] });
     await seedLegacyManagedSkill(f, "user Codex Skill");
-    const tracked = [f.paths.launcher, f.paths.managedState, join(f.home, ".zprofile"),
+    const tracked = [f.paths.launcher, f.paths.managedState, ...(f.platform === "darwin" ? [join(f.home, ".zprofile")] : []),
       join(f.claude.skillDirectory, SKILL_MARKER), join(f.paths.legacyCodexSkill, SKILL_MARKER)];
     const before = await Promise.all(tracked.map(path => readFile(path)));
     const rename = fs.rename;
@@ -396,7 +399,7 @@ test("failed integration restores the previous Skill and launcher with no partia
 test("Skill copy failure after launcher upgrade restores all prior integration bytes", async (t) => {
   const f = await fixture(t);
   await installDesktopIntegration(f);
-  const files = [f.paths.launcher, f.paths.managedState, join(f.home, ".zprofile"), join(f.paths.portableSkill, "SKILL.md")];
+  const files = [f.paths.launcher, f.paths.managedState, ...(f.platform === "darwin" ? [join(f.home, ".zprofile")] : []), join(f.paths.portableSkill, "SKILL.md")];
   const before = await Promise.all(files.map((path) => readFile(path)));
   const electronExecutable = join(f.home, "new electron");
   await writeFile(electronExecutable, "new fake");
@@ -430,7 +433,7 @@ test("uninstall preflight preserves the managed Skill and backup when the launch
   await writeFile(join(f.paths.portableSkill, "SKILL.md"), "external original");
   await installDesktopIntegration(f);
   await writeFile(f.paths.launcher, "user replacement");
-  const files = [f.paths.launcher, f.paths.managedState, join(f.home, ".zprofile"),
+  const files = [f.paths.launcher, f.paths.managedState, ...(f.platform === "darwin" ? [join(f.home, ".zprofile")] : []),
     join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, SKILL_MARKER), join(f.paths.portableSkillBackup, "SKILL.md")];
   const before = await Promise.all(files.map((path) => readFile(path)));
   const identities = await Promise.all(files.map(async (path) => (await stat(path)).ino));
@@ -479,7 +482,7 @@ for (const failure of ["profile", "skill"] as const) {
     await writeFile(join(f.paths.portableSkill, "SKILL.md"), "external original");
     await installDesktopIntegration(f);
     const profile = join(f.home, ".zprofile");
-    const files = [f.paths.launcher, f.paths.managedState, profile, join(f.paths.portableSkill, "SKILL.md"),
+    const files = [f.paths.launcher, f.paths.managedState, ...(f.platform === "darwin" ? [profile] : []), join(f.paths.portableSkill, "SKILL.md"),
       join(f.paths.portableSkill, SKILL_MARKER), join(f.paths.portableSkillBackup, "SKILL.md")];
     const before = await Promise.all(files.map((path) => readFile(path)));
     const originalRename = fs.rename;

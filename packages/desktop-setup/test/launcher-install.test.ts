@@ -125,12 +125,14 @@ async function fixture(t: TestContext) {
   t.after(() => rm(home, { recursive: true, force: true }));
   const platform = process.platform === "win32" ? "win32" as const : "darwin" as const;
   const paths = desktopPaths({ platform, home, appData: join(home, "Application Support") });
+  let userPath = "original PATH";
+  const userPathAdapter = { read: async () => userPath, compareAndSet: async (expected: string, value: string) => { if (userPath !== expected) return false; userPath = value; return true; } };
   const electronExecutable = join(home, platform === "win32" ? "Fake Electron app.exe" : 'Fake Electron "app"');
   const cliEntry = join(home, "resources", "hypit.mjs");
   await mkdir(dirname(cliEntry));
   await writeFile(cliEntry, "");
   await writeFile(electronExecutable, '#!/bin/sh\nprintf "%s\\n" "$ELECTRON_RUN_AS_NODE" "$@"\nexit 7\n', { mode: 0o755 });
-  return { platform, home, paths, electronExecutable, cliEntry };
+  return { platform, home, paths, userPath: userPathAdapter, electronExecutable, cliEntry };
 }
 
 test("Windows command uses quoted Windows-relative paths and preserves forwarded arguments", () => {

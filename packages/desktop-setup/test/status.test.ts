@@ -272,7 +272,8 @@ test("Windows status requires its managed launcher and user PATH entry", async (
 });
 
 for (const platform of ["darwin", "win32"] as const) {
-  test(`${platform} status detects a bundle upgrade even while the previous integration is intact`, async (t) => {
+  const skipDarwinOnWindows = platform === "darwin" && process.platform === "win32";
+  test(`${platform} status detects a bundle upgrade even while the previous integration is intact`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
@@ -285,7 +286,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(status.diagnostics.find(item => item.code === "skill")?.status, "fail");
   });
 
-  test(`${platform} status detects a moved app launcher even while the original target exists`, async (t) => {
+  test(`${platform} status detects a moved app launcher even while the original target exists`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
@@ -299,7 +300,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal(status.diagnostics.find(item => item.code === "launcher")?.status, "fail");
   });
 
-  test(`${platform} startup refresh upgrades and relocates integration without changing the saved profile`, async (t) => {
+  test(`${platform} startup refresh upgrades and relocates integration without changing the saved profile`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let path = "original PATH";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
@@ -323,7 +324,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal((await refreshDesktopStatus(current)).configured, true);
   });
 
-  test(`${platform} startup refresh repairs missing integration for an already valid profile`, async (t) => {
+  test(`${platform} startup refresh repairs missing integration for an already valid profile`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
@@ -335,7 +336,7 @@ for (const platform of ["darwin", "win32"] as const) {
     assert.equal((await refreshDesktopStatus(options)).configured, true);
   });
 
-  test(`${platform} failed startup refresh rolls back launcher, Skill and PATH and reports incomplete`, async (t) => {
+  test(`${platform} failed startup refresh rolls back launcher, Skill and PATH and reports incomplete`, { skip: skipDarwinOnWindows }, async (t) => {
     const f = await fixture(t);
     let path = "original PATH";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
