@@ -22,10 +22,13 @@ const input: SetupInput = { baseUrl: "https://newapi.example/v1", apiKey: "SECRE
   enabled: true, endpoint: "oss.example", bucket: "test-bucket", accessKeyId: "SECRET_ID", accessKeySecret: "SECRET_KEY",
 } };
 const profile = () => createDesktopProfile(completeNewApiSetup(input).config) as any;
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, requestedPlatform?: "darwin" | "win32") {
   const home = await mkdtemp(join(tmpdir(), "hypit-status-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
+  const platform = requestedPlatform ?? (process.platform === "win32" ? "win32" as const : "darwin" as const);
+  const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home, appData: join(home, "appdata") });
+  let path = "original PATH";
+  const userPath = { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } };
   const sourceDirectory = join(home, "source");
   await mkdir(join(sourceDirectory, "references"), { recursive: true });
   await writeFile(join(sourceDirectory, "SKILL.md"), "# Skill");
@@ -35,7 +38,7 @@ async function fixture(t: TestContext) {
   await writeFile(electronExecutable, "fake");
   await writeFile(cliEntry, "fake");
   await mkdir(dirname(paths.profile), { recursive: true });
-  return { paths, targets: (await scanAgentTargets({ paths })).targets, home, platform: "darwin" as const, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
+  return { paths, targets: (await scanAgentTargets({ paths })).targets, home, platform, userPath, sourceDirectory, installedVersion: "1", electronExecutable, cliEntry };
 }
 
 async function missingBackupFixture(t: TestContext) {
@@ -67,7 +70,7 @@ test("same-version status and diagnostics reject missing recorded backup with an
   if (result.ok) assert.ok(result.value.diagnostics.some(item => item.reason === "SKILL_BACKUP_UNAVAILABLE"));
 });
 
-test("fresh status and diagnostics discover launcher, managed-state, and zprofile recovery siblings", async (t) => {
+test("fresh status and diagnostics discover launcher, managed-state, and zprofile recovery siblings", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   await writeFile(f.paths.profile, JSON.stringify(profile()));
   await installDesktopIntegration(f);
@@ -270,7 +273,7 @@ test("Windows status requires its managed launcher and user PATH entry", async (
 
 for (const platform of ["darwin", "win32"] as const) {
   test(`${platform} status detects a bundle upgrade even while the previous integration is intact`, async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
@@ -283,7 +286,7 @@ for (const platform of ["darwin", "win32"] as const) {
   });
 
   test(`${platform} status detects a moved app launcher even while the original target exists`, async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
@@ -297,7 +300,7 @@ for (const platform of ["darwin", "win32"] as const) {
   });
 
   test(`${platform} startup refresh upgrades and relocates integration without changing the saved profile`, async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, platform);
     let path = "original PATH";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     const saved = JSON.stringify(profile());
@@ -321,7 +324,7 @@ for (const platform of ["darwin", "win32"] as const) {
   });
 
   test(`${platform} startup refresh repairs missing integration for an already valid profile`, async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, platform);
     let path = "";
     const options = { ...f, platform, userPath: { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } } };
     await writeFile(f.paths.profile, JSON.stringify(profile()));
@@ -355,7 +358,7 @@ for (const platform of ["darwin", "win32"] as const) {
 }
 
 for (const modification of ["unmanaged-skill", "edited-skill", "edited-launcher", "unmanaged-launcher", "edited-path", "missing-backup"] as const) {
-  test(`startup refresh preserves ${modification} and reports incomplete`, async (t) => {
+  test(`startup refresh preserves ${modification} and reports incomplete`, { skip: modification === "edited-path" && process.platform === "win32" }, async (t) => {
     const f = await fixture(t);
     await writeFile(f.paths.profile, JSON.stringify(profile()));
     await installDesktopIntegration(f);
@@ -368,7 +371,7 @@ for (const modification of ["unmanaged-skill", "edited-skill", "edited-launcher"
       const markerFile = join(f.paths.portableSkill, SKILL_MARKER);
       await writeFile(markerFile, JSON.stringify({ ...JSON.parse(await readFile(markerFile, "utf8")), backupDirectory: f.paths.portableSkillBackup }));
     }
-    const files = [f.paths.profile, f.paths.launcher, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, "references", "guide.md"), join(f.home, ".zprofile"),
+    const files = [f.paths.profile, f.paths.launcher, join(f.paths.portableSkill, "SKILL.md"), join(f.paths.portableSkill, "references", "guide.md"), ...(f.platform === "darwin" ? [join(f.home, ".zprofile")] : []),
       ...(modification === "unmanaged-skill" ? [] : [join(f.paths.portableSkill, SKILL_MARKER)]), ...(modification === "unmanaged-launcher" ? [] : [f.paths.managedState])];
     const before = await Promise.all(files.map(file => readFile(file)));
     const result = await refreshDesktopStatus({ ...f, installedVersion: "2" });

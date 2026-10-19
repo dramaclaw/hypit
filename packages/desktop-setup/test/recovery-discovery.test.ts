@@ -6,20 +6,22 @@ import test from "node:test";
 import { desktopPaths } from "../src/paths.js";
 import { transactionRecoveryWarnings, whisperXRecoveryIncomplete } from "../src/recovery-discovery.js";
 
+const recoveryPath = (path: string, suffix: string) => join(dirname(path), `${basename(path)}.recovery-${suffix}`);
+
 test("transaction recovery discovery reports only exact approved siblings in sorted order", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "hypit-recovery-scan-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
   const approved = [paths.launcher, paths.managedState, join(home, ".zprofile"), paths.profile];
   for (const path of approved) {
-    await mkdir(`${path}.recovery-Z9a8B7`, { recursive: true });
-    await mkdir(`${path}.recovery-A1b2C3`, { recursive: true });
-    await mkdir(`${path}.recovery-A1b2C3-extra`, { recursive: true });
-    await writeFile(`${path}.recovery-Q9w8E7`, "unrelated file");
+    await mkdir(recoveryPath(path, "Z9a8B7"), { recursive: true });
+    await mkdir(recoveryPath(path, "A1b2C3"), { recursive: true });
+    await mkdir(join(dirname(path), `${basename(path)}.recovery-A1b2C3-extra`), { recursive: true });
+    await writeFile(recoveryPath(path, "Q9w8E7"), "unrelated file");
   }
   await mkdir(join(home, "unrelated", `${basename(paths.launcher)}.recovery-A1b2C3`), { recursive: true });
   const warnings = await transactionRecoveryWarnings({ paths, home, platform: "darwin" });
-  assert.deepEqual(warnings.map(item => item.path), approved.flatMap(path => [`${path}.recovery-A1b2C3`, `${path}.recovery-Z9a8B7`]));
+  assert.deepEqual(warnings.map(item => item.path), approved.flatMap(path => [recoveryPath(path, "A1b2C3"), recoveryPath(path, "Z9a8B7")]));
   assert.ok(warnings.every(item => item.reason === "CLEANUP_INCOMPLETE" && item.status === "warning"));
   assert.deepEqual(warnings.map(item => item.code), ["launcher", "launcher", "launcher", "launcher", "launcher", "launcher", "profile", "profile"]);
   assert.doesNotMatch(JSON.stringify(warnings), /unrelated file|extra/u);
@@ -32,9 +34,10 @@ test("transaction recovery discovery reports symlinks without reading their targ
   const secret = join(home, "private-secret");
   await writeFile(secret, "NEVER_DISCLOSE_THIS");
   await mkdir(dirname(paths.profile), { recursive: true });
-  await symlink(secret, `${paths.profile}.recovery-A1b2C3`);
+  const candidate = recoveryPath(paths.profile, "A1b2C3");
+  await symlink(secret, candidate);
   const warnings = await transactionRecoveryWarnings({ paths, home, platform: "win32" });
-  assert.deepEqual(warnings.filter(item => item.path).map(item => item.path), [`${paths.profile}.recovery-A1b2C3`]);
+  assert.deepEqual(warnings.filter(item => item.path).map(item => item.path), [candidate]);
   assert.doesNotMatch(JSON.stringify(warnings), /NEVER_DISCLOSE_THIS|private-secret/u);
 });
 

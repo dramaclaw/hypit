@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
@@ -407,7 +408,9 @@ test("CJS shell boots without import.meta and stages the Windows credential help
   assert.equal(isolatedProcess.exitCode, 0);
   const packagedHelper = runInNewContext(`${source}\nwindowsScript;`, { require: (name: string) => name === "electron" ? { app: { requestSingleInstanceLock: () => false, quit() {} } } : actualRequire(name),
     module: { exports: {} }, __dirname: "/Applications/Hypit Setup.app/Contents/Resources/app.asar/dist", process: isolatedProcess, URL, Buffer, console });
-  assert.equal(packagedHelper, "/Applications/Hypit Setup.app/Contents/Resources/app.asar.unpacked/dist/credential-store/runtime/windows-credential.ps1");
+  const packagedRoot = join("/Applications/Hypit Setup.app/Contents/Resources/app.asar/dist", "credential-store", "src", "windows.js")
+    .replace(/([/\\])app\.asar([/\\])/, "$1app.asar.unpacked$2");
+  assert.equal(packagedHelper, fileURLToPath(new URL("../runtime/windows-credential.ps1", pathToFileURL(packagedRoot).href)));
   assert.ok((await readFile(new URL("../dist/credential-store/runtime/windows-credential.ps1", import.meta.url), "utf8")).includes("param("));
   for (const name of ["main.cjs", "preload.cjs", "renderer.js", "index.html", "styles.css"]) assert.ok((await readFile(new URL(`../dist/${name}`, import.meta.url))).length > 0);
 

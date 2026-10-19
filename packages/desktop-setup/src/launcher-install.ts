@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, win32 } from "node:path";
 import { promisify } from "node:util";
 import type { DesktopPaths } from "./paths.js";
 import { exists } from "./skill-install.js";
@@ -190,7 +190,7 @@ export function prepareFileChange(before: FileSnapshot, bytes: Buffer | undefine
   return {
     async commit() {
       await mkdir(dirname(before.path), { recursive: true });
-      recovery = await mkdtemp(`${before.path}.recovery-`);
+      recovery = await mkdtemp(join(dirname(before.path), `${basename(before.path)}.recovery-`));
       if (process.platform !== "win32") await chmod(recovery, 0o700);
       if (bytes !== undefined) {
         await atomicFile(join(recovery, "staged"), bytes, mode);

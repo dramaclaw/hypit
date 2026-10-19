@@ -11,7 +11,7 @@ import { desktopPaths } from "../src/paths.js";
 import { createWindowsUserPath, installLauncher, prepareLauncherInstall, removeLauncher, renderLauncher, runWindowsPowerShell } from "../src/launcher-install.js";
 
 for (const resource of ["launcher", "zprofile"] as const) {
-  test(`${resource} retains a newly appeared destination and prepared recovery content`, async (t) => {
+  test(`${resource} retains a newly appeared destination and prepared recovery content`, { skip: resource === "zprofile" && process.platform === "win32" }, async (t) => {
     const f = await fixture(t);
     const target = resource === "launcher" ? f.paths.launcher : join(f.home, ".zprofile");
     const link = fs.link;
@@ -24,7 +24,7 @@ for (const resource of ["launcher", "zprofile"] as const) {
     t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
     await assert.rejects(installLauncher(f), /LAUNCHER_INSTALL_FAILED_ROLLBACK_FAILED/);
     assert.equal(await readFile(target, "utf8"), "new user file");
-    const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(target.lastIndexOf("/") + 1)}.recovery-`));
+    const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(Math.max(target.lastIndexOf("/"), target.lastIndexOf("\\")) + 1)}.recovery-`));
     assert.equal(recoveries.length, 1);
     assert.ok((await readFile(join(dirname(target), recoveries[0]!, "staged"))).length);
   });
@@ -58,7 +58,7 @@ test("Windows PATH adapter returns mismatches and rejects ambiguous editor outpu
 
 for (const resource of ["launcher", "zprofile"] as const) {
   for (const window of ["displace", "publish"] as const) {
-    test(`${resource} preserves content changed at the ${window} mutation boundary`, async (t) => {
+    test(`${resource} preserves content changed at the ${window} mutation boundary`, { skip: resource === "zprofile" && process.platform === "win32" }, async (t) => {
       const f = await fixture(t);
       const target = resource === "launcher" ? f.paths.launcher : join(f.home, ".zprofile");
       if (resource === "launcher") await installLauncher(f);
@@ -83,7 +83,7 @@ for (const resource of ["launcher", "zprofile"] as const) {
       assert.equal(injected, true);
       assert.equal(await readFile(target, "utf8"), edited);
       if (window === "publish") {
-        const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(target.lastIndexOf("/") + 1)}.recovery-`));
+        const recoveries = (await readdir(dirname(target))).filter(name => name.startsWith(`${target.slice(Math.max(target.lastIndexOf("/"), target.lastIndexOf("\\")) + 1)}.recovery-`));
         assert.equal(recoveries.length, 1);
         assert.deepEqual(await readFile(join(dirname(target), recoveries[0]!, "displaced")), original);
       }
@@ -123,13 +123,14 @@ test("Windows PATH subprocess uses system PowerShell, a 30-second bound and a se
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), "hypit 中文 space-$-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "Application Support") });
-  const electronExecutable = join(home, 'Fake Electron "app"');
+  const platform = process.platform === "win32" ? "win32" as const : "darwin" as const;
+  const paths = desktopPaths({ platform, home, appData: join(home, "Application Support") });
+  const electronExecutable = join(home, platform === "win32" ? "Fake Electron app.exe" : 'Fake Electron "app"');
   const cliEntry = join(home, "resources", "hypit.mjs");
   await mkdir(dirname(cliEntry));
   await writeFile(cliEntry, "");
   await writeFile(electronExecutable, '#!/bin/sh\nprintf "%s\\n" "$ELECTRON_RUN_AS_NODE" "$@"\nexit 7\n', { mode: 0o755 });
-  return { platform: "darwin" as const, home, paths, electronExecutable, cliEntry };
+  return { platform, home, paths, electronExecutable, cliEntry };
 }
 
 test("Windows command uses quoted Windows-relative paths and preserves forwarded arguments", () => {
@@ -141,7 +142,7 @@ test("Windows command uses quoted Windows-relative paths and preserves forwarded
   assert.ok(content.includes('"%~dp0..\\..\\Programs\\Hypit Setup\\resources\\runtime\\node_modules\\@hypit\\hypit\\bin\\hypit.mjs" %*'));
 });
 
-test("launcher puts bundled ffmpeg and ffprobe first even with an empty host PATH", async (t) => {
+test("launcher puts bundled ffmpeg and ffprobe first even with an empty host PATH", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t); const bundledBin = join(f.home, "bundle bin");
   await mkdir(bundledBin);
   for (const tool of ["ffmpeg", "ffprobe"]) await writeFile(join(bundledBin, tool), `#!/bin/sh\nprintf '${tool} bundled\\n'\n`, { mode: 0o755 });
@@ -173,7 +174,7 @@ test("Windows PATH adapter preserves raw registry values and encodes writes as d
   assert.ok(calls[1]!.script.indexOf("$change.expected") < calls[1]!.script.indexOf("$key.SetValue"));
 });
 
-test("macOS launcher quotes absolute paths, preserves arguments and exit status", async (t) => {
+test("macOS launcher quotes absolute paths, preserves arguments and exit status", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   await installLauncher(f);
   const launcher = await readFile(f.paths.launcher, "utf8");
@@ -188,7 +189,7 @@ test("macOS launcher quotes absolute paths, preserves arguments and exit status"
   assert.equal((await stat(f.paths.launcher)).mode & 0o777, 0o755);
 });
 
-test("uninstall rejects an unrelated PATH block in edited ownership state", async (t) => {
+test("uninstall rejects an unrelated PATH block in edited ownership state", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const profile = join(f.home, ".zprofile");
   await writeFile(profile, "# keep user content\n");
@@ -200,7 +201,7 @@ test("uninstall rejects an unrelated PATH block in edited ownership state", asyn
   assert.deepEqual(await readFile(profile), before);
 });
 
-test("macOS PATH block is idempotent and uninstall preserves unrelated shell bytes", async (t) => {
+test("macOS PATH block is idempotent and uninstall preserves unrelated shell bytes", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const profile = join(f.home, ".zprofile");
   const original = "# 用户配置\nexport SOMETHING='keep'";
@@ -216,7 +217,7 @@ test("macOS PATH block is idempotent and uninstall preserves unrelated shell byt
   assert.equal(await removeLauncher(f), false);
 });
 
-test("macOS installation and upgrade preserve non-UTF8 profile bytes exactly", async (t) => {
+test("macOS installation and upgrade preserve non-UTF8 profile bytes exactly", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const profile = join(f.home, ".zprofile");
   const original = Buffer.from([35, 32, 0xff]);
@@ -230,7 +231,7 @@ test("macOS installation and upgrade preserve non-UTF8 profile bytes exactly", a
   assert.deepEqual(await readFile(profile), original);
 });
 
-test("macOS uninstall preserves non-UTF8 bytes appended after installation", async (t) => {
+test("macOS uninstall preserves non-UTF8 bytes appended after installation", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const profile = join(f.home, ".zprofile");
   const original = Buffer.from("# original\n");

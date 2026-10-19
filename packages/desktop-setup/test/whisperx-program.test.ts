@@ -54,7 +54,7 @@ if (control.nonzero === action) process.exitCode = 1;
 async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = "darwin") {
   const root = await mkdtemp(join(tmpdir(), "hypit-whisperx-program-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home: root, appData: root });
+  const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home: root, appData: root });
   const bundledBin = join(root, "resources", "bin");
   const bundledUv = join(bundledBin, platform === "darwin" ? "uv" : "uv.exe");
   const cliEntry = join(root, "resources", "hypit.mjs");
@@ -101,7 +101,8 @@ test("two candidate passes use the bundled CLI and publish only after a ready st
     assert.equal(call.published, undefined);
     assert.deepEqual(call.args, [f.cliEntry, "programs", call.args[2], "--runtime", call.profilePath, "--endpoint", "whisperx.local", "--json"]);
     assert.equal(call.env.PATH?.split(delimiter)[0], dirname(f.bundledUv));
-    assert.equal(call.env.PATH, `${f.bundledBin}${delimiter}/inherited/bin`);
+    const separator = f.platform === "win32" ? ";" : ":";
+    assert.equal(call.env.PATH, `${f.bundledBin}${separator}/inherited/bin`);
     assert.equal(call.env.UV, undefined);
     assert.equal(call.env.NODE_OPTIONS, undefined);
     assert.equal(call.env.API_KEY, undefined);
@@ -290,7 +291,7 @@ test("a standalone failed status probe does not inherit a completed installation
 });
 
 for (const invalid of ["relative", "outside", "symlink", "directory", "non-executable"]) {
-  test(`rejects ${invalid} uv without falling back to PATH`, async (t) => {
+  test(`rejects ${invalid} uv without falling back to PATH`, { skip: invalid === "non-executable" && process.platform === "win32" }, async (t) => {
     const f = await fixture(t);
     let bundledUv = f.bundledUv;
     if (invalid === "relative") bundledUv = "bin/uv";
@@ -361,7 +362,7 @@ test("Windows uv enforces the PE x64 lock and rejects rehashed non-PE bytes befo
   assert.equal((await f.calls()).length, before);
 });
 
-test("bundled uv is checked again before each mutating subprocess", async (t) => {
+test("bundled uv is checked again before each mutating subprocess", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const result = await f.service.installAndStart(stage => { if (stage === "preparing-en") chmodSync(f.bundledUv, 0o644); });
   assert.equal(result.code, "WHISPERX_BUNDLED_UV_INVALID");

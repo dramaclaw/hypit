@@ -232,9 +232,9 @@ export type PreparedSkillInstall = PreparedRemoval & { readonly marker: ManagedS
 /** Stage a verified Skill and any user backup without changing the live tree. */
 export async function prepareSkillInstall(options: SkillInstallOptions): Promise<PreparedSkillInstall> {
   const { target } = options;
-  const stage = `${target.skillDirectory}.stage-${randomUUID()}`;
-  const previous = `${target.skillDirectory}.previous-${randomUUID()}`;
-  const backupStage = `${target.backupDirectory}.stage-${randomUUID()}`;
+  const stage = join(dirname(target.skillDirectory), `${basename(target.skillDirectory)}.stage-${randomUUID()}`);
+  const previous = join(dirname(target.skillDirectory), `${basename(target.skillDirectory)}.previous-${randomUUID()}`);
+  const backupStage = join(dirname(target.backupDirectory), `${basename(target.backupDirectory)}.stage-${randomUUID()}`);
   let moved = false;
   let backupCreated = false;
   let committed = false;
@@ -435,8 +435,8 @@ export async function prepareSkillRemoval(options: { readonly target: AgentSkill
 
 async function prepareOwnedRemoval(target: LegacyCodexPaths,
   readMarker: () => Promise<{ readonly backupDirectory?: string } | undefined>): Promise<PreparedRemoval | undefined> {
-  const previous = `${target.skillDirectory}.removed-${randomUUID()}`;
-  const restoreStage = `${target.skillDirectory}.restore-${randomUUID()}`;
+  const previous = join(dirname(target.skillDirectory), `${basename(target.skillDirectory)}.removed-${randomUUID()}`);
+  const restoreStage = join(dirname(target.skillDirectory), `${basename(target.skillDirectory)}.restore-${randomUUID()}`);
   let moved = false;
   let restored = false;
   let restoredLiveSnapshot: TreeSnapshot | undefined;

@@ -216,7 +216,7 @@ for (const [platform, arch, filename] of [["darwin", "arm64", "ffmpeg"], ["win32
     assert.equal(JSON.parse(await readFile(join(f.out, distributionPath, "package.json"), "utf8")).version, "7.8.9");
     assert.deepEqual(await readdir(join(f.out, "bin")), [filename, platform === "win32" ? "ffprobe.exe" : "ffprobe"]);
     assert.deepEqual(await readFile(join(f.out, "bin", filename)), executable(platform));
-    if (platform === "darwin") assert.ok((await stat(join(f.out, "bin", filename))).mode & 0o111);
+    if (platform === "darwin" && process.platform !== "win32") assert.ok((await stat(join(f.out, "bin", filename))).mode & 0o111);
     assert.equal(await readFile(join(f.out, "skill/hypit/references/nested/example.svml"), "utf8"), "<Video />");
     for (const path of [`bin/${filename}`, "skill/hypit/SKILL.md", `${distributionPath}/bin/hypit.mjs`]) {
       const contents = await readFile(join(f.out, path));

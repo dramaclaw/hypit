@@ -18,7 +18,7 @@ import { SKILL_MARKER } from "../src/skill-install.js";
 async function fixture(t: TestContext, platform: "darwin" | "win32") {
   const home = await mkdtemp(join(tmpdir(), "hypit-media-refresh-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home, appData: join(home, "appdata") });
+  const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home, appData: join(home, "appdata") });
   let path = "original PATH";
   const userPath = { read: async () => path, compareAndSet: async (expected: string, value: string) => { if (path !== expected) return false; path = value; return true; } };
   const suffix = platform === "win32" ? ".exe" : "";
@@ -93,7 +93,7 @@ for (const platform of ["darwin", "win32"] as const) {
     const f = await fixture(t, platform);
     const unlink = fs.unlink;
     const mock = t.mock.method(fs, "unlink", async (path: Parameters<typeof fs.unlink>[0]) => {
-      if (String(path).startsWith(`${f.paths.profile}.recovery-`) && String(path).endsWith("/displaced")) throw new Error("fixture-secret");
+      if (String(path).startsWith(`${f.paths.profile}.recovery-`) && String(path).endsWith(`${process.platform === "win32" ? "\\" : "/"}displaced`)) throw new Error("fixture-secret");
       return unlink(path);
     });
     syncBuiltinESMExports();

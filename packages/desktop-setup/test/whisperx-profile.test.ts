@@ -46,7 +46,7 @@ test("candidate adds fixed local endpoint and binding without publishing", async
   assert.doesNotThrow(() => parseLocalRuntimeProfile(candidate));
   assert.equal(dirname(prepared.candidatePath), dirname(f.profilePath));
   assert.equal(resolve(dirname(prepared.candidatePath), candidate.dataRoot), resolve(dirname(f.profilePath), f.document.dataRoot));
-  assert.equal((await stat(prepared.candidatePath)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await stat(prepared.candidatePath)).mode & 0o777, 0o600);
   assert.deepEqual(await readFile(f.profilePath), f.bytes);
   assert.equal(await prepared.rollback(), false);
   assert.deepEqual(await prepared.dispose(false), []);
@@ -99,7 +99,7 @@ test("commit preserves unrelated document values and original permissions", asyn
   delete actual.endpoints[LOCAL_WHISPERX_ENDPOINT];
   delete actual.bindings[WHISPERX_ALIGNMENT_CAPABILITY];
   assert.deepEqual(actual, document);
-  assert.equal((await stat(f.profilePath)).mode & 0o777, 0o640);
+  if (process.platform !== "win32") assert.equal((await stat(f.profilePath)).mode & 0o777, 0o640);
   assert.deepEqual(await prepared.dispose(true), []);
   assert.deepEqual(await readdir(dirname(f.profilePath)), ["desktop-newapi.json"]);
 });
@@ -197,7 +197,7 @@ test("rollback restores the original bytes and mode", async (t) => {
   await prepared.commit();
   assert.equal(await prepared.rollback(), false);
   assert.deepEqual(await readFile(f.profilePath), f.bytes);
-  assert.equal((await stat(f.profilePath)).mode & 0o777, 0o640);
+  if (process.platform !== "win32") assert.equal((await stat(f.profilePath)).mode & 0o777, 0o640);
   assert.deepEqual(await prepared.dispose(false), []);
   assert.deepEqual(await readdir(dirname(f.profilePath)), ["desktop-newapi.json"]);
 });
