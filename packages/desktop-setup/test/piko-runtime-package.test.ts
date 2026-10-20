@@ -12,15 +12,14 @@ test("Piko Runtime packaging writes both artifacts to the requested output direc
   const output = await mkdtemp(join(tmpdir(), "hypit-piko-runtime-package-"));
   t.after(() => rm(output, { recursive: true, force: true }));
 
-  const npmCli = process.env.npm_execpath;
-  const npmInvocation = npmCli?.endsWith("npm-cli.js")
-    ? [process.execPath, npmCli]
-    : [process.platform === "win32" ? "npm.cmd" : "npm"];
-  const result = spawnSync(npmInvocation[0]!, [...npmInvocation.slice(1), "run", "pack:piko-runtime", "--", output], {
+  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+  const result = spawnSync(npmCommand, ["run", "pack:piko-runtime", "--", output], {
     cwd: root,
     encoding: "utf8",
+    shell: process.platform === "win32",
     windowsHide: true,
   });
+  if (result.error) throw result.error;
   assert.equal(result.status, 0, result.stderr || result.stdout);
 
   const manifest = JSON.parse(await readFile(join(output, "hypit-runtime-0.2.16.json"), "utf8"));
