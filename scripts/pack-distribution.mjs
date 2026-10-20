@@ -5,11 +5,14 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ options: { "json-path": { type: "boolean", default: false } } });
+const { values } = parseArgs({ options: {
+  "json-path": { type: "boolean", default: false },
+  output: { type: "string" },
+} });
 const jsonPath = values["json-path"];
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const output = resolve(root, "dist/release");
+const output = resolve(root, values.output ?? "dist/release");
 const github = "https://github.com/dramaclaw/hypit/blob/main/";
 const assets = "https://storage.googleapis.com/hypit-public-assets/showcase/npm/2026-09-10/";
 const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));

@@ -12,7 +12,10 @@ const expected = `hypit-hypit-${packageManifest.version}.tgz`;
 // Always rebuild the versioned archive. Reusing a same-named file can pair a
 // stale tarball with a fresh fork/provider manifest after a local rerun.
 await rm(join(output, expected), { force: true });
-execFileSync("npm", ["run", "pack:distribution", "--", "--json-path"], { cwd: root, stdio: "inherit" });
+const npmArgs = ["run", "pack:distribution", "--", "--json-path", "--output", output];
+const npmCli = process.env.npm_execpath;
+if (!npmCli?.endsWith("npm-cli.js")) throw new Error("Run npm run pack:piko-runtime to prepare the Piko Runtime release");
+execFileSync(process.execPath, [npmCli, ...npmArgs], { cwd: root, stdio: "inherit" });
 const artifacts = (await readdir(output)).filter((name) => name === expected);
 if (artifacts.length !== 1) throw new Error(`Expected exactly one ${expected} in ${output}`);
 const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
