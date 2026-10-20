@@ -221,14 +221,17 @@ export async function checkArtifact({ out, platform, arch, checkoutRoot: sourceR
   checkMediaBinary(await readFile(binary), target, "ffmpeg");
   const locked = media.lock.targets[`${platform}-${arch}`];
   assert.deepEqual(files[`bin/${target.executable}`], { sha256: locked.ffmpeg.sha256, bytes: locked.ffmpeg.bytes }, "FFmpeg differs from locked binary");
-  if (platform === "darwin") assert.ok((await lstat(binary)).mode & 0o111, "FFmpeg is not executable");
+  // Unix executable bits are not representable on a Windows checkout.  The
+  // target binary is still validated by its Mach-O header and locked digest;
+  // only enforce the mode when the host filesystem can preserve it.
+  if (platform === "darwin" && process.platform !== "win32") assert.ok((await lstat(binary)).mode & 0o111, "FFmpeg is not executable");
   const probe = join(root, "bin", target.probe.executable);
   checkMediaBinary(await readFile(probe), target, "ffprobe");
   assert.deepEqual(files[`bin/${target.probe.executable}`], { sha256: locked.ffprobe.sha256, bytes: locked.ffprobe.bytes }, "FFprobe differs from locked binary");
   const notices = await inventory(join(sourceRoot, "packages/desktop-setup/media-licenses", `${platform}-${arch}`));
   assert.ok(notices.COPYING && notices["SOURCES.md"] && notices["VERSIONS.txt"], "Media license and source notices required");
   assert.deepEqual(await inventory(join(root, "licenses")), notices, "Media license notices differ from checkout");
-  if (platform === "darwin") assert.ok((await lstat(probe)).mode & 0o111, "FFprobe is not executable");
+  if (platform === "darwin" && process.platform !== "win32") assert.ok((await lstat(probe)).mode & 0o111, "FFprobe is not executable");
   return manifest;
 }
 

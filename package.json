@@ -1,10 +1,10 @@
 {
   "name": "@hypit/hypit",
   "version": "0.2.16",
-  "homepage": "https://hypit.ai",
+  "homepage": "https://github.com/dramaclaw/hypit",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hypit-ai/hypit.git"
+    "url": "git+https://github.com/dramaclaw/hypit.git"
   },
   "description": "Hypit video authoring Distribution for AI agents",
   "license": "SEE LICENSE IN LICENSE",
@@ -172,6 +172,7 @@
     "desktop:dist:win": "pnpm --filter @hypit/desktop-setup dist:win",
     "desktop:dist": "pnpm --filter @hypit/desktop-setup dist",
     "pack:distribution": "node scripts/pack-distribution.mjs",
+    "pack:piko-runtime": "node scripts/pack-piko-runtime.mjs",
     "check:distribution": "node scripts/check-distribution.mjs",
     "build:public-types": "node scripts/build-public-types.mjs",
     "check": "tsc -p tsconfig.json --noEmit",

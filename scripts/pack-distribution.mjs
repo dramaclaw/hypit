@@ -5,13 +5,17 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ options: { "json-path": { type: "boolean", default: false } } });
+const { values } = parseArgs({ options: {
+  "json-path": { type: "boolean", default: false },
+  output: { type: "string" },
+} });
 const jsonPath = values["json-path"];
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const output = resolve(root, "dist/release");
-const github = "https://github.com/hypit-ai/hypit/blob/main/";
+const output = resolve(root, values.output ?? "dist/release");
+const github = "https://github.com/dramaclaw/hypit/blob/main/";
 const assets = "https://storage.googleapis.com/hypit-public-assets/showcase/npm/2026-09-10/";
+const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 
 // Run through npm so its CLI entry is portable, including on Windows.
 const npmCli = process.env.npm_execpath;
@@ -31,7 +35,7 @@ const examples = readme.indexOf("## Examples\n");
 const next = readme.indexOf("## Use the Hypit skill\n", examples);
 if (examples < 0 || next < 0) throw new Error("README Examples section could not be located.");
 readme = readme.slice(0, examples)
-  + "[Watch the complete video examples on GitHub](https://github.com/hypit-ai/hypit#examples).\n\n"
+  + "[Watch the complete video examples on GitHub](https://github.com/dramaclaw/hypit#examples).\n\n"
   + readme.slice(next);
 readme = readme
   .replace(/<picture>[\s\S]*?<\/picture>/u,
@@ -40,7 +44,7 @@ readme = readme
   .replaceAll("https://github.com/user-attachments/assets/cc929974-96b8-4166-b81d-008e130b0f24", `${assets}star.gif`)
   .replaceAll('href="./', `href="${github}`)
   .replaceAll("](./", `](${github}`)
-  .replace("## Install once\n", "## Install once\n\nInstall the Hypit CLI (Node.js 22.15 or newer):\n\n```bash\nnpm install -g @hypit/hypit\n```\n\nAdd the Skill to your coding agent:\n");
+  .replace("## Install once\n", `## Install once\n\nInstall the Hypit CLI from this fork (Node.js 22.15 or newer):\n\n\`\`\`bash\nnpm install -g https://github.com/dramaclaw/hypit/releases/download/v${packageManifest.version}/hypit-hypit-${packageManifest.version}.tgz\n\`\`\`\n\nAdd the Skill to your coding agent:\n`);
 
 const stage = await mkdtemp(resolve(tmpdir(), "hypit-npm-"));
 try {

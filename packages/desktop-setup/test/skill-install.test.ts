@@ -13,7 +13,7 @@ import { canRefreshManagedSkill, installManagedSkill, isManagedSkillInstalled, p
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "hypit 技能 space-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home: root, appData: join(root, "Application Support") });
+  const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home: root, appData: join(root, "Application Support") });
   const sourceDirectory = join(root, "source");
   await mkdir(join(sourceDirectory, "references", "环境"), { recursive: true });
   await writeFile(join(sourceDirectory, "SKILL.md"), "# Hypit\n");

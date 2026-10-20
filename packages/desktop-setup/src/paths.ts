@@ -26,7 +26,10 @@ export type DesktopPathOptions = {
 
 /** Must match provider-whisperx-local's fixed default Program identity and loopback URL. */
 export function whisperXProgramPaths(paths: Pick<DesktopPaths, "hostState">) {
-  const path = win32.isAbsolute(paths.hostState) && !posix.isAbsolute(paths.hostState) ? win32 : posix;
+  // Select by the path's spelling rather than `win32.isAbsolute`: on POSIX,
+  // the Win32 helper also considers `/tmp` absolute, which would turn a
+  // cross-target fixture into literal backslash-named files.
+  const path = /^(?:[A-Za-z]:[\\/]|\\\\)/u.test(paths.hostState) ? win32 : posix;
   const home = path.join(paths.hostState, "programs", "whisperx-whisperx.local-127.0.0.1%3A8765");
   return { home, state: path.join(paths.hostState, "desktop", "whisperx-state.json"),
     installationLog: path.join(home, "install.log"), serviceLog: path.join(home, "program.log") };

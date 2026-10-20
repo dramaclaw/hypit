@@ -59,8 +59,12 @@ Hypit gives AI agents (Claude Code, Codex...) a language and system to create vi
 ## Install once
 
 ```bash
-npx skills add hypit-ai/hypit -g
+npx skills add dramaclaw/hypit -g
 ```
+
+The Piko plugin uses the same fork and installs its pinned Runtime from the matching GitHub
+Release asset. It never resolves the official `hypit-ai/hypit` package; the fork's
+`@dramaclaw/provider-newapi` is part of the Runtime source.
 
 This installs the Skill. On first use, your agent checks for the Hypit executable and helps prepare
 it if needed. Your video project can live anywhere.

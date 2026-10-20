@@ -51,10 +51,10 @@ console.log(control.invalid ? 'SECRET invalid JSON' : JSON.stringify({ format: '
 if (control.nonzero === action) process.exitCode = 1;
 `;
 
-async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = "darwin") {
+async function fixture(t: TestContext, control: Record<string, unknown> = {}, platform: "darwin" | "win32" = (process.platform === "win32" ? "win32" : "darwin")) {
   const root = await mkdtemp(join(tmpdir(), "hypit-whisperx-program-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const paths = desktopPaths({ platform: "darwin", home: root, appData: root });
+  const paths = desktopPaths({ platform: process.platform === "win32" ? "win32" : "darwin", home: root, appData: root });
   const bundledBin = join(root, "resources", "bin");
   const bundledUv = join(bundledBin, platform === "darwin" ? "uv" : "uv.exe");
   const cliEntry = join(root, "resources", "hypit.mjs");
@@ -101,7 +101,8 @@ test("two candidate passes use the bundled CLI and publish only after a ready st
     assert.equal(call.published, undefined);
     assert.deepEqual(call.args, [f.cliEntry, "programs", call.args[2], "--runtime", call.profilePath, "--endpoint", "whisperx.local", "--json"]);
     assert.equal(call.env.PATH?.split(delimiter)[0], dirname(f.bundledUv));
-    assert.equal(call.env.PATH, `${f.bundledBin}${delimiter}/inherited/bin`);
+    const separator = f.platform === "win32" ? ";" : ":";
+    assert.equal(call.env.PATH, `${f.bundledBin}${separator}/inherited/bin`);
     assert.equal(call.env.UV, undefined);
     assert.equal(call.env.NODE_OPTIONS, undefined);
     assert.equal(call.env.API_KEY, undefined);
@@ -290,7 +291,7 @@ test("a standalone failed status probe does not inherit a completed installation
 });
 
 for (const invalid of ["relative", "outside", "symlink", "directory", "non-executable"]) {
-  test(`rejects ${invalid} uv without falling back to PATH`, async (t) => {
+  test(`rejects ${invalid} uv without falling back to PATH`, { skip: invalid === "non-executable" && process.platform === "win32" }, async (t) => {
     const f = await fixture(t);
     let bundledUv = f.bundledUv;
     if (invalid === "relative") bundledUv = "bin/uv";
@@ -313,7 +314,7 @@ for (const invalid of ["shell", "hash", "size", "version", "arch", "manifest-has
   if (invalid === "hash") { const bytes = await readFile(f.bundledUv); bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1; await writeFile(f.bundledUv, bytes); }
   if (invalid === "size") await writeFile(f.bundledUv, Buffer.concat([await readFile(f.bundledUv), Buffer.from("x")]));
   if (invalid === "version") manifest.uv.version = "0.0.0";
-  if (invalid === "arch") manifest.arch = "x64";
+  if (invalid === "arch") manifest.arch = f.platform === "darwin" ? "x64" : "arm64";
   if (invalid === "manifest-hash") manifest.uv.sha256 = "0".repeat(64);
   await writeFile(path, JSON.stringify(manifest));
   if (invalid === "manifest-symlink") { const target = `${path}.outside`; await copyFile(path, target); await rm(path); await symlink(target, path); }
@@ -332,12 +333,16 @@ test("a wrong uv executable version fails before the CLI", async t => {
 
 test("native architecture is validated even if the fixture digest matches", async t => {
   const f = await fixture(t);
-  const bytes = await readFile(f.bundledUv); bytes.writeUInt32LE(0x01000007, 4);
+  const bytes = await readFile(f.bundledUv);
+  if (f.platform === "darwin") bytes.writeUInt32LE(0x01000007, 4);
+  else bytes.writeUInt16LE(0xaa64, bytes.readUInt32LE(0x3c) + 4);
   await writeFile(f.bundledUv, bytes);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  uvLock.targets["darwin-arm64"].sha256 = sha256;
+  const target = f.platform === "darwin" ? "darwin-arm64" : "win32-x64";
+  const file = f.platform === "darwin" ? "bin/uv" : "bin/uv.exe";
+  uvLock.targets[target].sha256 = sha256;
   const path = join(dirname(f.bundledBin), "resource-manifest.json");
-  const manifest = JSON.parse(await readFile(path, "utf8")); manifest.uv.sha256 = sha256; manifest.files["bin/uv"].sha256 = sha256;
+  const manifest = JSON.parse(await readFile(path, "utf8")); manifest.uv.sha256 = sha256; manifest.files[file].sha256 = sha256;
   await writeFile(path, JSON.stringify(manifest));
   let probes = 0;
   t.mock.method(childProcess, "execFile", ((...args: any[]) => { probes++; args.at(-1)(null, "uv 0.12.20", ""); }) as typeof childProcess.execFile);
@@ -361,7 +366,7 @@ test("Windows uv enforces the PE x64 lock and rejects rehashed non-PE bytes befo
   assert.equal((await f.calls()).length, before);
 });
 
-test("bundled uv is checked again before each mutating subprocess", async (t) => {
+test("bundled uv is checked again before each mutating subprocess", { skip: process.platform === "win32" }, async (t) => {
   const f = await fixture(t);
   const result = await f.service.installAndStart(stage => { if (stage === "preparing-en") chmodSync(f.bundledUv, 0o644); });
   assert.equal(result.code, "WHISPERX_BUNDLED_UV_INVALID");
